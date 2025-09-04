@@ -1,0 +1,167 @@
+name: Form Finder
+
+on:
+  repository_dispatch:
+    types: [form_finder_task]
+
+jobs:
+  form-finder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Cache Python dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install setproctitle  # マルチプロセス名設定用
+        
+    - name: Install Playwright browsers and dependencies
+      run: |
+        playwright install chromium
+        sudo apt-get update || true
+        sudo apt-get install -y --no-install-recommends libglib2.0-0 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libasound2t64 bc || true
+
+
+    - name: Run Form Finder (Multi-Process Processing)
+      id: worker
+      run: |
+        echo "Starting multi-process form finder worker..."
+        echo "Available CPU cores: $(nproc)"
+        echo "Available memory: $(free -h)"
+        python src/form_finder_worker.py
+      env:
+        PYTHONPATH: ${{ github.workspace }}/src
+        TZ: Asia/Tokyo
+        # マルチプロセス環境設定
+        GITHUB_ACTIONS: true
+        # プロセス管理最適化
+        PYTHONFAULTHANDLER: 1
+        PYTHONUNBUFFERED: 1
+
+    - name: Upload processing results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: form-finder-results-${{ github.event.client_payload.batch_id }}
+        path: |
+          artifacts/form_finder_results.json
+          artifacts/form_finder_error_report.json
+
+    - name: Set job outputs
+      id: job_outputs
+      if: always()
+      run: |
+        if [ -f "artifacts/form_finder_results.json" ]; then
+          echo "results_available=true" >> $GITHUB_OUTPUT
+          # 技術的成功・失敗
+          SUCCESSFUL=$(jq -r '.total_successful // 0' artifacts/form_finder_results.json)
+          FAILED=$(jq -r '.total_failed // 0' artifacts/form_finder_results.json)
+          # ビジネス成功・失敗（フォーム発見・未発見）
+          BUSINESS_SUCCESSFUL=$(jq -r '.business_successful // 0' artifacts/form_finder_results.json)
+          BUSINESS_FAILED=$(jq -r '.business_failed // 0' artifacts/form_finder_results.json)
+          FORMS_FOUND=$(jq -r '.total_forms_found // 0' artifacts/form_finder_results.json)
+          DISCOVERY_RATE=$(jq -r '.form_discovery_rate // 0' artifacts/form_finder_results.json)
+          EXECUTION_TIME=$(jq -r '.execution_time // 0' artifacts/form_finder_results.json)
+          
+          echo "successful_count=$SUCCESSFUL" >> $GITHUB_OUTPUT
+          echo "failed_count=$FAILED" >> $GITHUB_OUTPUT
+          echo "business_successful_count=$BUSINESS_SUCCESSFUL" >> $GITHUB_OUTPUT
+          echo "business_failed_count=$BUSINESS_FAILED" >> $GITHUB_OUTPUT
+          echo "forms_found=$FORMS_FOUND" >> $GITHUB_OUTPUT
+          echo "discovery_rate=$DISCOVERY_RATE" >> $GITHUB_OUTPUT
+          echo "execution_time=$EXECUTION_TIME" >> $GITHUB_OUTPUT
+        else
+          echo "results_available=false" >> $GITHUB_OUTPUT
+          echo "successful_count=0" >> $GITHUB_OUTPUT
+          echo "failed_count=0" >> $GITHUB_OUTPUT
+          echo "business_successful_count=0" >> $GITHUB_OUTPUT
+          echo "business_failed_count=0" >> $GITHUB_OUTPUT
+          echo "forms_found=0" >> $GITHUB_OUTPUT
+          echo "discovery_rate=0" >> $GITHUB_OUTPUT
+          echo "execution_time=0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Save Results to Supabase
+      if: always()
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      run: |
+        if [ -f "artifacts/form_finder_results.json" ]; then
+          # ワーカーの実際の実行結果に基づいてステータスを判定
+          STATUS="success"
+          if [ "${{ steps.worker.outcome }}" != "success" ]; then
+            STATUS="failure"
+          fi
+          python src/form_finder_supabase_writer.py \
+            --batch-id "${{ github.event.client_payload.batch_id }}" \
+            --results-file "artifacts/form_finder_results.json" \
+            --status "$STATUS"
+        else
+          echo "処理結果ファイルが見つかりません。Supabase書き込みをスキップします。"
+        fi
+
+    - name: Summary
+      if: always()
+      run: |
+        echo "## Form Finder Results (Multi-Process)" >> $GITHUB_STEP_SUMMARY
+        echo "### システム情報" >> $GITHUB_STEP_SUMMARY
+        echo "- 処理方式: マルチプロセス並列処理" >> $GITHUB_STEP_SUMMARY
+        echo "- CPU コア数: $(nproc)" >> $GITHUB_STEP_SUMMARY
+        echo "- 利用可能メモリ: $(free -h | grep Mem | awk '{print $2}')" >> $GITHUB_STEP_SUMMARY
+        echo "### 技術的処理結果" >> $GITHUB_STEP_SUMMARY
+        echo "- 技術的成功: ${{ steps.job_outputs.outputs.successful_count || 0 }}件" >> $GITHUB_STEP_SUMMARY
+        echo "- 技術的失敗: ${{ steps.job_outputs.outputs.failed_count || 0 }}件" >> $GITHUB_STEP_SUMMARY
+        echo "- 処理時間: ${{ steps.job_outputs.outputs.execution_time || 0 }}s" >> $GITHUB_STEP_SUMMARY
+        echo "### ビジネス成果" >> $GITHUB_STEP_SUMMARY
+        echo "- 📋 フォーム発見成功: ${{ steps.job_outputs.outputs.business_successful_count || 0 }}件" >> $GITHUB_STEP_SUMMARY
+        echo "- ❌ フォーム未発見: ${{ steps.job_outputs.outputs.business_failed_count || 0 }}件" >> $GITHUB_STEP_SUMMARY
+        echo "- 🎯 総フォーム発見数: ${{ steps.job_outputs.outputs.forms_found || 0 }}個" >> $GITHUB_STEP_SUMMARY
+        echo "- 📊 フォーム発見率: ${{ steps.job_outputs.outputs.discovery_rate || 0 }}%" >> $GITHUB_STEP_SUMMARY
+        
+        # 設定ファイルから閾値を読み込んでフォーム発見率評価
+        DISCOVERY_RATE=${{ steps.job_outputs.outputs.discovery_rate || 0 }}
+        WARNING_THRESHOLD=$(jq -r '.business_metrics.form_discovery_rate.warning_threshold' config/worker_config.json 2>/dev/null || echo "20.0")
+        GOOD_THRESHOLD=$(jq -r '.business_metrics.form_discovery_rate.good_threshold' config/worker_config.json 2>/dev/null || echo "50.0")
+        EXCELLENT_THRESHOLD=$(jq -r '.business_metrics.form_discovery_rate.excellent_threshold' config/worker_config.json 2>/dev/null || echo "75.0")
+        
+        # 数値検証とデフォルト値設定
+        DISCOVERY_RATE=${DISCOVERY_RATE:-0}
+        WARNING_THRESHOLD=${WARNING_THRESHOLD:-20.0}
+        GOOD_THRESHOLD=${GOOD_THRESHOLD:-50.0}
+        EXCELLENT_THRESHOLD=${EXCELLENT_THRESHOLD:-75.0}
+        
+        # 安全な浮動小数点比較
+        if (( $(echo "$DISCOVERY_RATE < $WARNING_THRESHOLD" | bc -l 2>/dev/null || echo 0) )); then
+          echo "### ⚠️ 警告" >> $GITHUB_STEP_SUMMARY
+          echo "フォーム発見率が警告レベルです（$DISCOVERY_RATE% < $WARNING_THRESHOLD%）。" >> $GITHUB_STEP_SUMMARY
+          echo "対象サイトの品質やフォーム探索ロジックの見直しを検討してください。" >> $GITHUB_STEP_SUMMARY
+        elif (( $(echo "$DISCOVERY_RATE >= $EXCELLENT_THRESHOLD" | bc -l 2>/dev/null || echo 0) )); then
+          echo "### 🎉 優秀" >> $GITHUB_STEP_SUMMARY
+          echo "フォーム発見率が優秀です（$DISCOVERY_RATE% >= $EXCELLENT_THRESHOLD%）！" >> $GITHUB_STEP_SUMMARY
+        elif (( $(echo "$DISCOVERY_RATE >= $GOOD_THRESHOLD" | bc -l 2>/dev/null || echo 0) )); then
+          echo "### ✅ 良好" >> $GITHUB_STEP_SUMMARY
+          echo "フォーム発見率が良好です（$DISCOVERY_RATE% >= $GOOD_THRESHOLD%）。" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "### システム状態" >> $GITHUB_STEP_SUMMARY
+        echo "- ワークフロー: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Supabase更新: ✅" >> $GITHUB_STEP_SUMMARY
+        echo "- GAS API通知: ✅" >> $GITHUB_STEP_SUMMARY

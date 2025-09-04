@@ -1,0 +1,77 @@
+---
+name: Field Mapping Improvement
+
+'on':
+  repository_dispatch:
+    types: [field_mapping_improvement_task]
+
+jobs:
+  field-mapping-improvement:
+    runs-on: self-hosted
+    timeout-minutes: 55
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # PR作成に備えて履歴参照可能に
+
+      - name: Mask GitHub token early
+        run: echo "::add-mask::${{ github.token }}"
+
+      - name: Check toolchain on self-hosted runner
+        run: |
+          set -Eeuo pipefail
+          echo "Python: $(python --version 2>/dev/null || echo 'not found')"
+          echo "Pip: $(pip --version 2>/dev/null || echo 'not found')"
+          echo "Playwright: $(playwright --version 2>/dev/null || echo 'not found')"
+          echo "Codex CLI: $(codex --version 2>/dev/null || echo 'not found')"
+          if [ -f "$HOME/.codex/prompts/fmi.md" ]; then
+            echo "Prompt file: $HOME/.codex/prompts/fmi.md (found)"
+          else
+            echo "Prompt file missing: $HOME/.codex/prompts/fmi.md" >&2
+          fi
+
+      - name: Run Codex end-to-end (test→fix→retest→PR)
+        id: codex-e2e
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PLAYWRIGHT_HEADLESS: '1'
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          if ! command -v codex >/dev/null 2>&1; then
+            echo "Codex CLI is not installed on the self-hosted runner" >&2
+            echo "Please install Codex CLI and ensure it is on PATH." >&2
+            exit 1
+          fi
+          
+          # 1セッションで実行（テスト→修正→再テスト→PR作成）。
+          codex exec "~/.codex/prompts/fmi.md に従って作業を実行してください。達成条件を完全に満たすまで作業を絶対にやめないこと。" | tee codex_e2e.log
+          
+          # Codexが出力した PR_URL をサマリにも載せる
+          PR_LINE=$(grep -E "^PR_URL:" codex_e2e.log | tail -n1 || true)
+          if [ -n "$PR_LINE" ]; then
+            PR_URL=$(echo "$PR_LINE" | sed 's/^PR_URL://')
+            echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Field Mapping Test Summary";
+            echo "- Test completed: $(date -u)";
+            if [ -n "${{ steps.codex-e2e.outputs.pr_url }}" ]; then
+              echo "- PR: ${{ steps.codex-e2e.outputs.pr_url }}";
+            else
+              echo "- PR: (see Codex step logs)";
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

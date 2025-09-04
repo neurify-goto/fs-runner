@@ -1,0 +1,114 @@
+name: Fetch Detail
+
+on:
+  repository_dispatch:
+    types: [fetch_detail_task]
+
+jobs:
+  detail-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Cache Python dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Install Playwright browsers
+      run: |
+        playwright install chromium
+        sudo apt-get update || true
+        sudo apt-get install -y --no-install-recommends libglib2.0-0 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libasound2t64 || true
+
+
+    - name: Run Detail Worker
+      id: worker
+      run: |
+        python src/fetch_detail_worker.py
+      env:
+        PYTHONPATH: ${{ github.workspace }}/src
+
+    - name: Upload processing results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: detail-results-${{ github.event.client_payload.batch_id }}
+        path: |
+          artifacts/processing_results.json
+          artifacts/error_report.json
+
+    - name: Set job outputs
+      id: job_outputs
+      if: always()
+      run: |
+        if [ -f "artifacts/processing_results.json" ]; then
+          echo "results_available=true" >> $GITHUB_OUTPUT
+          SUCCESSFUL=$(jq -r '.total_successful // 0' artifacts/processing_results.json)
+          FAILED=$(jq -r '.total_failed // 0' artifacts/processing_results.json)
+          EXECUTION_TIME=$(jq -r '.execution_time // 0' artifacts/processing_results.json)
+          echo "successful_count=$SUCCESSFUL" >> $GITHUB_OUTPUT
+          echo "failed_count=$FAILED" >> $GITHUB_OUTPUT
+          echo "execution_time=$EXECUTION_TIME" >> $GITHUB_OUTPUT
+        else
+          echo "results_available=false" >> $GITHUB_OUTPUT
+          echo "successful_count=0" >> $GITHUB_OUTPUT
+          echo "failed_count=0" >> $GITHUB_OUTPUT
+          echo "execution_time=0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Save Results to Supabase
+      if: always()
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      run: |
+        if [ -f "artifacts/processing_results.json" ]; then
+          python src/fetch_detail_supabase_writer.py \
+            --batch-id "${{ github.event.client_payload.batch_id }}" \
+            --results-file "artifacts/processing_results.json" \
+            --status "${{ job.status == 'success' && 'success' || 'failure' }}"
+        else
+          echo "処理結果ファイルが見つかりません。Supabase書き込みをスキップします。"
+        fi
+
+    - name: Summary
+      if: always()
+      run: |
+        echo "## Detail Worker Results" >> $GITHUB_STEP_SUMMARY
+        echo "- Successful: ${{ steps.job_outputs.outputs.successful_count || 0 }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Failed: ${{ steps.job_outputs.outputs.failed_count || 0 }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Execution Time: ${{ steps.job_outputs.outputs.execution_time || 0 }}s" >> $GITHUB_STEP_SUMMARY
+        echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        if [ -f "artifacts/processing_results.json" ]; then
+          TERMINATED_EARLY=$(jq -r '.terminated_early // false' artifacts/processing_results.json)
+          if [ "$TERMINATED_EARLY" = "true" ]; then
+            TERMINATION_REASON=$(jq -r '.termination_reason // "不明"' artifacts/processing_results.json)
+            REMAINING_TASKS=$(jq -r '.remaining_tasks // 0' artifacts/processing_results.json)
+            CONSECUTIVE_FAILURES=$(jq -r '.consecutive_failures // 0' artifacts/processing_results.json)
+            echo "- ⚠️ 早期終了: $TERMINATION_REASON" >> $GITHUB_STEP_SUMMARY
+            echo "- 未処理タスク: $REMAINING_TASKS 件" >> $GITHUB_STEP_SUMMARY
+            echo "- 連続失敗数: $CONSECUTIVE_FAILURES 件" >> $GITHUB_STEP_SUMMARY
+            FATAL_ERROR_RATIO=$(jq -r '.fatal_error_ratio // 0' artifacts/processing_results.json)
+            echo "- 致命的エラー率: $(echo "$FATAL_ERROR_RATIO" | awk '{printf "%.1f%%", $1*100}')" >> $GITHUB_STEP_SUMMARY
+            echo "- 🔧 自動クリーンアップ: 未処理レコードのキューリセット実行済み" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+        echo "- Supabase Updated: ✅" >> $GITHUB_STEP_SUMMARY
+        echo "- GAS API Called: ✅" >> $GITHUB_STEP_SUMMARY

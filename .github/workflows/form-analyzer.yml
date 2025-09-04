@@ -1,0 +1,113 @@
+name: Form Analyzer
+
+on:
+  repository_dispatch:
+    types: [form_analyzer_task]
+
+jobs:
+  form-analyzer-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Cache Python dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Install Playwright browsers
+      run: |
+        playwright install chromium
+        sudo apt-get update || true
+        sudo apt-get install -y --no-install-recommends libglib2.0-0 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libasound2t64 || true
+
+
+    - name: Run Form Analyzer Worker
+      id: worker
+      run: |
+        cd src
+        python -m form_analyzer_worker
+      env:
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    - name: Upload processing results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: form-analyzer-results-${{ github.event.client_payload.batch_id }}
+        path: |
+          artifacts/processing_results.json
+          artifacts/error_report.json
+
+    - name: Set job outputs
+      id: job_outputs
+      if: always()
+      run: |
+        if [ -f "artifacts/processing_results.json" ]; then
+          echo "results_available=true" >> $GITHUB_OUTPUT
+          SUCCESSFUL=$(jq -r '.total_successful // 0' artifacts/processing_results.json)
+          FAILED=$(jq -r '.total_failed // 0' artifacts/processing_results.json)
+          PROHIBITED=$(jq -r '.total_prohibited // 0' artifacts/processing_results.json)
+          EXECUTION_TIME=$(jq -r '.execution_time // 0' artifacts/processing_results.json)
+          echo "successful_count=$SUCCESSFUL" >> $GITHUB_OUTPUT
+          echo "failed_count=$FAILED" >> $GITHUB_OUTPUT
+          echo "prohibited_count=$PROHIBITED" >> $GITHUB_OUTPUT
+          echo "execution_time=$EXECUTION_TIME" >> $GITHUB_OUTPUT
+        else
+          echo "results_available=false" >> $GITHUB_OUTPUT
+          echo "successful_count=0" >> $GITHUB_OUTPUT
+          echo "failed_count=0" >> $GITHUB_OUTPUT
+          echo "prohibited_count=0" >> $GITHUB_OUTPUT
+          echo "execution_time=0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Save Results to Supabase
+      if: always()
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      run: |
+        if [ -f "artifacts/processing_results.json" ]; then
+          cd src
+          python form_analyzer_supabase_writer.py \
+            --batch-id "${{ github.event.client_payload.batch_id }}" \
+            --results-file "../artifacts/processing_results.json" \
+            --status "${{ job.status == 'success' && 'success' || 'failure' }}"
+        else
+          echo "処理結果ファイルが見つかりません。Supabase書き込みをスキップします。"
+        fi
+
+    - name: Summary
+      if: always()
+      run: |
+        echo "## Form Analyzer Worker Results" >> $GITHUB_STEP_SUMMARY
+        echo "- Batch ID: ${{ github.event.client_payload.batch_id }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Successful: ${{ steps.job_outputs.outputs.successful_count || 0 }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Failed: ${{ steps.job_outputs.outputs.failed_count || 0 }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Prohibited: ${{ steps.job_outputs.outputs.prohibited_count || 0 }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Execution Time: ${{ steps.job_outputs.outputs.execution_time || 0 }}s" >> $GITHUB_STEP_SUMMARY
+        echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Supabase Updated: ✅" >> $GITHUB_STEP_SUMMARY
+        if [ -f "artifacts/processing_results.json" ]; then
+          GROQ_BATCH_SUCCESS=$(jq -r '.groq_batch_result.success // false' artifacts/processing_results.json)
+          if [ "$GROQ_BATCH_SUCCESS" = "true" ]; then
+            BATCH_ID=$(jq -r '.groq_batch_result.batch_id // "N/A"' artifacts/processing_results.json)
+            echo "- Groq Batch ID: $BATCH_ID" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
