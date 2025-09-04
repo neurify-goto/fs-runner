@@ -1,0 +1,1480 @@
+"""
+要素スコアリングシステム
+
+HTMLフォーム要素の6属性による重み付けスコアリング機能
+参考: ListersForm復元システムのSYSTEM.md 1.2節
+"""
+
+import re
+import logging
+from typing import Dict, List, Any, Optional, Tuple
+from playwright.async_api import Locator
+
+logger = logging.getLogger(__name__)
+
+
+class ElementScorer:
+    """HTML要素のスコア計算クラス"""
+    
+    # 単純化された配点表（基本属性マッチング重視）
+    SCORE_WEIGHTS = {
+        'type': 100,        # type属性マッチ（最高優先度）
+        'dt_context': 80,   # DTラベル・コンテキストマッチ（第2優先）
+        'name': 60,         # name属性マッチ（第3優先）
+        'id': 60,           # id属性マッチ（第3優先）
+        'tag': 50,          # tagName マッチ
+        'placeholder': 40,  # placeholder属性マッチ
+        'class': 30,        # class属性マッチ
+        'japanese_morphology': 25,  # 日本語形態素（placeholder等の語彙一致の加点）
+        'visibility_penalty': -200,  # 非表示要素ペナルティ（強化）
+    }
+
+    # 位置ベース（position_* / nearby / parent_element 等）のコンテキストのみで
+    # 過剰に昇格させないための得点上限（将来拡張可能）
+    POSITION_BASED_SCORE_LIMITS = {
+        '郵便番号': 40,
+        # '電話番号': 35,  # 拡張時の例
+    }
+
+    # 個人名ではない「〇〇名」を一括で検出するための正規表現
+    NON_PERSONAL_NAME_PATTERN = re.compile(
+        '('
+        '会社名|法人名|団体名|組織名|部署名|学校名|店舗名|病院名|施設名|'
+        '建物名|マンション名|ビル名|邸名|棟名|館名|校名|園名|'
+        '商品名|品名|製品名|サービス名|プロジェクト名|'
+        '件名|題名|書名'
+        ')',
+        re.IGNORECASE,
+    )
+
+    # 誤検出を招きやすい曖昧トークン（語境界必須）
+    AMBIGUOUS_TOKENS = {"firm", "corp", "org"}
+    
+    def __init__(self, context_extractor=None, shared_cache: Optional[Dict[str, Dict[str, Any]]] = None):
+        """
+        スコア計算器の初期化
+        
+        Args:
+            context_extractor: 共有ContextTextExtractorインスタンス（パフォーマンス最適化）
+        """
+        self._context_extractor = context_extractor
+        # RuleBasedAnalyzer 由来の共有要素キャッシュ（str(locator) -> 属性辞書）
+        self._shared_cache = shared_cache
+        # 日本語形態素解析用の基本パターン（簡略版）
+        # フィールド名ベースの語彙集合（placeholder等の曖昧表現を拾うための軽量辞書）
+        # 汎用性重視: 日本の代表的な表記ゆれ・言い換えを幅広くカバー
+        self.japanese_patterns = {
+            '会社名': ['会社', '企業', '法人', '団体', '組織', '社名', '会社名'],
+            'メールアドレス': ['メール', 'メールアドレス', 'mail', 'email', 'e-mail', 'アドレス'],
+            '姓': ['姓', '苗字', '名字', 'せい', 'みょうじ'],
+            '名': ['名', '名前', 'めい'],
+            '電話番号': ['電話', '電話番号', 'tel', 'phone', '携帯', '連絡先'],
+            '住所': ['住所', '所在地', 'じゅうしょ', '都道府県', '市区町村'],
+            '件名': ['件名', 'タイトル', '表題', '用件'],
+            'お問い合わせ本文': ['お問い合わせ', '問い合わせ', '本文', 'メッセージ', '内容', 'ご相談', 'ご要望', 'ご質問'],
+            # 役職系（Job Title）
+            '役職': ['役職', '職位', 'job title', 'job', 'position', 'role']
+        }
+
+    def _contains_token_with_boundary(self, text: str, token: str) -> bool:
+        """語境界を考慮した包含判定（日本語対応）。
+
+        - まず拡張境界（半角/全角スペース、括弧、句読点、中点、全角スラッシュ等）での境界一致を試みる。
+        - それでも一致しない場合、トークンが日本語(CJK: 漢字・ひらがな・カタカナ)を含むなら、
+          日本語では語境界が空白で区切られない前提から安全側の部分一致を許容する。
+          ただし、偽陽性リスクの高い『名』は除外し、単文字一般トークンも除外する。
+          例外的に『姓』は『姓名』ケース対応のため許容する。
+        """
+        try:
+            if not text or not token:
+                return False
+
+            # 1) 拡張境界一致（半角/全角の各種記号を境界として扱う）
+            #   - 半角: 空白, _ - . / \
+            #   - 全角: 空白、各種括弧、句読点、中点、コロン/セミコロン、全角スラッシュ など
+            boundary_chars = (
+                r"_\-\./\\\s"  # 半角
+                + r"\u3000（）［］｛｝「」『』【】。、・：；！？”“’‘？／＼＜＞《》〈〉【】『』—－ー〜･・，．｡"  # 全角
+            )
+            left_boundary = rf"(^|[{boundary_chars}])"
+            right_boundary = rf"($|[{boundary_chars}])"
+            pattern = left_boundary + re.escape(token) + right_boundary
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                return True
+
+            # 2) 日本語(CJK)を含むトークンの緩和マッチ（安全側）
+            def has_cjk(s: str) -> bool:
+                return re.search(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]", s) is not None
+
+            t = token
+            if has_cjk(t):
+                # 単文字一般は広すぎて危険だが、『姓』だけは許容（『姓名』を拾うため）
+                if len(t) == 1 and t != '姓':
+                    return False
+                # 『名』は別途セマンティック検証で扱うため、ここでは許容しない
+                if t == '名':
+                    return False
+                return t in text
+
+            return False
+        except Exception as e:
+            logger.debug(f"boundary match failed: {e}")
+            return token.lower() in (text or '').lower()
+    
+    async def calculate_element_score(self, element: Locator, field_patterns: Dict[str, Any], 
+                                    field_name: str) -> Tuple[int, Dict[str, Any]]:
+        """
+        要素のスコア計算（詳細情報付き）
+        
+        Args:
+            element: Playwright要素
+            field_patterns: フィールドパターン辞書
+            field_name: フィールド名
+            
+        Returns:
+            tuple: (合計スコア, スコア詳細情報)
+        """
+        score_details = {
+            'total_score': 0,
+            'score_breakdown': {},
+            'matched_patterns': [],
+            'element_info': {},
+            'penalties': []
+        }
+        
+        try:
+            # 要素の基本情報を取得（並列グループ情報は今回未使用）
+            element_info = await self._get_element_info(element)
+            score_details['element_info'] = element_info
+            
+            # カナフィールドの特別処理
+            element_name = (element_info.get('name', '') or '').lower()
+            element_id = (element_info.get('id', '') or '').lower()
+            element_class = (element_info.get('class', '') or '').lower()
+            has_kana_in_element = 'kana' in element_name or 'kana' in element_id or 'kana' in element_class
+            
+            kana_indicators = field_patterns.get('kana_indicator', [])
+            is_kana_field = bool(kana_indicators)
+            
+            # ケース1: 要素がカナを含み、フィールドが非カナ → 除外
+            if has_kana_in_element and not is_kana_field:
+                logger.debug(f"Element with 'kana' excluded for non-kana field {field_name}: name='{element_name}'")
+                score_details['total_score'] = -999
+                score_details['excluded'] = True
+                score_details['exclusion_reason'] = 'kana_element_non_kana_field'
+                return -999, score_details
+            
+            # ケース2: フィールドがカナで、要素がカナを含まない → 除外
+            if is_kana_field and not has_kana_in_element:
+                # ただし、コンテキストにカナ関連の言葉があるかは後で判定するため、ここでは強制除外しない
+                pass
+            
+            # 除外パターンのチェック（最初に実行して早期除外）
+            if self._is_excluded_element(element_info, field_patterns):
+                logger.info(f"Element excluded due to exclude_patterns for field {field_name}: "
+                           f"name='{element_info.get('name', '')}', id='{element_info.get('id', '')}', "
+                           f"class='{element_info.get('class', '')}', placeholder='{element_info.get('placeholder', '')}'")
+                # 除外された要素は完全無効化（-999でマーク）
+                score_details['total_score'] = -999
+                score_details['excluded'] = True
+                score_details['exclusion_reason'] = 'exclude_patterns_match'
+                return -999, score_details
+            
+            # 各属性のスコア計算
+            total_score = 0
+            
+            # 1. type属性マッチ（最高優先度）
+            type_score, type_matches = self._calculate_type_score(
+                element_info.get('type', ''), field_patterns
+            )
+            total_score += type_score
+            score_details['score_breakdown']['type'] = type_score
+            if type_matches:
+                score_details['matched_patterns'].extend(type_matches)
+            
+            # 2. tag名マッチ
+            tag_score, tag_matches = self._calculate_tag_score(
+                element_info.get('tag_name', ''), field_patterns
+            )
+            total_score += tag_score
+            score_details['score_breakdown']['tag'] = tag_score
+            if tag_matches:
+                score_details['matched_patterns'].extend(tag_matches)
+            
+            # 3. name属性マッチ
+            name_score, name_matches = self._calculate_name_score(
+                element_info.get('name', ''), field_patterns
+            )
+            total_score += name_score
+            score_details['score_breakdown']['name'] = name_score
+            if name_matches:
+                score_details['matched_patterns'].extend(name_matches)
+            
+            # 4. id属性マッチ
+            id_score, id_matches = self._calculate_id_score(
+                element_info.get('id', ''), field_patterns
+            )
+            total_score += id_score
+            score_details['score_breakdown']['id'] = id_score
+            if id_matches:
+                score_details['matched_patterns'].extend(id_matches)
+            
+            # 5. placeholder属性マッチ
+            placeholder_score, placeholder_matches = self._calculate_placeholder_score(
+                element_info.get('placeholder', ''), field_patterns, field_name
+            )
+            total_score += placeholder_score
+            score_details['score_breakdown']['placeholder'] = placeholder_score
+            if placeholder_matches:
+                score_details['matched_patterns'].extend(placeholder_matches)
+            
+            # 6. class属性マッチ
+            class_score, class_matches = self._calculate_class_score(
+                element_info.get('class', ''), field_patterns
+            )
+            total_score += class_score
+            score_details['score_breakdown']['class'] = class_score
+            if class_matches:
+                score_details['matched_patterns'].extend(class_matches)
+            
+            # 6.5. コンテキストマッチ（DTラベル対応）
+            context_score, context_matches = await self._calculate_context_score(
+                element, field_patterns, field_name
+            )
+            
+            # Important修正3: コンテキストテキスト優先のメタデータ調整
+            # 表示テキストが存在する場合、メタデータ属性の重要度を相対的に下げる
+            if context_score >= 40:  # 有効なコンテキストテキストが存在する場合
+                metadata_reduction_factor = 0.7  # メタデータ属性を30%減点
+                
+                # type, name, id属性のスコアを調整
+                if type_score > 0:
+                    adjusted_type = int(type_score * metadata_reduction_factor)
+                    adjustment = adjusted_type - type_score
+                    total_score += adjustment
+                    score_details['score_breakdown']['type_adjustment'] = adjustment
+                    logger.debug(f"Type score adjusted for context priority: {type_score} -> {adjusted_type}")
+                
+                if name_score > 0:
+                    adjusted_name = int(name_score * metadata_reduction_factor)
+                    adjustment = adjusted_name - name_score
+                    total_score += adjustment
+                    score_details['score_breakdown']['name_adjustment'] = adjustment
+                
+                if id_score > 0:
+                    adjusted_id = int(id_score * metadata_reduction_factor)
+                    adjustment = adjusted_id - id_score
+                    total_score += adjustment
+                    score_details['score_breakdown']['id_adjustment'] = adjustment
+                
+                logger.debug(f"Metadata scores adjusted for context priority in {field_name}")
+            
+            total_score += context_score
+            score_details['score_breakdown']['context'] = context_score
+            if context_matches:
+                score_details['matched_patterns'].extend(context_matches)
+            
+            # コンテキスト含む除外チェック（コンテキスト計算後に実行）
+            if await self._is_excluded_element_with_context(element_info, element, field_patterns):
+                logger.info(f"Element excluded due to context exclude_patterns for field {field_name}: "
+                           f"name='{element_info.get('name', '')}', id='{element_info.get('id', '')}', "
+                           f"class='{element_info.get('class', '')}', placeholder='{element_info.get('placeholder', '')}'")
+                # 除外された要素は完全無効化（-999でマーク）
+                score_details['total_score'] = -999
+                score_details['excluded'] = True
+                score_details['exclusion_reason'] = 'context_exclude_patterns_match'
+                return -999, score_details
+            
+            # 7. 必須判定はスコアに含めない（分離済み）
+            score_details['score_breakdown']['bonus'] = 0
+
+            # 7.5 フィールド固有の軽微な優遇: お問い合わせ本文は textarea を優先
+            try:
+                if field_name == 'お問い合わせ本文' and (element_info.get('tag_name','').lower() == 'textarea'):
+                    total_score += 20
+                    score_details['score_breakdown']['textarea_bonus'] = 20
+            except Exception:
+                pass
+            
+            # 8. ペナルティ計算（単純化）
+            penalty_score, penalties = await self._calculate_penalties(element, element_info)
+            total_score += penalty_score  # penalty_scoreは負数
+            score_details['score_breakdown']['penalty'] = penalty_score
+            score_details['penalties'] = penalties
+
+            # 8.5 汎用text単独一致の減点（name/id/placeholder/コンテキストが全て0の場合）
+            try:
+                if (element_info.get('type', '').lower() == 'text' and
+                    score_details['score_breakdown'].get('name', 0) == 0 and
+                    score_details['score_breakdown'].get('id', 0) == 0 and
+                    score_details['score_breakdown'].get('placeholder', 0) == 0 and
+                    score_details['score_breakdown'].get('context', 0) == 0):
+                    # type(text) + tag(input) 程度の弱い一致は強く抑制
+                    total_score -= 40
+                    score_details['penalties'].append('generic_text_without_signals')
+                    score_details['score_breakdown']['penalty_generic_text'] = -40
+            except Exception:
+                pass
+            
+            # フィールド重要度は処理順序にのみ使用（スコアには不干渉）
+            score_details['score_breakdown']['field_weight'] = field_patterns.get('weight', 0)
+            
+            score_details['total_score'] = max(0, total_score)  # 最低0点
+            
+            logger.debug(f"Element score calculated for {field_name}: {score_details['total_score']} "
+                        f"(type:{type_score}, tag:{tag_score}, name:{name_score}, "
+                        f"id:{id_score}, placeholder:{placeholder_score}, class:{class_score})")
+            
+            return score_details['total_score'], score_details
+            
+        except Exception as e:
+            logger.error(f"Error calculating element score for {field_name}: {e}")
+            return 0, score_details
+
+    async def calculate_element_score_quick(self, element: Locator, field_patterns: Dict[str, Any],
+                                            field_name: str) -> int:
+        """軽量スコア計算（キャッシュ優先・軽量ペナルティ・コンテキスト非依存）"""
+        try:
+            # キャッシュ優先の軽量属性取得
+            element_info = await self._get_element_info_quick(element)
+
+            # 属性ベースの除外を先に適用
+            if self._is_excluded_element(element_info, field_patterns):
+                return -999
+
+            total = 0
+            # 基本属性スコア（コンテキスト抜き）
+            s, _ = self._calculate_type_score(element_info.get('type',''), field_patterns); total += s
+            s, _ = self._calculate_tag_score(element_info.get('tag_name',''), field_patterns); total += s
+            s, _ = self._calculate_name_score(element_info.get('name',''), field_patterns); total += s
+            s, _ = self._calculate_id_score(element_info.get('id',''), field_patterns); total += s
+            s, _ = self._calculate_placeholder_score(element_info.get('placeholder',''), field_patterns, field_name); total += s
+            s, _ = self._calculate_class_score(element_info.get('class',''), field_patterns); total += s
+
+            # 必須判定はスコアに含めない（分離済み）
+
+            # 軽量ペナルティ（可視/有効のみ）。ハニーポット等は本採点で実施。
+            if not element_info.get('visible', True):
+                total += self.SCORE_WEIGHTS['visibility_penalty']
+            if not element_info.get('enabled', True):
+                total += self.SCORE_WEIGHTS['visibility_penalty'] // 2
+            if element_info.get('type','').lower() == 'hidden':
+                total += self.SCORE_WEIGHTS['visibility_penalty']
+
+            return max(-999, total)
+
+        except Exception as e:
+            logger.debug(f"Quick score failed for {field_name}: {e}")
+            return 0
+
+    async def _get_element_info_quick(self, element: Locator) -> Dict[str, Any]:
+        """quick用の軽量属性取得。共有キャッシュを最優先で利用。"""
+        key = str(element)
+        cached = None
+        try:
+            cached = self._shared_cache.get(key) if isinstance(self._shared_cache, dict) else None
+        except Exception:
+            cached = None
+
+        if cached:
+            return {
+                'tag_name': (cached.get('tagName') or '').lower(),
+                'type': cached.get('type') or '',
+                'name': cached.get('name') or '',
+                'id': cached.get('id') or '',
+                'class': cached.get('className') or '',
+                'placeholder': cached.get('placeholder') or '',
+                'value': cached.get('value') or '',
+                'required': bool(cached.get('requiredAttr') or (str(cached.get('ariaRequired','')).lower() == 'true')),
+                'visible': bool(cached.get('visible', True)),
+                'enabled': bool(cached.get('enabled', True)),
+                # penalty用追加属性（キャッシュから取得）
+                'style': cached.get('style') or '',
+                'aria_hidden': cached.get('ariaHidden') or '',
+                'tabindex': cached.get('tabindex') or '',
+            }
+
+        # フォールバック: 単発evaluateで必要最小限を取得（penalty用属性も含む）
+        try:
+            bulk = await element.evaluate(
+                """
+                el => ({
+                    tagName: (el.tagName || '').toLowerCase(),
+                    type: (el.getAttribute('type') || ''),
+                    name: (el.getAttribute('name') || ''),
+                    id: (el.getAttribute('id') || ''),
+                    className: (el.getAttribute('class') || ''),
+                    placeholder: (el.getAttribute('placeholder') || ''),
+                    value: (el.getAttribute('value') || ''),
+                    visibleLite: !!(el.offsetParent !== null &&
+                                    el.style.display !== 'none' && el.style.visibility !== 'hidden'),
+                    enabledLite: !el.disabled,
+                    requiredAttr: el.hasAttribute('required'),
+                    ariaRequired: el.getAttribute('aria-required') || '',
+                    // penalty用追加属性
+                    style: el.getAttribute('style') || '',
+                    ariaHidden: el.getAttribute('aria-hidden') || '',
+                    tabindex: el.getAttribute('tabindex') || ''
+                })
+                """
+            )
+        except Exception:
+            bulk = {}
+
+        return {
+            'tag_name': (bulk.get('tagName') or '').lower(),
+            'type': (bulk.get('type') or ''),
+            'name': bulk.get('name') or '',
+            'id': bulk.get('id') or '',
+            'class': bulk.get('className') or '',
+            'placeholder': bulk.get('placeholder') or '',
+            'value': bulk.get('value') or '',
+            'required': bool(bulk.get('requiredAttr') or (str(bulk.get('ariaRequired','')).lower() == 'true')),
+            'visible': bool(bulk.get('visibleLite', True)),
+            'enabled': bool(bulk.get('enabledLite', True)),
+            # penalty用追加属性
+            'style': bulk.get('style') or '',
+            'aria_hidden': bulk.get('ariaHidden') or '',
+            'tabindex': bulk.get('tabindex') or '',
+        }
+    
+    async def _get_element_info(self, element: Locator, parallel_groups: List[List] = None) -> Dict[str, Any]:
+        """要素の基本情報を取得（共有キャッシュ優先・必要時のみDOM確認）"""
+        try:
+            try:
+                await element.wait_for(state='attached', timeout=100)
+            except Exception:
+                pass
+
+            # 共有キャッシュを最優先
+            key = str(element)
+            bulk = None
+            try:
+                bulk = self._shared_cache.get(key) if isinstance(self._shared_cache, dict) else None
+            except Exception:
+                bulk = None
+            if bulk is None:
+                # 可能な限り1回のevaluateで主要属性を取得
+                try:
+                    bulk = await element.evaluate(
+                        """
+                        el => ({
+                            tagName: (el.tagName || '').toLowerCase(),
+                            type: (el.getAttribute('type') || ''),
+                            name: (el.getAttribute('name') || ''),
+                            id: (el.getAttribute('id') || ''),
+                            className: (el.getAttribute('class') || ''),
+                            placeholder: (el.getAttribute('placeholder') || ''),
+                            value: (el.getAttribute('value') || ''),
+                            // 簡易可視・有効判定（Playwrightのis_visible/is_enabledは後段で補完）
+                            visibleLite: !!(el.offsetParent !== null &&
+                                            el.style.display !== 'none' && el.style.visibility !== 'hidden'),
+                            enabledLite: !el.disabled,
+                            // 追加: ペナルティ/必須補助
+                            style: (el.getAttribute('style') || ''),
+                            ariaHidden: (el.getAttribute('aria-hidden') || ''),
+                            tabindex: (el.getAttribute('tabindex') || ''),
+                            requiredAttr: el.hasAttribute('required'),
+                            ariaRequired: el.getAttribute('aria-required') || ''
+                        })
+                        """
+                    )
+                except Exception:
+                    bulk = None
+
+            element_info = {
+                'tag_name': (bulk.get('tagName') if bulk else '').lower() if bulk else '',
+                'type': (bulk.get('type') if bulk else '') or '',
+                'name': (bulk.get('name') if bulk else '') or '',
+                'id': (bulk.get('id') if bulk else '') or '',
+                'class': (bulk.get('className') if bulk else '') or '',
+                'placeholder': (bulk.get('placeholder') if bulk else '') or '',
+                'value': (bulk.get('value') if bulk else '') or ''
+            }
+
+            # 必須判定は既存の統合メソッドに委譲（並列グループ情報は今回未使用）
+            element_info['required'] = await self._detect_required_status(element)
+
+            # 可視性・有効状態はPlaywright APIで最終確認
+            try:
+                element_info['visible'] = await element.is_visible()
+                element_info['enabled'] = await element.is_enabled()
+            except Exception:
+                # evaluate結果をフォールバックとして採用
+                element_info['visible'] = bool(bulk.get('visibleLite')) if bulk else False
+                element_info['enabled'] = bool(bulk.get('enabledLite')) if bulk else False
+
+            # ペナルティ補助属性（キャッシュがあれば流用）
+            try:
+                element_info['style'] = bulk.get('style', '') if bulk else ''
+                element_info['aria_hidden'] = bulk.get('ariaHidden', '') if bulk else ''
+                element_info['tabindex'] = bulk.get('tabindex', '') if bulk else ''
+            except Exception:
+                element_info['style'] = ''
+                element_info['aria_hidden'] = ''
+                element_info['tabindex'] = ''
+
+            return element_info
+
+        except Exception as e:
+            logger.warning(f"Failed to get element info: {e}")
+            return {
+                'tag_name': '', 'type': '', 'name': '', 'id': '', 'class': '',
+                'placeholder': '', 'required': False, 'value': '',
+                'visible': False, 'enabled': False
+            }
+    
+    def _calculate_type_score(self, element_type: str, field_patterns: Dict[str, Any]) -> Tuple[int, List[str]]:
+        """type属性によるスコア計算
+
+        - email/tel/url/number 等のセマンティック型は高配点
+        - text は汎用のため低配点（単独一致による誤検出を抑制）
+        """
+        if not element_type:
+            return 0, []
+        
+        pattern_types = field_patterns.get('types', [])
+        matches = []
+        
+        for pattern_type in pattern_types:
+            if pattern_type.lower() == element_type.lower():
+                matches.append(f"type:{pattern_type}")
+                logger.debug(f"Type match found: {pattern_type}")
+                # 汎用textは配点を抑制（type一致だけでの誤検出防止）
+                if element_type.lower() == 'text':
+                    return int(self.SCORE_WEIGHTS['type'] * 0.2), matches  # 20点相当
+                return self.SCORE_WEIGHTS['type'], matches
+        
+        return 0, matches
+    
+    def _calculate_tag_score(self, tag_name: str, field_patterns: Dict[str, Any]) -> Tuple[int, List[str]]:
+        """tag名によるスコア計算（80点）"""
+        if not tag_name:
+            return 0, []
+        
+        pattern_tags = field_patterns.get('tags', [])
+        matches = []
+        
+        for pattern_tag in pattern_tags:
+            if pattern_tag.lower() == tag_name.lower():
+                matches.append(f"tag:{pattern_tag}")
+                logger.debug(f"Tag match found: {pattern_tag}")
+                return self.SCORE_WEIGHTS['tag'], matches
+        
+        return 0, matches
+    
+    def _calculate_name_score(self, element_name: str, field_patterns: Dict[str, Any]) -> Tuple[int, List[str]]:
+        """name属性によるスコア計算（60点）
+
+        パターンが要素nameに含まれる場合のみ加点（逆包含は誤検出の温床のため排除）
+        """
+        if not element_name:
+            return 0, []
+        
+        pattern_names = field_patterns.get('names', [])
+        matches = []
+        element_name_lower = element_name.lower()
+        
+        for pattern_name in pattern_names:
+            pattern_lower = pattern_name.lower()
+            # 短い/曖昧トークンは語境界を要求（<=4 もしくは曖昧トークン）
+            if len(pattern_lower) <= 4 or pattern_lower in self.AMBIGUOUS_TOKENS:
+                if self._contains_token_with_boundary(element_name_lower, pattern_lower):
+                    matches.append(f"name:{pattern_name}")
+                    logger.debug(f"Name token-boundary match: {pattern_name} in {element_name}")
+                    return self.SCORE_WEIGHTS['name'], matches
+            else:
+                if pattern_lower in element_name_lower:
+                    matches.append(f"name:{pattern_name}")
+                    logger.debug(f"Name match found: {pattern_name} in {element_name}")
+                    return self.SCORE_WEIGHTS['name'], matches
+        
+        return 0, matches
+    
+    def _calculate_id_score(self, element_id: str, field_patterns: Dict[str, Any]) -> Tuple[int, List[str]]:
+        """id属性によるスコア計算（60点）
+
+        パターンが要素idに含まれる場合のみ加点（逆包含は排除）
+        """
+        if not element_id:
+            return 0, []
+        
+        pattern_ids = field_patterns.get('ids', [])
+        matches = []
+        element_id_lower = element_id.lower()
+        
+        for pattern_id in pattern_ids:
+            pattern_lower = pattern_id.lower()
+            # 短い/曖昧トークンは語境界を要求
+            if len(pattern_lower) <= 4 or pattern_lower in self.AMBIGUOUS_TOKENS:
+                if self._contains_token_with_boundary(element_id_lower, pattern_lower):
+                    matches.append(f"id:{pattern_id}")
+                    logger.debug(f"ID token-boundary match: {pattern_id} in {element_id}")
+                    return self.SCORE_WEIGHTS['id'], matches
+            else:
+                if pattern_lower in element_id_lower:
+                    matches.append(f"id:{pattern_id}")
+                    logger.debug(f"ID match found: {pattern_id} in {element_id}")
+                    return self.SCORE_WEIGHTS['id'], matches
+        
+        return 0, matches
+    
+    def _calculate_placeholder_score(self, placeholder: str, field_patterns: Dict[str, Any], 
+                                   field_name: str) -> Tuple[int, List[str]]:
+        """placeholder属性によるスコア計算（30点＋日本語形態素解析25点）"""
+        if not placeholder:
+            return 0, []
+        
+        pattern_placeholders = field_patterns.get('placeholders', [])
+        matches = []
+        total_score = 0
+        placeholder_lower = placeholder.lower()
+        
+        # 通常のplaceholderマッチ
+        for pattern_placeholder in pattern_placeholders:
+            pattern_lower = pattern_placeholder.lower()
+            if (pattern_lower in placeholder_lower or 
+                placeholder_lower in pattern_lower):
+                matches.append(f"placeholder:{pattern_placeholder}")
+                total_score += self.SCORE_WEIGHTS['placeholder']
+                logger.debug(f"Placeholder match found: {pattern_placeholder} in {placeholder}")
+                break
+        
+        # 日本語形態素解析ボーナス
+        japanese_score = self._calculate_japanese_morphology_score(placeholder, field_name)
+        if japanese_score > 0:
+            total_score += japanese_score
+            matches.append(f"japanese_morphology:{field_name}")
+        
+        return total_score, matches
+    
+    def _calculate_class_score(self, element_class: str, field_patterns: Dict[str, Any]) -> Tuple[int, List[str]]:
+        """class属性によるスコア計算（20点）"""
+        if not element_class:
+            return 0, []
+        
+        pattern_classes = field_patterns.get('classes', [])
+        matches = []
+        element_class_lower = element_class.lower()
+        
+        for pattern_class in pattern_classes:
+            pattern_lower = pattern_class.lower()
+            # classは単語境界を考慮
+            if re.search(r'\b' + re.escape(pattern_lower) + r'\b', element_class_lower):
+                matches.append(f"class:{pattern_class}")
+                logger.debug(f"Class match found: {pattern_class} in {element_class}")
+                return self.SCORE_WEIGHTS['class'], matches
+        
+        return 0, matches
+    
+    async def _calculate_context_score(self, element: Locator, field_patterns: Dict[str, Any], 
+                                     field_name: str) -> Tuple[int, List[str]]:
+        """コンテキスト（DTラベル等）によるスコア計算（100点）"""
+        try:
+            # 共有ContextTextExtractorを使用（パフォーマンス最適化）
+            if self._context_extractor:
+                contexts = await self._context_extractor.extract_context_for_element(element)
+            else:
+                # フォールバック: 新しいインスタンスを作成
+                from .context_text_extractor import ContextTextExtractor
+                context_extractor = ContextTextExtractor(element.page)
+                contexts = await context_extractor.extract_context_for_element(element)
+            
+            if not contexts:
+                return 0, []
+            
+            matches = []
+            max_score = 0
+            best_source = ''
+            min_penalty = 0  # コンテキスト由来の負スコア（最小＝最大の減点）
+            
+            # 各コンテキストテキストをフィールドパターンと照合
+            for context in contexts:
+                score = self._match_context_with_patterns(context.text, field_patterns, field_name)
+                # 負スコアは減点として記録（後段でまとめて適用）
+                if score < 0:
+                    if score < min_penalty:
+                        min_penalty = score
+                    continue
+                if score > 0:
+                    # ラベル/テーブル見出しの優先度強化（general 改善）
+                    st = context.source_type or ''
+                    if st in ('dt_label', 'dt_label_index'):
+                        score = int(score * 3.0)   # 最優先
+                    elif st in ('th_label', 'th_label_index'):
+                        score = int(score * 2.0)
+                    elif st in ('label_for', 'aria_labelledby', 'ul_li_label'):
+                        score = int(score * 2.5)  # ラベル明示関連付けを強く優先
+                    elif st in ('label_parent',):
+                        score = int(score * 1.8)
+                    
+                    if score > max_score:
+                        max_score = score
+                        matches = [f"context:{context.source_type}:{context.text[:20]}"]
+                        try:
+                            best_source = context.source_type or ''
+                        except Exception:
+                            best_source = ''
+            
+            # Important修正3: コンテキストテキスト完全優先化（汎用改善拡張）
+            # 表示テキストの信頼性を全面的にメタデータより優先
+            strong_sources = {'dt_label', 'dt_label_index', 'th_label', 'th_label_index', 'label_for', 'aria_labelledby', 'ul_li_label'}
+            if any(getattr(context, 'source_type', '') in strong_sources for context in contexts):
+                # テーブルラベル（th_label, dt_label）は設計者の明確な意図
+                final_score = max_score  # 上限制限を撤廃、完全なマッチスコアを使用
+                
+                # 完全一致時は圧倒的スコアを付与（type=100 + tag=50を上回る）
+                if max_score >= 60:  # 良好なマッチの場合
+                    final_score = min(200, max_score + 50)  # 最大200点まで加算
+            elif max_score >= 40:  # Important修正3: 一般コンテキストも強化
+                # 一般的なコンテキストテキスト（label, parent等）もメタデータより優先
+                # 「表示テキストの方が信頼性が高い」要件に対応
+                final_score = min(120, max_score + 20)  # type属性(100)を上回る最大120点
+                logger.debug(f"General context prioritized over metadata for {field_name}: {final_score}")
+            else:
+                # 弱いコンテキストマッチは従来通り制限
+                final_score = min(max_score, self.SCORE_WEIGHTS['dt_context'] // 2)  # 40点上限
+            
+            # フィールド固有の安全ガード: 郵便番号は近傍/位置ベースの文脈だけでは高得点にしない
+            try:
+                pos_like = best_source.startswith('position_') or best_source in {'nearby', 'parent_element'}
+            except Exception:
+                pos_like = False
+            limit = self.POSITION_BASED_SCORE_LIMITS.get(field_name)
+            if limit and pos_like:
+                final_score = min(final_score, limit)
+
+            if final_score > 0:
+                logger.debug(f"Context match found for {field_name}: {final_score} points")
+            
+            # セマンティック不整合等による減点を適用（負スコアはコンテキスト総合スコアから差し引く）
+            if min_penalty < 0:
+                final_score = max(0, final_score + min_penalty)
+                logger.debug(f"Applied context penalty {min_penalty} for {field_name}, final={final_score}")
+                # 強否定（例: ふりがな/カナ/ひらがな）の場合は汎用ブーストの影響を打ち消し、
+                # 個人名系フィールドの誤検出を抑止するため0にクリップ
+                if min_penalty <= -80 and field_name in {'姓','名','姓カナ','名カナ','姓ひらがな','名ひらがな'}:
+                    final_score = 0
+
+            return final_score, matches
+            
+        except Exception as e:
+            logger.debug(f"Error calculating context score for {field_name}: {e}")
+            return 0, []
+    
+    def _match_context_with_patterns(self, context_text: str, field_patterns: Dict[str, Any], 
+                                   field_name: str) -> int:
+        """コンテキストテキストをフィールドパターンと照合（セマンティック検証付き）"""
+        if not context_text:
+            return 0
+        
+        context_lower = context_text.lower()
+        max_score = 0
+        
+        # 0. セマンティック検証（最優先）
+        semantic_validation_score = self._validate_semantic_consistency(context_text, field_name)
+        # 明確な不整合は即時に負スコアを返す（減点を上位へ伝播）
+        if semantic_validation_score < 0:
+            return semantic_validation_score
+        if semantic_validation_score > 0:
+            max_score = max(max_score, semantic_validation_score)
+        
+        # 1. フィールド名との直接一致
+        # 単一文字の『名』などは汎用語への誤反応が極めて多いため除外し、
+        # それ以外のみカナ/ひらがな除去のバリエーションを許可する。
+        base_name = field_name.replace('カナ', '').replace('ひらがな', '')
+        field_variations = []
+        if len(base_name) > 1 and base_name not in {'名'}:
+            field_variations = [field_name.lower(), base_name.lower()]
+
+        for variation in field_variations:
+            # 語境界を考慮してマッチ精度を上げる
+            if self._contains_token_with_boundary(context_lower, variation):
+                max_score = max(max_score, 80)
+        
+        # 2. パターンとの一致チェック
+        all_patterns = []
+        for pattern_type in ['names', 'placeholders']:
+            patterns = field_patterns.get(pattern_type, [])
+            all_patterns.extend(patterns)
+        
+        for pattern in all_patterns:
+            pattern_lower = pattern.lower()
+            if pattern_lower in context_lower or context_lower in pattern_lower:
+                # マッチの強さに応じてスコア調整
+                if len(pattern) > 3:  # 長いパターンほど信頼度高
+                    max_score = max(max_score, 60)
+                else:
+                    max_score = max(max_score, 40)
+        
+        # 3. 日本語意味解析
+        semantic_score = self._calculate_japanese_semantic_match(context_text, field_name)
+        max_score = max(max_score, semantic_score)
+        
+        return max_score
+    
+    def _validate_semantic_consistency(self, context_text: str, field_name: str) -> int:
+        """セマンティック一貫性検証（DTラベルの明確な指示を最優先）"""
+        context_lower = context_text.lower()
+
+        # DTラベルが明確にフィールド種別を示している場合の高精度マッチング
+        definitive_mappings = {
+            'メールアドレス': ['mail', 'メール', 'email', 'e-mail', 'アドレス'],
+            # 電話番号: 汎用語『番号』は過検出の主要因となるため除外
+            '電話番号': ['tel', '電話', 'phone', 'telephone', 'tel.'],
+            # 会社/団体/組織/施設など「〇〇名」系は個人名ではない
+            '会社名': ['会社', '企業', '法人', '団体', '組織', '社名', '法人名', '団体名', '組織名', '部署名', '学校名', '店舗名', '病院名', '施設名'],
+            '姓': ['姓', '苗字', 'せい', 'みょうじ', '名字', '姓名'],
+            # 『名』単独は「マンション名」等の複合語に反応しやすいので除外
+            '名': ['名前', 'お名前', 'ファーストネーム', '下の名前', 'given name', 'first name'],
+            'お問い合わせ本文': ['内容', '本文', 'メッセージ', '問い合わせ', 'お問合せ', 'ご要望', 'ご質問', '備考', 'ご相談', 'ご意見', 'note'],
+            '件名': ['件名', 'タイトル', '表題', '用件'],
+            '住所': ['住所', '所在地', 'じゅうしょ', 'address'],
+            '郵便番号': ['郵便番号', '〒', 'ゆうびん', 'zip'],
+            # 役職（Job Title）を明確化
+            '役職': ['役職', '職位', 'job title', 'position', 'role', 'job']
+        }
+
+        # 汎用ガード: 『名』『カナ』等の個人名系フィールドは、
+        # 会社名・建物名・商品名などの「〇〇名」複合語と衝突する。
+        # 文脈にこれらが含まれる場合は強い負スコアを返してマッピング対象から外す。
+        name_like_fields = {
+            '統合氏名', '統合氏名カナ', '姓', '名', '姓カナ', '名カナ', '姓ひらがな', '名ひらがな'
+        }
+        if field_name in name_like_fields and self.NON_PERSONAL_NAME_PATTERN.search(context_text):
+            return -80  # 明確な不整合
+        # ふりがな/カナ/ひらがなを含む文脈では、漢字の『姓』『名』を強く否定
+        if field_name in {'姓', '名'}:
+            if any(k in context_lower for k in ['ふりがな', 'フリガナ', 'ｶﾅ', 'かな', 'カナ', 'kana', 'ひらがな', '平仮名']):
+                return -90
+
+        # ポジティブマッチング（従来通り）
+        keywords = definitive_mappings.get(field_name, [])
+        positive_hit = any(keyword in context_lower for keyword in keywords)
+        if positive_hit:
+            # 現フィールド種別の明確なラベルが含まれる場合は、
+            # 後続のネガティブ検証をスキップして安定した高スコアを返す。
+            return 90  # 高スコア（ネガティブと競合させない）
+        
+        # ネガティブセマンティック検証（汎用改善）
+        # 明らかに異なるフィールドタイプの場合はマイナススコア
+        negative_score = self._check_semantic_conflicts(context_text, field_name, definitive_mappings)
+        if negative_score < 0:
+            return negative_score
+        
+        return 0
+    
+    def _check_semantic_conflicts(self, context_text: str, field_name: str, 
+                                 definitive_mappings: Dict[str, List[str]]) -> int:
+        """セマンティック不整合検出（汎用改善: 明らかな不整合にマイナススコア）"""
+        context_lower = context_text.lower()
+        
+        # フィールドタイプ別の互換性マッピング
+        field_type_groups = {
+            'phone': ['電話番号', '電話1', '電話2', '電話3'],
+            'postal': ['郵便番号', '郵便番号1', '郵便番号2'],
+            'address': ['住所'],
+            'name': ['姓', '名', '姓カナ', '名カナ', '姓ひらがな', '名ひらがな'],
+            'email': ['メールアドレス'],
+            'company': ['会社名', '会社名カナ'],
+            'message': ['お問い合わせ本文', '件名'],
+            'personal_info': ['年齢', '性別', '役職'],
+            'business': ['来場', '人数', '予約', '希望', '建築', 'エリア']
+        }
+        
+        # 現在のフィールドのタイプを特定
+        current_field_type = None
+        for ftype, fields in field_type_groups.items():
+            if field_name in fields:
+                current_field_type = ftype
+                break
+        
+        if not current_field_type:
+            return 0  # 不明なフィールドは判定しない
+        
+        # 現在のフィールド種別の決定的キーワードが既に含まれる場合、
+        # 他種別キーワード（例: 「会社名」中の「名」）による誤減点を抑止する。
+        current_keywords = definitive_mappings.get(field_name, [])
+        if any(kw in context_lower for kw in current_keywords):
+            return 0
+
+        # 他のフィールドタイプのキーワードが含まれている場合はマイナススコア
+        for other_field_name, keywords in definitive_mappings.items():
+            if other_field_name == field_name:
+                continue  # 自分自身はスキップ
+            
+            # 他のフィールドタイプを特定
+            other_field_type = None
+            for ftype, fields in field_type_groups.items():
+                if other_field_name in fields:
+                    other_field_type = ftype
+                    break
+            
+            if other_field_type == current_field_type:
+                continue  # 同じタイプはスキップ
+            
+            # 明確に異なるタイプのキーワードが含まれている場合
+            for keyword in keywords:
+                if keyword in context_lower:
+                    # 会社名系の複合語（会社名/法人名/団体名/組織名/部署名/学校名/店舗名/病院名/施設名）に含まれる
+                    # 一文字の「名」を個人名と誤認しないよう保護する。
+                    if field_name == '会社名' and keyword in ['名', '名前']:
+                        # 会社名の決定語が含まれていれば衝突扱いしない
+                        company_tokens = ['会社名', '法人名', '団体名', '組織名', '部署名', '学校名', '店舗名', '病院名', '施設名', '社名']
+                        if any(tok in context_lower for tok in company_tokens):
+                            continue
+                    logger.debug(f"Semantic conflict detected: '{context_text}' contains '{keyword}' but field is {field_name}")
+                    return -50  # マイナススコア付与
+        
+        # 特別なケース: 業務・個人情報関連のキーワード
+        business_keywords = ['来場', '人数', '大人', '子供', '年齢', '予約', '希望', '建築', 'エリア', '時間']
+        if current_field_type in ['phone', 'name', 'email', 'postal']:
+            for keyword in business_keywords:
+                if keyword in context_lower:
+                    logger.debug(f"Business context conflict: '{context_text}' contains business keyword but field is {field_name}")
+                    return -75  # より強いマイナススコア
+        
+        return 0
+    
+    def _calculate_japanese_semantic_match(self, context_text: str, field_name: str) -> int:
+        """日本語の意味的マッチング"""
+        context_lower = context_text.lower()
+        
+        # フィールドタイプ別の意味的キーワード
+        semantic_mappings = {
+            # 一般化改善: '連絡先' はグループ見出しで曖昧なためメールの同義語から除外
+            'メールアドレス': ['メール', 'mail', 'email', 'e-mail', 'アドレス'],
+            '電話番号': ['電話', 'tel', 'phone', '番号', '連絡先'],
+            # 会社/団体/組織/施設の各種ラベル
+            '会社名': ['会社', '企業', '法人', '団体', '組織', '社名', '法人名', '団体名', '組織名', '部署名', '学校名', '店舗名', '病院名', '施設名'],
+            '姓': ['姓', '苗字', '名字', 'せい', 'みょうじ'],
+            # 『名』単独は除外し、より明確な表現のみ
+            '名': ['名前', 'お名前', 'ファーストネーム', '下の名前', 'given name', 'first name'],
+            'お問い合わせ本文': ['問い合わせ', 'お問い合わせ', '内容', '本文', 'メッセージ', 'ご要望', 'ご質問', '備考', 'ご相談', 'ご意見', 'note'],
+            '件名': ['件名', 'タイトル', '表題', '用件'],
+            '役職': ['役職', '職位', 'job title', 'position', 'role'],
+            '住所': ['住所', '所在地', 'じゅうしょ'],
+            '郵便番号': ['郵便番号', '郵便', 'ゆうびん', '〒']
+        }
+        
+        keywords = semantic_mappings.get(field_name, [])
+        for keyword in keywords:
+            if keyword in context_lower:
+                return 50
+        
+        return 0
+    
+    def _calculate_japanese_morphology_score(self, text: str, field_name: str) -> int:
+        """日本語形態素解析による追加スコア（25点）"""
+        if not text:
+            return 0
+        
+        # 簡略版形態素解析（完全な形態素解析は重いため）
+        field_keywords = self.japanese_patterns.get(field_name, [])
+        
+        for keyword in field_keywords:
+            if keyword in text:
+                logger.debug(f"Japanese morphology match: {keyword} in {text}")
+                return self.SCORE_WEIGHTS['japanese_morphology']
+        
+        return 0
+    
+# 削除: 複雑なボーナス計算は不要（単純化のため）
+    
+    async def _calculate_penalties(self, element: Locator, 
+                                 element_info: Dict[str, Any]) -> Tuple[int, List[str]]:
+        """ペナルティスコア計算"""
+        penalty = 0
+        penalties = []
+        
+        # 非表示要素ペナルティ（強化）
+        if not element_info.get('visible', True):
+            penalty += self.SCORE_WEIGHTS['visibility_penalty']
+            penalties.append("element_not_visible")
+        
+        # 非有効要素ペナルティ
+        if not element_info.get('enabled', True):
+            penalty += self.SCORE_WEIGHTS['visibility_penalty'] // 2
+            penalties.append("element_not_enabled")
+        
+        # style="display:none"等のペナルティ（キャッシュ優先）
+        try:
+            style = element_info.get('style')
+            if style is None:
+                style = await element.get_attribute('style') or ''
+            if ('display:none' in style or 'display: none' in style or 
+                'visibility:hidden' in style or 'visibility: hidden' in style):
+                penalty += self.SCORE_WEIGHTS['visibility_penalty']
+                penalties.append("display_none_or_hidden_style")
+        except:
+            pass
+        
+        # hidden属性ペナルティ
+        if element_info.get('type', '') == 'hidden':
+            penalty += self.SCORE_WEIGHTS['visibility_penalty']
+            penalties.append("hidden_input_type")
+        
+        # aria-hidden属性ペナルティ（キャッシュ優先）
+        try:
+            aria_hidden = element_info.get('aria_hidden')
+            if aria_hidden is None:
+                aria_hidden = await element.get_attribute('aria-hidden')
+            if aria_hidden and aria_hidden.lower() == 'true':
+                penalty += self.SCORE_WEIGHTS['visibility_penalty']
+                penalties.append("aria_hidden_true")
+        except:
+            pass
+        
+        # tabindex="-1"ペナルティ（フォーカス不可要素）（キャッシュ優先）
+        try:
+            tabindex = element_info.get('tabindex')
+            if tabindex is None:
+                tabindex = await element.get_attribute('tabindex')
+            if tabindex == '-1':
+                penalty += self.SCORE_WEIGHTS['visibility_penalty'] // 2
+                penalties.append("tabindex_negative")
+        except:
+            pass
+        
+        # position:absolute + 極小サイズのハニーポット判定
+        try:
+            style = element_info.get('style')
+            if style is None:
+                style = await element.get_attribute('style') or ''
+            if ('position: absolute' in style and 
+                ('height: 1px' in style or 'width: 1px' in style or 
+                 'overflow: hidden' in style)):
+                penalty += self.SCORE_WEIGHTS['visibility_penalty']
+                penalties.append("honeypot_style_detected")
+        except:
+            pass
+        
+        if penalties:
+            logger.debug(f"Penalties applied: {penalties} (total: {penalty})")
+        
+        return penalty, penalties
+    
+    def compare_elements(self, element1_score: Dict[str, Any], 
+                        element2_score: Dict[str, Any]) -> int:
+        """
+        2つの要素スコアを比較
+        
+        Returns:
+            1 if element1 > element2
+            -1 if element1 < element2  
+            0 if equal
+        """
+        score1 = element1_score['total_score']
+        score2 = element2_score['total_score']
+        
+        if score1 > score2:
+            return 1
+        elif score1 < score2:
+            return -1
+        else:
+            # 同点の場合は詳細要素で判定
+            # type属性マッチがある方を優先
+            type1 = element1_score['score_breakdown'].get('type', 0)
+            type2 = element2_score['score_breakdown'].get('type', 0)
+            if type1 != type2:
+                return 1 if type1 > type2 else -1
+            
+            # 必須要素を優先
+            bonus1 = element1_score['score_breakdown'].get('bonus', 0)
+            bonus2 = element2_score['score_breakdown'].get('bonus', 0)
+            if bonus1 != bonus2:
+                return 1 if bonus1 > bonus2 else -1
+            
+            return 0
+    
+    def get_score_summary(self, score_details: Dict[str, Any]) -> str:
+        """スコア詳細のサマリー文字列を生成"""
+        total = score_details['total_score']
+        breakdown = score_details['score_breakdown']
+        matches = score_details['matched_patterns']
+        
+        summary_parts = [f"Total: {total}"]
+        
+        for attr, score in breakdown.items():
+            if score > 0:
+                summary_parts.append(f"{attr}:{score}")
+        
+        if matches:
+            summary_parts.append(f"Matches: {', '.join(matches[:3])}")  # 最初の3つのみ
+        
+        return " | ".join(summary_parts)
+    
+# 削除: 複雑な完全一致ボーナス計算は基本属性マッチングに統合
+    
+# 削除: 部分一致ペナルティは複雑すぎるため削除（基本マッチングに集中）
+    
+# 削除: 不要になったヘルパーメソッド（単純化のため）
+    
+    def _is_excluded_element(self, element_info: Dict[str, Any], field_patterns: Dict[str, Any]) -> bool:
+        """除外パターンに該当するかチェック（認証・FAXフィールド等の除外）"""
+        exclude_patterns = field_patterns.get('exclude_patterns', [])
+        if not exclude_patterns:
+            return False
+        
+        # チェック対象の属性
+        attributes_to_check = ['name', 'id', 'class', 'placeholder']
+        
+        for attr in attributes_to_check:
+            attr_value = element_info.get(attr, '').lower()
+            if not attr_value:
+                continue
+            
+            # 除外パターンマッチング（厳格化）
+            for exclude_pattern in exclude_patterns:
+                exclude_pattern_lower = exclude_pattern.lower()
+                
+                # 1. 完全一致チェック（最優先）
+                if attr_value == exclude_pattern_lower:
+                    logger.info(f"EXCLUSION: {attr}='{attr_value}' exactly matches exclude_pattern '{exclude_pattern}'")
+                    return True
+                
+                # 2. 単語境界を考慮した一致チェック（認証系パターン用）
+                if len(exclude_pattern_lower) >= 3:  # 短すぎるパターンは除外
+                    # 単語境界またはアンダースコア/ハイフンで区切られた場合
+                    if re.search(r'\b' + re.escape(exclude_pattern_lower) + r'\b', attr_value) or \
+                       re.search(r'[_-]' + re.escape(exclude_pattern_lower) + r'[_-]', attr_value) or \
+                       attr_value.startswith(exclude_pattern_lower + '_') or \
+                       attr_value.startswith(exclude_pattern_lower + '-') or \
+                       attr_value.endswith('_' + exclude_pattern_lower) or \
+                       attr_value.endswith('-' + exclude_pattern_lower):
+                        logger.info(f"EXCLUSION: {attr}='{attr_value}' contains word-boundary exclude_pattern '{exclude_pattern}'")
+                        return True
+                
+                # 3. 特定長さ以上での部分一致（汎用除外用）
+                if len(exclude_pattern_lower) >= 5 and exclude_pattern_lower in attr_value:
+                    logger.info(f"EXCLUSION: {attr}='{attr_value}' contains long exclude_pattern '{exclude_pattern}'")
+                    return True
+        
+        return False
+    
+    async def _is_excluded_element_with_context(self, element_info: Dict[str, Any], element: Locator, field_patterns: Dict[str, Any]) -> bool:
+        """コンテキストテキストも含めた除外パターンチェック"""
+        exclude_patterns = field_patterns.get('exclude_patterns', [])
+        logger.debug(f"Context exclusion check - patterns: {exclude_patterns}")
+        
+        if not exclude_patterns:
+            logger.debug("No exclude patterns found")
+            return False
+        
+        # 既存の属性チェック
+        if self._is_excluded_element(element_info, field_patterns):
+            logger.debug("Excluded by attribute patterns")
+            return True
+        
+        # コンテキストテキストのチェック
+        try:
+            # 共有ContextTextExtractorを使用（パフォーマンス最適化）
+            if self._context_extractor:
+                contexts = await self._context_extractor.extract_context_for_element(element)
+            else:
+                # フォールバック: 新しいインスタンスを作成
+                from .context_text_extractor import ContextTextExtractor
+                context_extractor = ContextTextExtractor(element.page)
+                contexts = await context_extractor.extract_context_for_element(element)
+            logger.debug(f"Found contexts: {contexts}")
+            
+            if contexts:
+                # 除外判定に用いるコンテキスト種別を限定（誤除外防止）
+                # 直接の label 要素テキスト（label_element）も許可して、
+                # 「確認用メールアドレス」のような明確なラベル文言での除外を有効化
+                allowed_sources = {'dt_label', 'th_label', 'label_for', 'label_parent', 'aria_labelledby', 'label_element'}
+                for context in contexts:
+                    if getattr(context, 'source_type', '') not in allowed_sources:
+                        continue  # 位置ベースや親要素の汎用テキストでは除外しない
+                    context_text = context.text.lower()
+                    logger.debug(f"Checking context_text: '{context_text}'")
+                    if not context_text:
+                        continue
+                    
+                    # 除外パターンマッチング
+                    for exclude_pattern in exclude_patterns:
+                        exclude_pattern_lower = exclude_pattern.lower()
+                        
+                        # コンテキストテキストでの完全一致またはキーワード含有チェック
+                        if exclude_pattern_lower in context_text:
+                            logger.info(f"CONTEXT_EXCLUSION: context_text='{context_text}' contains exclude_pattern '{exclude_pattern}'")
+                            return True
+        except Exception as e:
+            logger.error(f"Failed to check context exclusion: {e}")
+        
+        return False
+    
+    async def _detect_required_status(self, element: Locator, parallel_groups: List[List] = None) -> bool:
+        """
+        要素の必須状態を総合的に検出
+        
+        Args:
+            element: 検査対象のLocator
+            parallel_groups: 並列要素グループ（FormElement のリスト）
+            
+        Returns:
+            必須の場合True
+        """
+        try:
+            # 1) 標準HTML属性（最優先）
+            required_attr = await element.get_attribute('required')
+            if required_attr is not None:
+                return True
+
+            aria_required = await element.get_attribute('aria-required')
+            if aria_required and aria_required.lower() == 'true':
+                return True
+
+            # 2) 要素自身/先祖のclassヒント（CF7等）
+            try:
+                class_attr = (await element.get_attribute('class')) or ''
+            except Exception:
+                class_attr = ''
+            class_lower = class_attr.lower()
+            required_class_tokens = [
+                'required', 'mandatory', 'must', 'necessary', '必須',
+                # Contact Form 7系
+                'wpcf7-validates-as-required'
+            ]
+            if any(tok in class_lower for tok in required_class_tokens):
+                return True
+
+            # 先祖方向にスキャンして必須系クラスを検出（例: wrap/span/divに付与されるケース）
+            try:
+                ancestor_has_required = await element.evaluate("""
+                    el => {
+                      const TOKENS = ['required','mandatory','must','necessary','必須','wpcf7-validates-as-required'];
+                      let p = el.parentElement;
+                      let depth = 0;
+                      while (p && depth < 6) {
+                        const cls = (p.getAttribute('class') || '').toLowerCase();
+                        if (TOKENS.some(t => cls.includes(t))) return true;
+                        p = p.parentElement; depth++;
+                      }
+                      return false;
+                    }
+                """)
+            except Exception:
+                ancestor_has_required = False
+            if ancestor_has_required:
+                return True
+
+            # 3) name属性に明示マーカー
+            try:
+                name_attr = (await element.get_attribute('name')) or ''
+            except Exception:
+                name_attr = ''
+            if any(marker in name_attr for marker in ['必須', 'required', 'mandatory']):
+                return True
+
+            # 4) 近傍テキストのインジケータ（ContextTextExtractor活用）
+            if await self._detect_required_markers_with_context(element):
+                return True
+
+            # 5) DL構造のdt側クラス（例: <dt class="need">）を検出
+            try:
+                dt_class = await element.evaluate("""
+                    el => {
+                      // dd祖先→直前のdtを探索
+                      let p = el;
+                      while (p && p.tagName && p.tagName.toLowerCase() !== 'dd') { p = p.parentElement; }
+                      if (!p) return '';
+                      let dt = p.previousElementSibling;
+                      while (dt && dt.tagName && dt.tagName.toLowerCase() !== 'dt') { dt = dt.previousElementSibling; }
+                      if (!dt) return '';
+                      return (dt.getAttribute('class') || '').toLowerCase();
+                    }
+                """)
+            except Exception:
+                dt_class = ''
+            if isinstance(dt_class, str) and any(k in dt_class for k in ['need', 'required', '必須']):
+                return True
+
+            # 6) 並列グループ内の必須マーカー検出（新規追加）
+            if parallel_groups and await self._detect_required_in_parallel_group(element, parallel_groups):
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.debug(f"Failed to detect required status: {e}")
+            return False
+    
+    async def _detect_required_in_parallel_group(self, element: Locator, parallel_groups: List[List]) -> bool:
+        """
+        並列グループ内の必須マーカーを検出
+        
+        Args:
+            element: 対象要素
+            parallel_groups: 並列要素グループ（FormElement のリスト）
+            
+        Returns:
+            並列グループ内で必須マーカーが見つかった場合 True
+        """
+        try:
+            # 対象要素が含まれる並列グループを特定
+            target_group = None
+            element_selector = await self._get_element_selector(element)
+            
+            for group in parallel_groups:
+                for form_element in group:
+                    if hasattr(form_element, 'selector') and form_element.selector == element_selector:
+                        target_group = group
+                        break
+                if target_group:
+                    break
+            
+            if not target_group:
+                return False
+            
+            # 同じグループ内の非入力要素から必須マーカーを探す
+            required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+            
+            # グループ内の各要素の親コンテナ内で必須マーカーを探索
+            for form_element in target_group:
+                if not hasattr(form_element, 'locator'):
+                    continue
+                
+                try:
+                    # 要素の親コンテナ内のテキスト要素を調査
+                    container_text = await form_element.locator.locator('..').inner_text()
+                    if any(marker in container_text for marker in required_markers):
+                        return True
+                        
+                    # 兄弟要素も調査（並列構造の場合、必須マーカーは兄弟要素にある可能性）
+                    siblings = await form_element.locator.locator('../*').all()
+                    for sibling in siblings:
+                        if await sibling.count() > 0:
+                            sibling_text = await sibling.inner_text()
+                            if any(marker in sibling_text for marker in required_markers):
+                                return True
+                except:
+                    continue
+                    
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Failed to detect required in parallel group: {e}")
+            return False
+    
+    async def _get_element_selector(self, element: Locator) -> str:
+        """要素のセレクターを生成（軽量版）"""
+        try:
+            info = await element.evaluate(
+                "el => ({ id: el.getAttribute('id')||'', name: el.getAttribute('name')||'', tag: el.tagName.toLowerCase(), type: el.getAttribute('type')||'' })"
+            )
+            
+            if info.get('id'):
+                return f"#{info['id']}"
+                
+            name = info.get('name')
+            tag = info.get('tag') or 'input'
+            typ = info.get('type')
+            
+            if name:
+                if typ:
+                    return f"{tag}[name=\"{name}\"][type=\"{typ}\"]"
+                return f"{tag}[name=\"{name}\"]"
+                
+            return f"{tag}[type=\"{typ}\"]" if typ else tag
+            
+        except Exception:
+            return 'input'
+    
+    async def _detect_required_markers_with_context(self, element: Locator) -> bool:
+        """
+        ContextTextExtractorを活用した必須マーカー検出
+        
+        Args:
+            element: 対象要素
+            
+        Returns:
+            必須マーカーが見つかった場合 True
+        """
+        try:
+            # NOTE: ContextTextExtractor は __init__ で _context_extractor として渡される。
+            # 以前は self.context_extractor を参照しており、常にフォールバック側に落ちて精度が低下していた。
+            # 正しくは self._context_extractor を使用し、extract_context_for_element を呼び出す。
+            if not self._context_extractor:
+                # フォールバック: 基本的な周辺テキスト取得
+                surrounding_text = await self._get_surrounding_text(element)
+                required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+                return any(marker in surrounding_text for marker in required_markers)
+            
+            # ContextTextExtractorを使った高度な必須マーカー検出
+            contexts = await self._context_extractor.extract_context_for_element(element)
+            required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+            
+            for context in contexts:
+                # 各コンテキストテキストで必須マーカーをチェック
+                if any(marker in context.text for marker in required_markers):
+                    # 強いコンテキスト（dt_label、th_label等）は信頼度高
+                    if context.source_type in {'dt_label', 'th_label', 'label_for', 'aria_labelledby'}:
+                        return True
+                    # 位置ベースのコンテキストも一定の信頼度があれば採用
+                    elif context.confidence >= 0.7:
+                        return True
+                        
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Failed to detect required markers with context: {e}")
+            # フォールバック
+            surrounding_text = await self._get_surrounding_text(element)
+            required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+            return any(marker in surrounding_text for marker in required_markers)
+
+    async def _get_surrounding_text(self, element: Locator) -> str:
+        """
+        要素の周辺テキストを取得（ラベル、前後のテキストなど）
+        
+        Args:
+            element: 対象要素
+            
+        Returns:
+            周辺テキスト
+        """
+        try:
+            surrounding_text = ""
+            
+            # ラベル要素の検索（for属性による関連付け）
+            element_id = await element.get_attribute('id')
+            if element_id:
+                try:
+                    labels = element.page.locator(f"label[for='{element_id}']")
+                    label_count = await labels.count()
+                    for i in range(label_count):
+                        label_text = await labels.nth(i).inner_text()
+                        surrounding_text += " " + label_text
+                except:
+                    pass
+            
+            # 親要素内のテキスト検索
+            try:
+                parent = element.locator('..')
+                parent_text = await parent.inner_text()
+                surrounding_text += " " + parent_text
+            except:
+                pass
+            
+            # 前後の兄弟要素のテキスト
+            try:
+                # 前の兄弟要素
+                prev_sibling = element.locator('xpath=preceding-sibling::*[1]')
+                if await prev_sibling.count() > 0:
+                    prev_text = await prev_sibling.inner_text()
+                    surrounding_text += " " + prev_text
+                
+                # 次の兄弟要素
+                next_sibling = element.locator('xpath=following-sibling::*[1]')
+                if await next_sibling.count() > 0:
+                    next_text = await next_sibling.inner_text()
+                    surrounding_text += " " + next_text
+            except:
+                pass
+            
+            return surrounding_text.strip()
+            
+        except Exception as e:
+            logger.debug(f"Failed to get surrounding text: {e}")
+            return ""
