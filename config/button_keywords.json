@@ -1,0 +1,38 @@
+{
+  "submit_button_keywords": {
+    "primary": [
+      "送信", "送る", "submit", "send"
+    ],
+    "secondary": [
+      "完了", "complete", "確定", "confirm", 
+      "実行", "execute", "登録", "register"
+    ],
+    "confirmation": [
+      "確認", "次", "review", "confirm", 
+      "進む", "next", "続行", "continue",
+      "確認画面", "確認する", "内容確認", "入力内容を確認",
+      "確認画面へ", "確認ページ", "チェック", "check"
+    ]
+  },
+  "fallback_selectors": {
+    "primary": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "secondary": [
+      "button:has-text(\"送信\")",
+      "button:has-text(\"Submit\")",
+      "form button:first-of-type"
+    ],
+    "by_attributes": [
+      "#submit",
+      ".submit",
+      "[name*=\"submit\"]",
+      "[class*=\"submit\"]"
+    ]
+  },
+  "exclude_keywords": [
+    "キャンセル", "cancel", "戻る", "back", 
+    "リセット", "reset", "クリア", "clear"
+  ]
+}
