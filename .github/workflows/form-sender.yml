@@ -1,0 +1,152 @@
+name: Form Sender
+
+on:
+  repository_dispatch:
+    types: [form_sender_task, form_sender_test, form_sender_branch_test]
+  workflow_dispatch:
+    inputs:
+      targeting_id:
+        description: 'Targeting ID for form sender'
+        required: true
+        default: '1'
+        type: string
+      test_mode:
+        description: 'Run in test mode'
+        required: false
+        default: true
+        type: boolean
+      client_config:
+        description: 'Client configuration JSON'
+        required: true
+        type: string
+
+jobs:
+  form-sender:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    if: github.event.action != 'form_sender_branch_test'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.client_payload.branch || github.ref }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Cache Python dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install setproctitle  # マルチプロセス名設定用
+        
+    - name: Install Playwright browsers
+      run: |
+        playwright install chromium
+        sudo apt-get update || true
+        sudo apt-get install -y --no-install-recommends libglib2.0-0 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libasound2t64 || true
+
+    - name: Save client config to temporary file
+      run: |
+        python src/save_client_config.py
+
+    - name: Determine execution mode
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "TEST_MODE=${{ github.event.inputs.test_mode }}" >> $GITHUB_ENV
+          echo "TARGETING_ID=${{ github.event.inputs.targeting_id }}" >> $GITHUB_ENV
+          echo "Running via WORKFLOW DISPATCH: targeting_id=${{ github.event.inputs.targeting_id }}, test_mode=${{ github.event.inputs.test_mode }}"
+        elif [ "${{ github.event.action }}" = "form_sender_test" ]; then
+          echo "TEST_MODE=true" >> $GITHUB_ENV
+          echo "TARGETING_ID=1" >> $GITHUB_ENV
+          echo "Running in TEST MODE with targeting_id=1"
+        else
+          echo "TEST_MODE=false" >> $GITHUB_ENV
+          echo "TARGETING_ID=${{ github.event.client_payload.targeting_id }}" >> $GITHUB_ENV
+          echo "Running in PRODUCTION MODE"
+        fi
+
+    - name: Run Form Sender Worker (Multi-Process Processing)
+      id: worker
+      run: |
+        echo "Starting multi-process form sender worker..."
+        echo "System resources initialized"
+        echo "Worker configuration loaded"
+        if [ "${{ env.TEST_MODE }}" = "true" ]; then
+          echo "Executing in TEST MODE"
+          python src/form_sender_worker.py \
+            --targeting-id "${{ env.TARGETING_ID }}" \
+            --config-file "/tmp/client_config_*.json" \
+            --test-mode
+        else
+          echo "Executing in PRODUCTION MODE"
+          python src/form_sender_worker.py \
+            --targeting-id "${{ env.TARGETING_ID }}" \
+            --config-file "/tmp/client_config_*.json"
+        fi
+      env:
+        PYTHONPATH: ${{ github.workspace }}/src
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        TZ: Asia/Tokyo
+        # マルチプロセス環境設定
+        GITHUB_ACTIONS: true
+        # プロセス管理最適化
+        PYTHONFAULTHANDLER: 1
+        PYTHONUNBUFFERED: 1
+
+    - name: Cleanup config file
+      run: rm -f /tmp/client_config_*.json
+      if: always()
+
+    - name: Summary
+      if: always()
+      run: |
+        echo "## Form Sender Processing Results" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # ブランチテスト用軽量実行ジョブ
+  branch-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event.action == 'form_sender_branch_test'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.client_payload.branch || github.ref }}
+
+    - name: Branch Test Information
+      run: |
+        echo "## Branch Test Information" >> $GITHUB_STEP_SUMMARY
+        echo "- **Event Type**: ${{ github.event.action }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Requested Branch**: ${{ github.event.client_payload.branch }}" >> $GITHUB_STEP_SUMMARY  
+        echo "- **Actual Branch**: ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Targeting ID**: ${{ github.event.client_payload.targeting_id }}" >> $GITHUB_STEP_SUMMARY
+        # 企業名・URLは出力禁止（CIポリシー）。必要最小限のIDのみを表示。
+        
+    - name: Verify Branch Checkout
+      run: |
+        echo "Current branch: $(git branch --show-current)"
+        echo "Current commit: $(git rev-parse HEAD)"
+        echo "Branch files check:"
+        ls -la src/form_sender/
+        
+    - name: Branch Test Summary
+      run: |
+        echo "✅ ブランチテスト完了"
+        echo "Repository Dispatch機能が正常に動作しています"
+        echo "ブランチ: ${{ github.event.client_payload.branch }}"
+        echo "実行ブランチの確認が完了しました"
