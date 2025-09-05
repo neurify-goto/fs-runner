@@ -23,6 +23,12 @@ def test_class_exclusion_hyphen_and_underscore_security_tokens():
     assert scorer._is_excluded_element(make_elem_info('email_verification field'), fp) is True
     assert scorer._is_excluded_element(make_elem_info('user-auth-input'), fp) is True
 
+    # 5-7文字の重要短語（login/token/csrf 等）
+    fp2 = {'exclude_patterns': ['login', 'token', 'csrf']}
+    assert scorer._is_excluded_element(make_elem_info('user-login-field'), fp2) is True
+    assert scorer._is_excluded_element(make_elem_info('csrf-token-input'), fp2) is True
+    assert scorer._is_excluded_element(make_elem_info('csrf_token_input'), fp2) is True
+
 
 def test_class_exclusion_should_not_block_last_first_name():
     scorer = ElementScorer()

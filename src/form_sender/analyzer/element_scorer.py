@@ -54,8 +54,13 @@ class ElementScorer:
     CRITICAL_CLASS_EXCLUDE_TOKENS = {
         'auth', 'login', 'signin', 'otp', 'mfa', 'totp',
         'password', 'verify', 'verification', 'token', 'captcha',
-        'confirm', 'confirmation', 'confirm_email', 'email_confirmation'
+        'confirm', 'confirmation', 'confirm_email', 'email_confirmation',
+        # 追加: 5-7 文字の重要短語や広く使われる用語
+        'csrf', 'session'
     }
+
+    # 長語のしきい値（class 部分一致を許可する長さ）
+    LONG_EXCLUDE_LENGTH = 8
 
     # 汎用減点のバイパスを許可するフィールド（class 主導が妥当な代表）
     CLASS_BYPASS_WHITELIST_FIELDS = {
@@ -1184,7 +1189,7 @@ class ElementScorer:
                             return True
 
                     # 3) 長い除外語はハイフン/アンダースコア連結でも部分一致を許容
-                    if len(ep) >= 8:
+                    if len(ep) >= self.LONG_EXCLUDE_LENGTH:
                         if any(ep in tok for tok in class_tokens):
                             logger.debug(f"EXCLUSION(class long-substring): '{ep}' found in class='***CLASS_REDACTED***'")
                             return True
