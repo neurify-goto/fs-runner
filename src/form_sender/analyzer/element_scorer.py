@@ -68,7 +68,8 @@ class ElementScorer:
             'メールアドレス': ['メール', 'メールアドレス', 'mail', 'email', 'e-mail', 'アドレス'],
             '姓': ['姓', '苗字', '名字', 'せい', 'みょうじ'],
             '名': ['名', '名前', 'めい'],
-            '電話番号': ['電話', '電話番号', 'tel', 'phone', '携帯', '連絡先'],
+            # 『携帯』はモバイル番号専用ラベルに引っ張られやすいため除外
+            '電話番号': ['電話', '電話番号', 'tel', 'phone', '連絡先'],
             '住所': ['住所', '所在地', 'じゅうしょ', '都道府県', '市区町村'],
             '件名': ['件名', 'タイトル', '表題', '用件'],
             'お問い合わせ本文': ['お問い合わせ', '問い合わせ', '本文', 'メッセージ', '内容', 'ご相談', 'ご要望', 'ご質問'],
@@ -834,6 +835,25 @@ class ElementScorer:
             # 役職（Job Title）を明確化
             '役職': ['役職', '職位', 'job title', 'position', 'role', 'job']
         }
+
+        # 特別ガード: 電話番号は『携帯』『mobile』『cell』が明示された場合は優先度を下げる
+        if field_name == '電話番号':
+            if any(k in context_lower for k in ['携帯', 'mobile', 'cell']):
+                return -60
+            if any(k in context_lower for k in ['fax', 'ファックス', 'ファクス']):
+                return -80
+
+        # 特別ガード: メールアドレスの文脈に『電話』『tel』『お電話』『phone』が含まれる場合は負スコア
+        if field_name == 'メールアドレス':
+            if any(k in context_lower for k in ['電話', 'お電話', 'tel', 'phone', 'telephone']):
+                return -60
+
+        # 特別ガード: 会社名の文脈で『管理会社』『竣工』『年月日』などは不適切
+        if field_name == '会社名':
+            if any(k in context_lower for k in ['管理会社']):
+                return -70
+            if any(k in context_lower for k in ['竣工', '年月日']):
+                return -50
 
         # 汎用ガード: 『名』『カナ』等の個人名系フィールドは、
         # 会社名・建物名・商品名などの「〇〇名」複合語と衝突する。
