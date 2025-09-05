@@ -203,8 +203,12 @@ class InputValueAssigner:
                         ]).lower()
                         if 'hiragana' in blob:
                             kana_type = 'hiragana'
-            except Exception:
-                pass
+            except UnicodeError as e:
+                logger.warning(f"Unicode error in kana detection: {e}")
+                kana_type = 'katakana'
+            except Exception as e:
+                logger.error(f"Unexpected error in kana type detection: {e}")
+                kana_type = 'katakana'
             return self.field_combination_manager.generate_unified_kana_value(kana_type, client_data)
             
             # If still empty after specific mapping, use fallback
