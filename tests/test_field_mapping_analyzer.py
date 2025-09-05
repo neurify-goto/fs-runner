@@ -215,32 +215,38 @@ class FieldMappingAnalyzer:
             if engine not in engine_map:
                 logger.warning(f"Unknown PLAYWRIGHT_ENGINE='{engine}', falling back to chromium")
 
-            self.browser = await launcher.launch(
-                headless=headless,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
+            # Chromium でクラッシュしやすいフラグを整理し、最小限の安定構成にする
+            # - macOS では sandbox 系フラグは不要（Linux CI のみに限定）
+            # - 一部の disable-* フラグは描画/IPC 周りの不整合でクラッシュを誘発するため除去
+            extra_args = []
+            if engine == 'chromium':
+                import sys
+                is_linux = sys.platform.startswith('linux')
+                # 最小・安全寄りのフラグのみ適用
+                extra_args = [
                     '--disable-dev-shm-usage',
                     '--disable-blink-features=AutomationControlled',
-                    '--disable-web-security',
-                    '--memory-pressure-off',  # メモリプレッシャー無効
-                    '--max_old_space_size=512',  # ページ用メモリ制限
-                    '--disable-background-timer-throttling',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding',
-                    '--disable-features=TranslateUI,VizDisplayCompositor',
-                    '--disable-extensions',
-                    '--disable-plugins',
-                    '--disable-images',  # 画像読み込み無効（メモリ節約）
-                    '--disable-remote-fonts',  # Webフォント無効
-                    '--disable-default-apps',
-                    '--disable-sync',
-                    '--disable-background-networking',
-                    '--disable-component-extensions-with-background-pages',
-                    '--disable-ipc-flooding-protection',
-                    # JavaScriptは一時的に有効（フォーム解析で必要かもしれないため）
                 ]
-            )
+                # Linux CI のみ sandbox 無効化
+                if is_linux:
+                    extra_args += ['--no-sandbox', '--disable-setuid-sandbox']
+                # ヘッドレス時のみ GPU を抑制（描画周りの安定化）
+                if headless:
+                    extra_args += ['--disable-gpu']
+            else:
+                # Firefox/WebKit は既存の安定挙動に委ねる（追加フラグなし）
+                extra_args = []
+
+            # Chromium が環境依存でクラッシュするケースに備え、
+            # まずシステム Chrome チャンネルでの起動を試み、失敗したら同バイナリで再試行
+            launch_kwargs = dict(headless=headless, args=extra_args)
+            if engine == 'chromium':
+                try:
+                    self.browser = await launcher.launch(channel='chrome', **launch_kwargs)
+                except Exception:
+                    self.browser = await launcher.launch(**launch_kwargs)
+            else:
+                self.browser = await launcher.launch(**launch_kwargs)
             # コンテキスト＋ページ作成（ページクローズ時の復旧を容易にする）
             self.context = await self.browser.new_context(
                 ignore_https_errors=True,

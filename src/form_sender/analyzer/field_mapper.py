@@ -89,7 +89,13 @@ class FieldMapper:
                 if cand_name in required_elements_set or cand_id in required_elements_set:
                     is_required_match = True
 
-            should_map_field = is_core_field or treat_all_as_required or is_required_match
+            # treat_all_as_required は汎用誤入力を避けるため、
+            # 本質的必須（essential_fields）に限定して有効化する
+            should_map_field = (
+                is_core_field or
+                is_required_match or
+                (bool(treat_all_as_required) and (field_name in self.settings.get('essential_fields', [])))
+            )
 
             # 高信頼かつ汎用的に安全な任意項目（例: 件名・電話番号）は、
             # 必須一致でなくても動的しきい値を満たせば採用を許可する。
@@ -125,8 +131,46 @@ class FieldMapper:
                     # スコアが動的閾値（品質優先）を満たす場合のみ採用。
                     map_ok = best_score >= dynamic_threshold
 
+            # フィールド固有の安全ガード
+            if map_ok and field_name == 'メールアドレス':
+                try:
+                    ei = (best_score_details or {}).get('element_info', {})
+                    etype = (ei.get('type') or '').lower()
+                    attrs_blob = ' '.join([
+                        (ei.get('name') or ''), (ei.get('id') or ''), (ei.get('class') or ''), (ei.get('placeholder') or '')
+                    ]).lower()
+                    best_txt = (self.context_text_extractor.get_best_context_text(best_context) or '').lower() if best_context else ''
+                    email_tokens = ['email', 'e-mail', 'mail', 'メール']
+                    is_semantic_email = any(t in attrs_blob for t in email_tokens) or any(t in best_txt for t in email_tokens)
+                    # type=email か、強いメール語が属性またはラベルにない限り採用しない
+                    if not (etype == 'email' or is_semantic_email):
+                        map_ok = False
+                except Exception:
+                    pass
+
+            # 電話番号の安全ガード
+            if map_ok and field_name == '電話番号':
+                try:
+                    ei = (best_score_details or {}).get('element_info', {})
+                    etype = (ei.get('type') or '').lower()
+                    attrs_blob = ' '.join([
+                        (ei.get('name') or ''), (ei.get('id') or ''), (ei.get('class') or ''), (ei.get('placeholder') or '')
+                    ]).lower()
+                    best_txt = (self.context_text_extractor.get_best_context_text(best_context) or '').lower() if best_context else ''
+                    pos_attr = any(t in attrs_blob for t in ['tel', 'phone'])
+                    pos_ctx = any(t in best_txt for t in ['電話','tel','phone','携帯','mobile','cell'])
+                    neg_ctx = any(t in best_txt for t in ['時', '時頃', '午前', '午後', '連絡方法']) or any(t in attrs_blob for t in ['timeno', 'h1', 'h2'])
+                    if not (etype == 'tel' or pos_attr or (pos_ctx and not neg_ctx)):
+                        map_ok = False
+                except Exception:
+                    pass
+
             if map_ok:
                 element_info = await self._create_enhanced_element_info(best_element, best_score_details, best_context)
+                try:
+                    element_info['source'] = 'normal'
+                except Exception:
+                    pass
                 temp_value = self._generate_temp_field_value(field_name)
                 
                 if self.duplicate_prevention.register_field_assignment(field_name, temp_value, best_score, element_info):
@@ -195,11 +239,13 @@ class FieldMapper:
 
     async def _score_element_in_detail(self, element, field_patterns, field_name):
         element_bounds = self._element_bounds_cache.get(str(element))
+        # 情報付与用にコンテキストは取得するが、採点は ElementScorer に一元化する
         contexts = await self.context_text_extractor.extract_context_for_element(element, element_bounds)
         score, score_details = await self.element_scorer.calculate_element_score(element, field_patterns, field_name)
-        if score <= 0: return 0, {}, []
-        context_bonus = self._calculate_context_bonus(contexts, field_name, field_patterns)
-        return score + context_bonus, score_details, contexts
+        if score <= 0:
+            return 0, {}, []
+        # ここでの追加ボーナスは廃止（重複加点防止）
+        return score, score_details, contexts
 
     def _is_confirmation_field(self, element_info: Dict[str, Any], contexts: List) -> bool:
         """属性とコンテキスト（ラベル/見出し）から確認用入力欄を判定"""
@@ -234,33 +280,89 @@ class FieldMapper:
         return strong_type and has_strict and score >= self.settings.get('early_stop_score', 95)
 
     async def _fallback_map_message_field(self, classified_elements, field_mapping, used_elements):
+        """本文取りこぼし救済
+
+        優先度:
+        1) textarea があれば textarea のみを対象に厳格に判定
+        2) textarea が無い場合に限り、input[type=text] を強い本文ラベルに基づき限定的に救済
+        """
         target_field = 'お問い合わせ本文'
-        if target_field in field_mapping: return
-        candidates = classified_elements.get('textareas', [])
-        if not candidates: return
+        if target_field in field_mapping:
+            return
 
         patterns = self.field_patterns.get_pattern(target_field) or {}
         strict_tokens = {'お問い合わせ', '本文', 'メッセージ', 'ご要望', 'ご質問', '備考'}
+
+        # 1) textarea 優先（従来ロジック）
+        textarea_candidates = classified_elements.get('textareas', []) or []
         best = (None, 0, None, [])
-        for el in candidates:
-            if id(el) in used_elements: continue
-            # bounds キャッシュを活用
+        for el in textarea_candidates:
+            if id(el) in used_elements:
+                continue
             el_bounds = self._element_bounds_cache.get(str(el)) if hasattr(self, '_element_bounds_cache') else None
             contexts = await self.context_text_extractor.extract_context_for_element(el, el_bounds)
             best_txt = (self.context_text_extractor.get_best_context_text(contexts) or '').lower()
-            if not any(tok in best_txt for tok in strict_tokens): continue
-
+            if not any(tok in best_txt for tok in strict_tokens):
+                continue
             score, details = await self.element_scorer.calculate_element_score(el, patterns, target_field)
             if score > best[1]:
                 best = (el, score, details, contexts)
-        
+
         el, score, details, contexts = best
         if el and score >= 60:
             info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info['source'] = 'fallback'
+            except Exception:
+                pass
             tmp = self._generate_temp_field_value(target_field)
             if self.duplicate_prevention.register_field_assignment(target_field, tmp, score, info):
                 field_mapping[target_field] = info
-                logger.info(f"Fallback mapped '{target_field}' via label-context (score {score})")
+                logger.info(f"Fallback mapped '{target_field}' via textarea label-context (score {score})")
+            return
+
+        # 2) textarea が無い場合のみ、text input を限定救済
+        text_inputs = classified_elements.get('text_inputs', []) or []
+        if textarea_candidates or not text_inputs:
+            return
+
+        best = (None, 0, None, [])
+        for el in text_inputs:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                ei = {}
+            # name/id/class の属性に本文系語が含まれるか（誤検出抑止の補助）
+            blob = ' '.join([(ei.get('name') or ''), (ei.get('id') or ''), (ei.get('class') or '')]).lower()
+            attr_hint = any(k in blob for k in ['message', 'inquiry', 'comment', 'content', 'details'])
+
+            el_bounds = self._element_bounds_cache.get(str(el)) if hasattr(self, '_element_bounds_cache') else None
+            contexts = await self.context_text_extractor.extract_context_for_element(el, el_bounds)
+            best_txt = (self.context_text_extractor.get_best_context_text(contexts) or '').lower()
+            if not any(tok in best_txt for tok in strict_tokens):
+                continue
+            # 文脈の強さ + 属性ヒントの双方がある場合のみ採点・救済対象
+            if not attr_hint:
+                continue
+
+            s, details = await self.element_scorer.calculate_element_score(el, patterns, target_field)
+            # 安全側の救済閾値（email_fallback と同等レベル以上）
+            if s > best[1]:
+                best = (el, s, details, contexts)
+
+        el, score, details, contexts = best
+        if el and score >= max(65, int(self.settings.get('email_fallback_min_score', 60))):
+            info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info['source'] = 'fallback'
+            except Exception:
+                pass
+            tmp = self._generate_temp_field_value(target_field)
+            if self.duplicate_prevention.register_field_assignment(target_field, tmp, score, info):
+                field_mapping[target_field] = info
+                logger.info(f"Fallback mapped '{target_field}' via text-input label+attr (score {score})")
 
     async def _fallback_map_email_field(self, classified_elements, field_mapping, used_elements):
         """メールアドレスの取りこぼし救済
@@ -289,7 +391,8 @@ class FieldMapper:
                     blob = ' '.join([
                         (ei.get('name') or ''), (ei.get('id') or ''), (ei.get('class') or ''), (ei.get('placeholder') or '')
                     ]).lower()
-                    if any(k in blob for k in ['confirm', 'check', '確認']):
+                    # 確認用の強いシグナルのみで除外（"check" 単独では除外しない）
+                    if any(k in blob for k in confirm_tokens):
                         continue
                     # コンテキストに強いメール語が含まれるか
                     el_bounds = self._element_bounds_cache.get(str(el)) if hasattr(self, '_element_bounds_cache') else None
@@ -317,6 +420,10 @@ class FieldMapper:
         # 設定化した安全側の閾値
         if score >= int(self.settings.get('email_fallback_min_score', 60)):
             info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info['source'] = 'fallback'
+            except Exception:
+                pass
             tmp = self._generate_temp_field_value(target_field)
             if self.duplicate_prevention.register_field_assignment(target_field, tmp, score, info):
                 field_mapping[target_field] = info
@@ -441,6 +548,10 @@ class FieldMapper:
                     salvage_score = max(15, int(self.settings.get('min_score_threshold', 70)))
                     details = {'element_info': ei, 'total_score': salvage_score}
                     info = await self._create_enhanced_element_info(el, details, contexts)
+                    try:
+                        info['source'] = 'required_rescue'
+                    except Exception:
+                        pass
                     info['required'] = True
 
                     temp_value = self._generate_temp_field_value(field_name)
@@ -491,7 +602,11 @@ class FieldMapper:
         has_kana = any(t in name_id_cls for t in kana_tokens) or ('フリガナ' in ctx_text)
         has_hira = any(t in name_id_cls for t in hira_tokens) or ('ひらがな' in ctx_text)
         is_last = any(t in name_id_cls for t in last_tokens) or any(t in ctx_text for t in ['姓','せい','苗字'])
-        is_first = any(t in name_id_cls for t in first_tokens) or any(t in ctx_text for t in ['名','めい'])
+        # 非個人名（会社名/商品名/部署名/建物名…）の文脈では『名』の判定を抑止
+        from .element_scorer import ElementScorer
+        non_personal_ctx = bool(ElementScorer.NON_PERSONAL_NAME_PATTERN.search(ctx_text or ''))
+        is_first_token_hit = any(t in name_id_cls for t in first_tokens) or any(t in ctx_text for t in ['名','めい'])
+        is_first = is_first_token_hit and not non_personal_ctx
         has_kanji = ('kanji' in name_id_cls) or ('漢字' in ctx_text)
 
         # Prioritize split-specific logical names when tokens available

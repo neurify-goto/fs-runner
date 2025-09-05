@@ -84,7 +84,10 @@ class RuleBasedAnalyzer:
             # フィールド別の最低スコアしきい値（汎用の誤検出抑止）
             'min_score_threshold_per_field': {
                 '姓': 85,
-                '名': 85
+                '名': 85,
+                # 汎用で安全な下限値の追加（誤検出抑止の微調整）
+                '会社名': 78,
+                'メールアドレス': 75,
             },
             'analysis_timeout': 30,
             'enable_fallback': True,

@@ -109,7 +109,9 @@ class FieldPatterns:
                     # 確認系（メール確認など）
                     "confirm", "mailcheck", "mail_check", "mail-check", "email_check", "email-check",
                     "confirm_mail", "confirm-email", "mail_confirm", "email_confirm",
-                    "mailaddressconfirm", "mail_address_confirm", "email_address_confirm"
+                    "mailaddressconfirm", "mail_address_confirm", "email_address_confirm",
+                    # 管理会社や年月に関する語（誤検出抑止・汎用）
+                    "管理会社", "kanri", "syunkou", "竣工", "年月日"
                 ]  # 氏名系の除外を強化し、汎用nameは除外しない
             },
             
