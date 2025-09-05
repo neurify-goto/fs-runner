@@ -60,7 +60,7 @@ class InputValueAssigner:
             return False
         if self.required_analysis.get('treat_all_as_required', False):
             return True
-        core_fields = ['件名', 'お問い合わせ本文', 'メールアドレス', '姓', '名', '氏名', 'お名前']
+        core_fields = ['件名', 'お問い合わせ本文', 'メールアドレス', '姓', '名', '氏名', 'お名前', '統合氏名', '電話番号', '会社名']
         if field_name in core_fields:
             return True
         return field_info.get('required', False)
@@ -77,6 +77,21 @@ class InputValueAssigner:
             # Map Japanese field names to appropriate combination types
             if field_name == "統合氏名":
                 value = self.field_combination_manager.generate_combined_value('full_name', client_data)
+            elif field_name == "統合氏名カナ":
+                # ラベル/コンテキストから ひらがな/カタカナ を簡易判定
+                kana_type = 'katakana'
+                try:
+                    ctx = (field_info.get('best_context_text') or '')
+                    if not ctx and isinstance(field_info.get('context'), list):
+                        # 最良コンテキストが無い場合は先頭のcontextを参照
+                        ctx = next((c.get('text','') for c in field_info['context'] if isinstance(c, dict) and c.get('text')), '')
+                    ctx_lower = str(ctx)
+                    if ('ひらがな' in ctx_lower) or ('hiragana' in ctx_lower):
+                        kana_type = 'hiragana'
+                except Exception:
+                    pass
+                # ふりがな/カナに応じた統合値を生成
+                value = self.field_combination_manager.generate_unified_kana_value(kana_type, client_data)
             elif field_name == "お問い合わせ本文":
                 # Get message from targeting data
                 if isinstance(client_data, dict):

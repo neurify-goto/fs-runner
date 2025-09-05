@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class FieldMapper:
     """フィールドのマッピング処理を担当するクラス"""
     # 非必須だが高信頼であれば入力価値が高い項目（汎用・安全）
-    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号"}
+    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所"}
 
     def __init__(self, page: Page, element_scorer: ElementScorer, 
                  context_text_extractor: ContextTextExtractor, field_patterns: FieldPatterns,
@@ -551,7 +551,8 @@ class FieldMapper:
                 pass
 
         # 必須マーカー
-        required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+        # メモ記号の『※』は必須と無関係な注記に使われることが多いため除外
+        required_markers = ['*', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
         allowed_required_sources = {'dt_label', 'th_label', 'th_label_index', 'label_for', 'aria_labelledby', 'label_element'}
 
         # 走査対象
@@ -595,12 +596,19 @@ class FieldMapper:
 
                     contexts = await self.context_text_extractor.extract_context_for_element(el)
                     field_name = self._infer_logical_field_name_for_required(ei, contexts)
+                    # 追加救済: 『ふりがな/フリガナ/カナ/かな』を示す見出しがある場合、
+                    # auto_required_text_* ではなく『統合氏名カナ』として扱う
+                    try:
+                        if field_name.startswith('auto_required_text_'):
+                            ctx_texts = ' '.join([(getattr(c,'text','') or '') for c in (contexts or [])])
+                            if any(t in ctx_texts for t in ['ふりがな','フリガナ','カナ','かな']):
+                                field_name = '統合氏名カナ'
+                    except Exception:
+                        pass
 
-                    # 汎用テキスト（auto_required_text_*）は誤入力リスクが高く、
-                    # マッピング品質を下げるため救済登録の対象から除外する。
-                    # （必要に応じて auto-handled 側の処理に委譲）
-                    if field_name.startswith('auto_required_text_'):
-                        continue
+                    # 汎用必須テキスト(auto_required_text_*)も救済対象に含める。
+                    # ルール: どのフィールドとも判断がつかない必須テキストは全角空白などの安全値で入力する。
+                    # （実際の値の割当は assigner 側のテンポラリ値生成に委譲）
 
                     # 同一論理フィールドが既に確定している場合は重複登録を抑止
                     if field_name in field_mapping:
@@ -633,9 +641,15 @@ class FieldMapper:
         typ = (element_info.get('type') or '').lower()
         name_id_cls = ' '.join([(element_info.get('name') or ''), (element_info.get('id') or ''), (element_info.get('class') or '')]).lower()
         try:
-            ctx_text = (self.context_text_extractor.get_best_context_text(contexts) or '').lower()
+            ctx_best = (self.context_text_extractor.get_best_context_text(contexts) or '')
         except Exception:
-            ctx_text = ''
+            ctx_best = ''
+        # すべてのコンテキストテキストを結合して判定精度を上げる（best のみだと取りこぼしが出る）
+        try:
+            ctx_all = ' '.join([getattr(c, 'text', '') or '' for c in (contexts or [])])
+        except Exception:
+            ctx_all = ''
+        ctx_text = (str(ctx_best) + ' ' + str(ctx_all)).lower()
 
         if tag == 'input' and typ == 'email':
             return 'メールアドレス'
@@ -679,8 +693,8 @@ class FieldMapper:
                 return '電話番号'
 
         # --- Name field inference (split aware) ---
-        kana_tokens = ['kana','furigana','katakana','カナ','カタカナ','フリガナ']
-        hira_tokens = ['hiragana','ひらがな']
+        kana_tokens = ['kana','furigana','katakana','カナ','カタカナ','フリガナ','ふりがな']
+        hira_tokens = ['hiragana','ひらがな','ふりがな']
         last_tokens = ['lastname','last_name','last-name','last','family-name','family_name','surname','sei','姓']
         # 『名』単独は住所系の『マンション名』等に誤反応しやすいため除外し、
         # より明確な表現のみを用いる
@@ -709,7 +723,9 @@ class FieldMapper:
                 return '姓ひらがな'
             if is_first and not is_last:
                 return '名ひらがな'
-            # ambiguous hiragana → fall back to unified kana policy (none specified); keep as auto text
+            # ひらがな指標のみ（統合フィールド想定）→ 統合氏名カナとして扱い、
+            # 値の生成時にひらがな/カタカナを判定（assigner側でbest_contextを参照）
+            return '統合氏名カナ'
 
         # Kanji or unspecified script
         if is_last and not is_first:
