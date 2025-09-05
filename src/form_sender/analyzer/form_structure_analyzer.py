@@ -544,7 +544,8 @@ class FormStructureAnalyzer:
             # 1. label要素での関連付けをチェック
             element_id = await locator.get_attribute('id')
             if element_id:
-                label_locator = self.page.locator(f'label[for="{element_id}"]')
+                esc_for = str(element_id).replace('\\', r'\\').replace('"', r'\"')
+                label_locator = self.page.locator(f'label[for="{esc_for}"]')
                 label_count = await label_locator.count()
                 if label_count > 0:
                     label_text = await label_locator.text_content()
@@ -562,12 +563,16 @@ class FormStructureAnalyzer:
             # 3. aria-labelledbyでの関連付けをチェック
             labelledby_id = await locator.get_attribute('aria-labelledby')
             if labelledby_id:
-                label_locator = self.page.locator(f'#{labelledby_id}')
-                label_count = await label_locator.count()
-                if label_count > 0:
-                    label_text = await label_locator.text_content()
-                    if label_text:
-                        return label_text.strip()
+                # aria-labelledby は空白区切りで複数IDになることがあるため先頭のみ使用
+                first_id = (labelledby_id or '').split()[0].strip()
+                if first_id:
+                    esc_first = first_id.replace('\\', r'\\').replace('"', r'\"')
+                    label_locator = self.page.locator(f'[id="{esc_first}"]')
+                    label_count = await label_locator.count()
+                    if label_count > 0:
+                        label_text = await label_locator.text_content()
+                        if label_text:
+                            return label_text.strip()
             
         except Exception as e:
             logger.debug(f"Error extracting label text: {e}")
@@ -650,17 +655,23 @@ class FormStructureAnalyzer:
                 info = {'id': '', 'name': '', 'tag': 'input', 'type': ''}
 
             if info.get('id'):
-                return f"#{info['id']}"
+                esc_id = str(info['id']).replace('\\', r'\\').replace('"', r'\"')
+                return f"[id=\"{esc_id}\"]"
 
             name = info.get('name')
             tag = info.get('tag') or 'input'
             typ = info.get('type')
             if name:
+                esc_name = str(name).replace('\\', r'\\').replace('"', r'\"')
                 if typ:
-                    return f"{tag}[name=\"{name}\"][type=\"{typ}\"]"
-                return f"{tag}[name=\"{name}\"]"
+                    esc_type = str(typ).replace('\\', r'\\').replace('"', r'\"')
+                    return f"{tag}[name=\"{esc_name}\"][type=\"{esc_type}\"]"
+                return f"{tag}[name=\"{esc_name}\"]"
 
-            return f"{tag}[type=\"{typ}\"]" if typ else tag
+            if typ:
+                esc_type2 = str(typ).replace('\\', r'\\').replace('"', r'\"')
+                return f"{tag}[type=\"{esc_type2}\"]"
+            return tag
         except Exception as e:
             logger.warning(f"Error generating selector: {e}")
             return 'input'

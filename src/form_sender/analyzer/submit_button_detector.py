@@ -127,16 +127,19 @@ class SubmitButtonDetector:
             )
             el_id = info.get("id") or ""
             if el_id:
-                return f"#{el_id}"
+                esc = str(el_id).replace('\\', r'\\').replace('"', r'\"')
+                return f"[id=\"{esc}\"]"
 
             tag = info.get("tag", "button")
             name = info.get("name") or ""
             typ = info.get("type") or ""
 
             if name:
-                sel = f"{tag}[name=\"{name}\"]"
+                esc_name = str(name).replace('\\', r'\\').replace('"', r'\"')
+                sel = f"{tag}[name=\"{esc_name}\"]"
                 if tag == "input" and typ:
-                    sel += f"[type=\"{typ}\"]"
+                    esc_type = str(typ).replace('\\', r'\\').replace('"', r'\"')
+                    sel += f"[type=\"{esc_type}\"]"
                 return sel
 
             # value/text を条件に含めて差別化
@@ -147,7 +150,8 @@ class SubmitButtonDetector:
 
             if tag == "input":
                 # type=submit/按钮 などが取得できる場合は付与
-                base = f"input[type=\"{typ or 'submit'}\"]"
+                esc_typ = str(typ or 'submit').replace('\\', r'\\').replace('"', r'\"')
+                base = f"input[type=\"{esc_typ}\"]"
                 if value:
                     return f"{base}[value*=\"{_shorten(value)}\"]"
                 if text:

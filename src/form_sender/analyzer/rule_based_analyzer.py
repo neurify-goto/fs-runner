@@ -454,7 +454,7 @@ class RuleBasedAnalyzer:
         そのため、type属性は「属性が存在する場合にのみ」付与する。
 
         優先順位:
-        - idがあれば `#id`
+        - idがあれば `[id="..."]`（CSSの #id は先頭数字/特殊文字で無効になりうるため）
         - nameがあれば `tag[name="..."]` (+ `[type="..."]` は属性存在時のみ)
         - nameが無ければ、inputの場合でも `[type]` は使わずタグのみ（属性がある場合のみ `[type]`）
         """
@@ -470,22 +470,30 @@ class RuleBasedAnalyzer:
                 })
                 """
             )
-            if info.get('id'):
-                return f"#{info['id']}"
+            # ID優先（CSSのattribute selectorを使用してエスケープ不要にする）
+            el_id = info.get('id')
+            if el_id:
+                # 引用符とバックスラッシュを最小限エスケープ
+                esc = str(el_id).replace('\\', r'\\').replace('"', r'\"')
+                return f"[id=\"{esc}\"]"
 
             name = info.get('name')
             tag = info.get('tagName', 'input')
             type_attr = info.get('typeAttr') if tag == 'input' else ''
 
             if name:
-                selector = f"{tag}[name=\"{name}\"]"
+                # name属性は attribute selector で安全に指定
+                esc_name = str(name).replace('\\', r'\\').replace('"', r'\"')
+                selector = f"{tag}[name=\"{esc_name}\"]"
                 if type_attr:
-                    selector += f"[type=\"{type_attr}\"]"
+                    esc_type = str(type_attr).replace('\\', r'\\').replace('"', r'\"')
+                    selector += f"[type=\"{esc_type}\"]"
                 return selector
 
             # nameが無い場合：type属性があるinputのみ[type]を付与
             if tag == 'input' and type_attr:
-                return f"{tag}[type=\"{type_attr}\"]"
+                esc_type2 = str(type_attr).replace('\\', r'\\').replace('"', r'\"')
+                return f"{tag}[type=\"{esc_type2}\"]"
             return tag
         except Exception:
             return 'input'
