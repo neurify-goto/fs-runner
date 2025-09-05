@@ -492,11 +492,14 @@ class FieldMappingAnalyzer:
         
         try:
             # Step 1: ナビゲーション（ポップアップ/セルフクローズに強い実装）
-            # 先にポップアップ監視を仕込む
+            # 先にポップアップ監視を仕込む（once で自動解除）。
             popup_captured: List[Page] = []
             def _on_popup(p):
-                popup_captured.append(p)
-                logger.debug("Popup captured during navigation")
+                try:
+                    popup_captured.append(p)
+                    logger.debug("Popup captured during navigation")
+                except Exception:
+                    pass
             self.page.once("popup", _on_popup)
 
             try:
@@ -505,10 +508,24 @@ class FieldMappingAnalyzer:
                 # 旧ページが閉じられた場合でも、ポップアップが取れていればそちらを採用
                 if 'has been closed' in str(e) and popup_captured:
                     try:
-                        self.page = popup_captured[-1]
-                        logger.info("Detected self-close -> switched to popup page")
-                    except Exception:
-                        raise
+                        candidate = popup_captured[-1]
+                        # 既に閉じていないか確認
+                        is_closed = False
+                        try:
+                            if hasattr(candidate, 'is_closed'):
+                                is_closed = bool(candidate.is_closed())
+                        except Exception:
+                            is_closed = False
+
+                        if not is_closed:
+                            self.page = candidate
+                            logger.info("Detected self-close -> switched to popup page")
+                        else:
+                            logger.info("Captured popup already closed. Recreating page and retrying...")
+                            await self._recreate_page()
+                            await self.page.goto(form_url, wait_until='domcontentloaded', timeout=25000)
+                    finally:
+                        popup_captured.clear()
                 elif 'has been closed' in str(e):
                     logger.info("Detected unexpected page close. Recreating page and retrying once...")
                     await self._recreate_page()

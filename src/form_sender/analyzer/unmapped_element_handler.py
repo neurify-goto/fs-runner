@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, List, Any, Optional, Callable, Awaitable, Tuple
-from playwright.async_api import Page, Locator
+from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 
 from .element_scorer import ElementScorer
 from .context_text_extractor import ContextTextExtractor
@@ -479,8 +479,11 @@ class UnmappedElementHandler:
                             """,
                             list(self.REQUIRED_MARKERS),
                         )
+                    except PlaywrightTimeoutError as e:
+                        logger.debug(f"Timeout during DT/DD required detection for select: {e}")
+                        required = False
                     except Exception as e:
-                        logger.debug(f"DT/DD required detection failed for select: {e}")
+                        logger.debug(f"Unexpected error in DT/DD required detection for select: {e}")
                         required = False
                 if not required:
                     continue
