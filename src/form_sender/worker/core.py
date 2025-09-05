@@ -2329,7 +2329,7 @@ class FormSenderWorker:
             logger.error(f"JavaScript fallback failed for radio '{field_name}': {js_error}")
             return False
 
-    async def _execute_form_submission(self, expanded_instruction: Dict[str, Any], record_id: int) -> Dict[str, Any]:
+    async def _execute_form_submission(self, _unused_expanded_instruction: Dict[str, Any], record_id: int) -> Dict[str, Any]:
         """フォーム送信と結果判定（instruction_json非依存）"""
         # ルールベース解析で検出した候補を優先的に使用
         submit_cfg: Dict[str, Any] = {}
