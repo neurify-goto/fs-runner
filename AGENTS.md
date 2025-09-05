@@ -43,7 +43,7 @@ Each GAS module follows the same pattern:
 * When creating a PR, provide the Pull Request URL to the user.
 * Include relevant issue numbers when applicable.
 * Maintain consistency with existing commit message style in the repository.
-* Before pushing new commits to the branch of an open Pull Request, post a comment on the PR summarizing the additional changes **before you push** to make the review easier. **DO NOT ADD A COMMENT AFTER PUSH.**
+* Before pushing new commits to the branch of an open Pull Request, post a comment on the PR summarizing the additional changes **between commit and push** to make the review easier. **DO NOT ADD A COMMENT AFTER PUSH.**
 * **PR Review Handling:** When receiving user review feedback on a Pull Request, do not blindly accept all suggestions. Critically evaluate each proposed improvement individually, determining whether it should be implemented based on technical merit and alignment with project standards. Only implement changes that are genuinely necessary and beneficial.
 * **Pull Request descriptions must report all changed files.** To ensure traceability, the description must list all created, modified, and deleted files using the following format:
   ```
