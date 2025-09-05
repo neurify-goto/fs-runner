@@ -197,14 +197,22 @@ class FieldMappingAnalyzer:
             raise
     
     async def _initialize_browser(self):
-        """Playwright初期化（メモリ最適化）"""
+        """Playwright初期化（安定化＋メモリ最適化）"""
         try:
             self.playwright = await async_playwright().start()
             # 環境変数でGUI/ヘッドレスを切り替え可能に（デフォルト: ヘッドレス）
             headless_env = os.getenv('PLAYWRIGHT_HEADLESS', '1').lower()
             headless = not (headless_env in ['0', 'false', 'no'])
 
-            self.browser = await self.playwright.chromium.launch(
+            # ブラウザエンジン選択（デフォルト: chromium）。問題発生時に切替可能。
+            engine = os.getenv('PLAYWRIGHT_ENGINE', 'chromium').lower()
+            launcher = {
+                'chromium': self.playwright.chromium,
+                'webkit': self.playwright.webkit,
+                'firefox': self.playwright.firefox,
+            }.get(engine, self.playwright.chromium)
+
+            self.browser = await launcher.launch(
                 headless=headless,
                 args=[
                     '--no-sandbox',
@@ -231,8 +239,36 @@ class FieldMappingAnalyzer:
                 ]
             )
             # コンテキスト＋ページ作成（ページクローズ時の復旧を容易にする）
-            self.context = await self.browser.new_context()
+            self.context = await self.browser.new_context(
+                ignore_https_errors=True,
+                java_script_enabled=True,
+                bypass_csp=True,
+                viewport={"width": 1366, "height": 900},
+            )
+
+            # いくつかのサイトで発生する self-closing/popup リダイレクト対策
+            # - window.close を無効化
+            # - window.open は同一タブ遷移にフォールバック
+            await self.context.add_init_script(
+                """
+                (() => {
+                  try {
+                    const noop = () => false;
+                    Object.defineProperty(window, 'close', { value: noop, configurable: true });
+                    const _open = window.open;
+                    Object.defineProperty(window, 'open', { value: (url, target, features) => {
+                      try { window.location.href = url; } catch {}
+                      return window;
+                    }, configurable: true });
+                  } catch {}
+                })();
+                """
+            )
+
+            # ページクローズを検知して自動で新規ページを補充
+            self.context.set_default_navigation_timeout(30000)
             self.page = await self.context.new_page()
+            self.page.on("close", lambda: logger.debug("Active page closed (event)"))
 
             # 不要リソースのブロッキング（速度最適化）。
             # 以前は script を厳しくブロックしていたが、
@@ -404,11 +440,25 @@ class FieldMappingAnalyzer:
         logger.info(f"Target URL: ***URL_REDACTED***")
         
         try:
-            # Step 1: 高速な初回読み込み（現状維持）。ページが閉じられるケースはワンリトライ。
+            # Step 1: ナビゲーション（ポップアップ/セルフクローズに強い実装）
+            # 先にポップアップ監視を仕込む
+            popup_captured: List[Page] = []
+            def _on_popup(p):
+                popup_captured.append(p)
+                logger.debug("Popup captured during navigation")
+            self.page.once("popup", _on_popup)
+
             try:
                 await self.page.goto(form_url, wait_until='domcontentloaded', timeout=25000)
             except Exception as e:
-                if 'has been closed' in str(e):
+                # 旧ページが閉じられた場合でも、ポップアップが取れていればそちらを採用
+                if 'has been closed' in str(e) and popup_captured:
+                    try:
+                        self.page = popup_captured[-1]
+                        logger.info("Detected self-close -> switched to popup page")
+                    except Exception:
+                        raise
+                elif 'has been closed' in str(e):
                     logger.info("Detected unexpected page close. Recreating page and retrying once...")
                     await self._recreate_page()
                     await self.page.goto(form_url, wait_until='domcontentloaded', timeout=25000)

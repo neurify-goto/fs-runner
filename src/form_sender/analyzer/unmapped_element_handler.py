@@ -449,9 +449,29 @@ class UnmappedElementHandler:
                 continue
             try:
                 element_info = await self.element_scorer._get_element_info(select)
-                if not element_info.get(
-                    "visible", True
-                ) or not await self.element_scorer._detect_required_status(select):
+                if not element_info.get("visible", True):
+                    continue
+
+                # 必須判定（フォールバック付き）
+                required = await self.element_scorer._detect_required_status(select)
+                if not required:
+                    # DL構造: <dd> の直前 <dt> に必須マーカーがあるか簡易チェック
+                    try:
+                        required = await select.evaluate(
+                            """
+                            (el) => {
+                              const MARKERS = ['*','※','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］'];
+                              let p = el; while (p && (p.tagName||'').toLowerCase() !== 'dd') p = p.parentElement;
+                              if (!p) return false; let dt = p.previousElementSibling;
+                              while (dt && (dt.tagName||'').toLowerCase() !== 'dt') dt = dt.previousElementSibling;
+                              if (!dt) return false; const t = (dt.innerText || dt.textContent || '').trim();
+                              return !!t && MARKERS.some(m => t.includes(m));
+                            }
+                            """
+                        )
+                    except Exception:
+                        required = False
+                if not required:
                     continue
                 opt_data = await select.evaluate(
                     "el => Array.from(el.options).map(o => ({text: (o.textContent || '').trim(), value: o.value || ''}))"
