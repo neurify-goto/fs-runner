@@ -1398,14 +1398,18 @@ class MultiProcessOrchestrator:
             # 終了シグナル送信
             self.queue_manager.send_shutdown_signal()
 
-            # ワーカーの終了を待機
-            shutdown_success = self.queue_manager.wait_for_workers_shutdown(timeout)
+            # キューが肥大化していると SHUTDOWN 通知が末尾に埋もれて検出できない問題の対策として、
+            # シャットダウン待機中は結果キューを非破壊的に掃き出しつつ、
+            # ・WORKER_SHUTDOWN はカウント
+            # ・通常結果はバッファに積む（DB書き込みは後段cleanupで実施）
+            shutdown_success = await self._await_worker_shutdowns(timeout)
 
-            # 完全なプロセス終了検証の実行
+            # 完全なプロセス終了検証の実行（join/killベース）
             all_terminated = await self._verify_complete_process_termination()
 
             self.is_running = False
-            return shutdown_success and all_terminated
+            # 実質的にはプロセスの完全終了を重視し、shutdown_success は参考値とする
+            return all_terminated
 
         except Exception as e:
             logger.error(f"Error during worker shutdown: {e}")
@@ -1507,6 +1511,61 @@ class MultiProcessOrchestrator:
         }
         
         return task_ids, error_stats
+
+    async def _await_worker_shutdowns(self, timeout: float = 30) -> bool:
+        """
+        全ワーカーのシャットダウン通知を待機しつつ、結果キューを安全に掃き出す。
+
+        - 大量の通常結果がキューに滞留していても、WORKER_SHUTDOWN を確実に検出する。
+        - 非シャットダウンの結果はDB保存せず一旦バッファに積み、後続の cleanup でまとめて処理。
+
+        Args:
+            timeout: 最大待機秒数
+
+        Returns:
+            bool: 全ワーカー分のシャットダウン通知を観測できたか
+        """
+        try:
+            observed_shutdowns = set()
+            start = time.time()
+            while len(observed_shutdowns) < self.num_workers and (time.time() - start) < timeout:
+                results = self.queue_manager.get_all_available_results()
+                if not results:
+                    await asyncio.sleep(0.2)
+                    continue
+
+                for result in results:
+                    try:
+                        if result.status == ResultStatus.WORKER_SHUTDOWN:
+                            observed_shutdowns.add(result.worker_id)
+                            logger.info(
+                                f"Worker {result.worker_id} shutdown observed "
+                                f"({len(observed_shutdowns)}/{self.num_workers})"
+                            )
+                            continue
+
+                        # WORKER_READY等の制御系は無視、通常結果は後でフラッシュ
+                        if result.status in [
+                            ResultStatus.SUCCESS,
+                            ResultStatus.FAILED,
+                            ResultStatus.ERROR,
+                            ResultStatus.PROHIBITION_DETECTED,
+                        ]:
+                            await self._buffer_worker_result(result)
+                    except Exception as e:
+                        logger.warning(f"Error while handling result during shutdown wait: {e}")
+
+            if len(observed_shutdowns) == self.num_workers:
+                logger.info("All worker shutdown notifications observed")
+                return True
+            else:
+                logger.warning(
+                    f"Observed {len(observed_shutdowns)}/{self.num_workers} worker shutdown notifications within timeout"
+                )
+                return False
+        except Exception as e:
+            logger.error(f"Error awaiting worker shutdowns: {e}")
+            return False
 
     async def _verify_complete_process_termination(self) -> bool:
         """
