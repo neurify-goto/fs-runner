@@ -176,12 +176,8 @@ class MultiProcessOrchestrator:
         self._shutdown_draining: bool = False
         self._shutdown_bg_tasks = set()
         # BGフラッシュの同時実行を抑制するセマフォ
-        try:
-            import asyncio as _asyncio_init
-            self._bg_flush_semaphore = _asyncio_init.Semaphore(1)
-        except Exception:
-            # セマフォ初期化に失敗しても安全側：Noneにして多重起動を避ける
-            self._bg_flush_semaphore = None
+        # asyncio はモジュール先頭でimport済み。ここでセマフォを確実に初期化
+        self._bg_flush_semaphore = asyncio.Semaphore(1)
 
         logger.info(f"MultiProcessOrchestrator initialized: targeting_id={targeting_id}, workers={num_workers}")
         logger.info("Advanced prohibition detection enabled (Form Analyzer compatible)")
@@ -942,7 +938,8 @@ class MultiProcessOrchestrator:
             if not overflow_dir.exists():
                 return
                 
-            overflow_files = list(overflow_dir.glob("overflow_*.json"))
+            # 保存時のプレフィックスに合わせて動的に探索
+            overflow_files = list(overflow_dir.glob(f"{self.EMERGENCY_FILE_PREFIX}_*.json"))
             if not overflow_files:
                 logger.info("No overflow files to process")
                 return
@@ -983,7 +980,9 @@ class MultiProcessOrchestrator:
             # 詳細分類（可能なら付与）
             detail = self._make_classify_detail(result_data.get('error_type'), result_data.get('error_message'))
 
-            self.controller.save_result_immediately(
+            # 同期I/Oをスレッドに退避してイベントループブロッキングを回避
+            await asyncio.to_thread(
+                self.controller.save_result_immediately,
                 result_data['record_id'],
                 "success" if result_data['status'] == "SUCCESS" else "failed",
                 result_data['error_type'],
@@ -995,7 +994,7 @@ class MultiProcessOrchestrator:
             if result_data['instruction_valid_updated']:
                 is_valid = result_data['status'] == "SUCCESS"
                 if hasattr(self.controller, 'update_instruction_validity'):
-                    self.controller.update_instruction_validity(result_data['record_id'], is_valid)
+                    await asyncio.to_thread(self.controller.update_instruction_validity, result_data['record_id'], is_valid)
                 else:
                     logger.debug("Instruction validity update skipped (method not available)")
                 
@@ -1574,17 +1573,24 @@ class MultiProcessOrchestrator:
             # BGフラッシュ起動ヘルパ（タスク追跡 + 例外監視）
             def _launch_bg_flush(reason: str = "periodic"):
                 nonlocal last_periodic_flush
-                task = asyncio.create_task(_schedule_safe_bg_flush(reason))
-                self._shutdown_bg_tasks.add(task)
-                def _done_cb(t: asyncio.Task):
-                    try:
-                        _ = t.result()
-                    except Exception as e:
-                        logger.warning(f"Background flush task failed ({reason}): {e}")
-                    finally:
-                        self._shutdown_bg_tasks.discard(t)
-                task.add_done_callback(_done_cb)
-                last_periodic_flush = time.time()
+                task = None
+                try:
+                    task = asyncio.create_task(_schedule_safe_bg_flush(reason))
+                    self._shutdown_bg_tasks.add(task)
+                    def _done_cb(t: asyncio.Task):
+                        try:
+                            _ = t.result()
+                        except Exception as e:
+                            logger.warning(f"Background flush task failed ({reason}): {e}")
+                        finally:
+                            self._shutdown_bg_tasks.discard(t)
+                    task.add_done_callback(_done_cb)
+                except Exception as e:
+                    logger.warning(f"Failed to launch background flush ({reason}): {e}")
+                    if task and not task.done():
+                        task.cancel()
+                finally:
+                    last_periodic_flush = time.time()
 
             try:
                 while len(observed_shutdowns) < expected_workers:
@@ -1634,7 +1640,8 @@ class MultiProcessOrchestrator:
 
                                 # メモリセーフガード：肥大し過ぎたら非同期フラッシュ（awaitしない）
                                 try:
-                                    if current_buffer_size > int(self.MAX_BUFFER_SIZE) * 2:
+                                    EMERGENCY_FACTOR = getattr(self, 'SHUTDOWN_EMERGENCY_FLUSH_FACTOR', 2.0)
+                                    if current_buffer_size > int(self.MAX_BUFFER_SIZE * EMERGENCY_FACTOR):
                                         logger.warning(
                                             f"Buffer growing large during shutdown (size={current_buffer_size}), scheduling background flush"
                                         )
@@ -1651,8 +1658,13 @@ class MultiProcessOrchestrator:
                     rss = psutil.Process().memory_info().rss
                     rss_mb = rss / (1024 * 1024)
                     mem_msg = f", rss={rss_mb:.1f}MB"
-                except Exception:
-                    mem_msg = ""
+                except (ImportError, Exception) as e:  # psutil固有例外も含め安全側
+                    try:
+                        import psutil as _ps  # 型参照のための別名
+                        from psutil import NoSuchProcess, AccessDenied  # noqa
+                        mem_msg = f", rss=unavailable({type(e).__name__})"
+                    except Exception:
+                        mem_msg = f", rss=unavailable({type(e).__name__})"
 
                 final_buffer_size = len(self.result_buffer) if hasattr(self, 'result_buffer') else 0
                 total_elapsed = time.time() - start
@@ -1674,18 +1686,25 @@ class MultiProcessOrchestrator:
                 try:
                     if self._shutdown_bg_tasks:
                         tasks = list(self._shutdown_bg_tasks)
-                        for t in tasks:
-                            if not t.done():
-                                t.cancel()
+                        # 原則キャンセルしない。短時間（5s）で完了を待つ
                         try:
-                            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2.0)
+                            results = await asyncio.wait_for(
+                                asyncio.gather(*tasks, return_exceptions=True), timeout=5.0
+                            )
+                            for i, r in enumerate(results):
+                                if isinstance(r, Exception):
+                                    logger.warning(f"Background flush task {i} finished with error: {r}")
                         except Exception as _ge:
-                            logger.debug(f"Background flush gather timeout/error: {_ge}")
+                            logger.warning(f"Background flush gather timeout/error: {_ge}")
                 except Exception as _ce:
                     logger.debug(f"Background flush cleanup error: {_ce}")
 
         try:
-            expected_workers = len(self.worker_processes) if hasattr(self, 'worker_processes') else self.num_workers
+            # 現在生存しているプロセス数を期待値とする（死んだプロセスで不必要に待たない）
+            if hasattr(self, 'worker_processes') and self.worker_processes:
+                expected_workers = sum(1 for p in self.worker_processes if p and p.is_alive())
+            else:
+                expected_workers = self.num_workers
             return await asyncio.wait_for(_process_with_timeout(expected_workers), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"Shutdown wait timed out after {timeout}s")
