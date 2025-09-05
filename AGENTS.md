@@ -130,3 +130,9 @@ Each GAS module follows the same pattern:
 * **Table Schema Reference:** Table schema definitions are maintained in `scripts/table_schema/` directory. Always reference existing schemas before implementing database-related functionality.
 * **Schema Consistency:** Ensure all database operations and queries are consistent with the existing table schemas defined in `scripts/table_schema/`. Verify column names, data types, and constraints before implementation.
 * **SQL Organization:** Organize SQL files by functionality (e.g., `migrations/`, `functions/`, `indexes/`) when the scripts directory grows large.
+
+### **Task Execution Policy**
+
+* **Continuous execution:** Agents must execute assigned tasks end-to-end without pausing for interim check-ins or status updates. Continue until the task is fully completed.
+* **Exceptions — major issues only:** Pausing or stopping is allowed only when a blocking or high‑risk issue occurs, such as safety/security concerns, legal or policy constraints, missing required access/approvals, risk of data loss or corruption, or unrecoverable environmental failures.
+* **If an exception occurs:** Surface a concise problem report that includes what was attempted, the exact blocker, and concrete next steps or a minimal, clearly scoped request for input/approval.
