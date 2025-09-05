@@ -85,6 +85,10 @@ Each GAS module follows the same pattern:
 * **Test Data**: For local submission testing, use actual client data from `tests/info.json` (company's own content) instead of creating test input content.
 * **Playwright Configuration**: When performing local submission tests, use Playwright in GUI mode (not headless) so users can observe the operation.
 
+#### **Shell Command Execution**
+
+* Always set explicit timeouts for shell commands to prevent indefinite hangs. Choose timeouts appropriate to the operation, and on timeout ensure child processes are terminated and a clear, actionable error is surfaced.
+
 ### **Coding Style**
 
 * **Adhere to PEP 8:** All Python code should follow the PEP 8 style guide.  
