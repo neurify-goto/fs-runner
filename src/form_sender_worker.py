@@ -105,6 +105,9 @@ async def main():
                        help='[Deprecated/Compat] Suppress mapping-related INFO/DEBUG logs')
     parser.add_argument('--show-mapping-logs', action='store_true',
                        help='Show mapping-related INFO/DEBUG logs (override default quiet)')
+    # 追加入力リトライの詳細ログ（通常は抑制）
+    parser.add_argument('--show-retry-logs', action='store_true',
+                       help='Show detailed retry logs for missing-field autofill (default: suppressed)')
     
     args = parser.parse_args()
     
@@ -121,6 +124,16 @@ async def main():
         headless_mode = None
     
     logger.info(f"Browser headless mode: {args.headless} ({'forced headless' if headless_mode == True else 'forced GUI' if headless_mode == False else 'environment-based auto detection'})")
+
+    # リトライ詳細ログの伝搬（サブプロセスへ環境変数で伝える）
+    try:
+        if args.show_retry_logs:
+            os.environ['SHOW_RETRY_LOGS'] = '1'
+        else:
+            # 既に設定されている場合でも明示的にオフへ
+            os.environ.pop('SHOW_RETRY_LOGS', None)
+    except Exception:
+        pass
 
     # マッピング関連ログの抑制（INFO/DEBUG のみ）。WARNING 以上は通す。
     try:
