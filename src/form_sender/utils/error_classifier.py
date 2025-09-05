@@ -102,6 +102,9 @@ class ErrorClassifier:
         ], 'FORM_VALIDATION_ERROR', 8)
     ]
 
+    # フラット化したパターン配列（優先度順）
+    _FLATTENED_ERROR_PATTERNS: List[Tuple[Pattern[str], str, int]] = []
+
     # === 追加: 詳細カテゴリ/コード判定用のパターン群 ==============================
     # ネットワーク/ブラウザ/Playwright 系
     NETWORK_TIMEOUT = re.compile(r'(timeout|timed\s*out|navigation\s*timeout|Timeout\s*\d+ms\s*exceeded)', re.IGNORECASE)
@@ -177,6 +180,9 @@ class ErrorClassifier:
     _external_rules_loaded: bool = False
     _external_extra_patterns: Dict[str, List[Pattern[str]]] = {}
 
+    # 信頼度の下限（ハード下限）。必要に応じて外部設定へ拡張可能。
+    MIN_CONFIDENCE: float = 0.2
+
     @classmethod
     def _load_external_rules(cls) -> None:
         """config/error_classification.json が存在すれば追加パターンをロード"""
@@ -185,27 +191,37 @@ class ErrorClassifier:
         try:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             config_path = os.path.join(base_dir, 'config', 'error_classification.json')
-            if not os.path.exists(config_path):
-                cls._external_rules_loaded = True
-                return
-            with open(config_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            extra: Dict[str, List[str]] = data.get('extra_patterns', {})
-            compiled: Dict[str, List[Pattern[str]]] = {}
-            for key, patterns in extra.items():
-                compiled[key] = []
-                for p in patterns:
-                    try:
-                        compiled[key].append(re.compile(p, re.IGNORECASE))
-                    except re.error:
-                        # 無効な正規表現は黙って無視
-                        pass
-            cls._external_extra_patterns = compiled
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                extra: Dict[str, List[str]] = data.get('extra_patterns', {})
+                compiled: Dict[str, List[Pattern[str]]] = {}
+                for key, patterns in extra.items():
+                    compiled[key] = []
+                    for p in patterns:
+                        try:
+                            compiled[key].append(re.compile(p, re.IGNORECASE))
+                        except re.error:
+                            # 無効な正規表現は黙って無視
+                            pass
+                cls._external_extra_patterns = compiled
+            else:
+                cls._external_extra_patterns = {}
         except Exception:
             # 設定読み込みの失敗は致命ではない
             cls._external_extra_patterns = {}
         finally:
             cls._external_rules_loaded = True
+
+        # 事前フラット化（初回のみ）
+        if not cls._FLATTENED_ERROR_PATTERNS:
+            flattened: List[Tuple[Pattern[str], str, int]] = []
+            for patterns, error_type, priority in cls.ERROR_PATTERN_RULES:
+                for p in patterns:
+                    flattened.append((p, error_type, priority))
+            # 既に ERROR_PATTERN_RULES が優先度順に並んでいるが、念のため priority で安定ソート
+            flattened.sort(key=lambda x: x[2])
+            cls._FLATTENED_ERROR_PATTERNS = flattened
 
     @classmethod
     def classify_error_type(cls, error_context: Dict[str, Any]) -> str:
@@ -286,11 +302,13 @@ class ErrorClassifier:
     @classmethod
     def _classify_by_patterns(cls, error_message: str) -> Optional[str]:
         """パターンベースの最適化された分類"""
-        # 優先度順でパターンをチェック（一回のループで全パターンを効率的に処理）
-        for patterns, error_type, priority in cls.ERROR_PATTERN_RULES:
-            for pattern in patterns:
-                if pattern.search(error_message):
-                    return error_type
+        # 事前フラット化配列で単一ループ検索
+        if not cls._FLATTENED_ERROR_PATTERNS:
+            # 念のためロード（初回）
+            cls._load_external_rules()
+        for pattern, error_type, _priority in cls._FLATTENED_ERROR_PATTERNS:
+            if pattern.search(error_message):
+                return error_type
         return None
     
     @classmethod
@@ -736,9 +754,8 @@ class ErrorClassifier:
         if not msg and not content:
             score -= 0.2
 
-        # スコアクリップ
+        # スコアクリップ + 最低保証
         score = max(0.0, min(1.0, score))
-        # 最低保証
-        if score < 0.2:
-            score = 0.2
+        if score < cls.MIN_CONFIDENCE:
+            score = cls.MIN_CONFIDENCE
         return score

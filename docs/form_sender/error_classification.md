@@ -24,6 +24,24 @@
 - 追加のパターンは `config/error_classification.json` の `extra_patterns` に正規表現で追記できます。
 - 設定が無くても動作します（内蔵パターンのみ使用）。
 
+### 設定例
+```json
+{
+  "extra_patterns": {
+    "RATE_LIMIT": [
+      "(?i)throttled",
+      "(?i)リクエストが多すぎます"
+    ],
+    "WAF_CHALLENGE": [
+      "(?i)Attention Required\\s*\\|\\s*Cloudflare",
+      "(?i)(bot manager|web application firewall)"
+    ]
+  }
+}
+```
+
+上記のようにサイト固有文言を登録すると、デプロイ不要で即時に分類へ反映されます。
+
 ## ログ/個人情報
 - 当システムは LogSanitizer により URL・企業名等を自動マスクします。
 - 本分類モジュールは詳細ログを最小化し、エラーメッセージ/本文の生出力を避けます。
@@ -35,4 +53,3 @@
 ## 既知の限界
 - 一部のサイト固有文言は外部パターンへ追加登録が必要です。
 - HTTP ステータスが取得できないワークフローでは本文/メッセージのヒューリスティックに依存します。
-

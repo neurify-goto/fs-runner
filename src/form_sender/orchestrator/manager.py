@@ -652,18 +652,7 @@ class MultiProcessOrchestrator:
                 
                 # 基本の結果保存
                 # 詳細分類（可能なら付与）
-                detail = None
-                try:
-                    detail = ErrorClassifier.classify_detail(
-                        error_message=result.error_message or result.error_type or "",
-                        page_content="",
-                        http_status=None,
-                    )
-                    if result.error_type:
-                        # 既に決定済みのerror_typeを最優先
-                        detail['code'] = result.error_type
-                except Exception as _detail_err:
-                    logger.warning(f"classify_detail failed, fallback without detail: {_detail_err}")
+                detail = self._make_classify_detail(result.error_type, result.error_message)
 
                 save_task = asyncio.create_task(
                     asyncio.to_thread(
@@ -956,17 +945,7 @@ class MultiProcessOrchestrator:
         """
         try:
             # 詳細分類（可能なら付与）
-            detail = None
-            try:
-                detail = ErrorClassifier.classify_detail(
-                    error_message=result_data.get('error_type') or "",
-                    page_content="",
-                    http_status=None,
-                )
-                if result_data.get('error_type'):
-                    detail['code'] = result_data.get('error_type')
-            except Exception as _detail_err:
-                logger.warning(f"classify_detail failed (overflow), fallback without detail: {_detail_err}")
+            detail = self._make_classify_detail(result_data.get('error_type'), result_data.get('error_message'))
 
             self.controller.save_result_immediately(
                 result_data['record_id'],
@@ -989,6 +968,26 @@ class MultiProcessOrchestrator:
         except Exception as e:
             logger.error(f"Failed to save overflow result to database: {e}")
             raise
+
+    def _make_classify_detail(self, error_type: Optional[str], error_message: Optional[str]) -> Optional[dict]:
+        """classify_detail の共通呼び出し。安全に失敗をログ化して None を返す。"""
+        try:
+            msg = (error_message or error_type or "")
+            detail = ErrorClassifier.classify_detail(
+                error_message=msg,
+                page_content="",
+                http_status=None,
+            )
+            if error_type:
+                detail['code'] = error_type
+            return detail
+        except (ValueError, RuntimeError, KeyError) as _known:
+            logger.warning(f"classify_detail failed (known): {type(_known).__name__}: {_known}")
+            return None
+        except Exception as _unknown:
+            # 予期しないエラーは型も含めて警告
+            logger.warning(f"classify_detail failed (unexpected {type(_unknown).__name__}): {_unknown}")
+            return None
 
     async def _retry_failed_results(self, failed_results: List[WorkerResult]):
         """
