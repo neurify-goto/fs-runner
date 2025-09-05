@@ -255,7 +255,11 @@ class RuleBasedAnalyzer:
         try:
             if '統合氏名' not in self.field_mapping:
                 return
-            negative_ctx_tokens = ['住所', 'マンション名', '建物名', 'ふりがな', 'フリガナ', 'カナ', 'かな', 'ひらがな']
+            # 文脈上、個人名ではない可能性が高い語を追加（汎用）
+            negative_ctx_tokens = [
+                '住所', 'マンション名', '建物名', 'ふりがな', 'フリガナ', 'カナ', 'かな', 'ひらがな',
+                '郵便', '郵便番号', '商品名', '部署', '部署名'
+            ]
             negative_attr_tokens = ['kana', 'furigana', 'katakana', 'hiragana']
             for k in ['姓', '名']:
                 info = self.field_mapping.get(k)
@@ -264,6 +268,18 @@ class RuleBasedAnalyzer:
                 ctx = (info.get('best_context_text') or '').lower()
                 blob = ' '.join([str(info.get('name','')).lower(), str(info.get('id','')).lower(), str(info.get('class','')).lower(), str(info.get('placeholder','')).lower()])
                 if any(t.lower() in ctx for t in negative_ctx_tokens) or any(t in blob for t in negative_attr_tokens):
+                    self.field_mapping.pop(k, None)
+            # さらに安全弁: 『統合氏名』が確定しているのに、姓/名のスコアが低い場合は除去
+            try:
+                per_field = (self.mapper.settings.get('min_score_threshold_per_field', {}) or {})
+                min_name_score = int(per_field.get('名', 85))
+                min_last_score = int(per_field.get('姓', 85))
+            except Exception:
+                min_name_score = 85
+                min_last_score = 85
+            for k, th in [('姓', min_last_score), ('名', min_name_score)]:
+                info = self.field_mapping.get(k)
+                if info and int(info.get('score', 0)) < th:
                     self.field_mapping.pop(k, None)
         except Exception:
             pass

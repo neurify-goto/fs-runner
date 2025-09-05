@@ -110,8 +110,16 @@ class FieldMapper:
                         tag_name = (best_score_details.get('element_info', {}) or {}).get('tag_name', '').lower()
                         map_ok = (best_score >= base_threshold) or (tag_name == 'textarea')
                     else:
-                        # それ以外のコア項目は「必須一致」または最低閾値クリアで採用
-                        map_ok = is_required_match or (best_score >= base_threshold)
+                        # それ以外のコア項目は「必須一致」または最低閾値クリアで採用。
+                        # ただし姓/名など一部フィールドはフィールド別しきい値を厳守して安全側に倒す。
+                        per_field_thresholds = (self.settings.get('min_score_threshold_per_field', {}) or {})
+                        required_threshold = per_field_thresholds.get(field_name, base_threshold)
+                        # コア項目でも required 一致だけでの採用は安全側に制限。
+                        # → 姓/名などは required 一致があっても required_threshold を満たさない場合は採用しない。
+                        if field_name in per_field_thresholds:
+                            map_ok = best_score >= required_threshold
+                        else:
+                            map_ok = is_required_match or (best_score >= required_threshold)
                 else:
                     # 非コア項目は必須一致だけでは採用しない。
                     # スコアが動的閾値（品質優先）を満たす場合のみ採用。
