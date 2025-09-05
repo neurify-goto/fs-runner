@@ -197,14 +197,25 @@ class FieldMappingAnalyzer:
             raise
     
     async def _initialize_browser(self):
-        """Playwright初期化（メモリ最適化）"""
+        """Playwright初期化（安定化＋メモリ最適化）"""
         try:
             self.playwright = await async_playwright().start()
             # 環境変数でGUI/ヘッドレスを切り替え可能に（デフォルト: ヘッドレス）
             headless_env = os.getenv('PLAYWRIGHT_HEADLESS', '1').lower()
             headless = not (headless_env in ['0', 'false', 'no'])
 
-            self.browser = await self.playwright.chromium.launch(
+            # ブラウザエンジン選択（デフォルト: chromium）。問題発生時に切替可能。
+            engine = os.getenv('PLAYWRIGHT_ENGINE', 'chromium').lower()
+            engine_map = {
+                'chromium': self.playwright.chromium,
+                'webkit': self.playwright.webkit,
+                'firefox': self.playwright.firefox,
+            }
+            launcher = engine_map.get(engine, self.playwright.chromium)
+            if engine not in engine_map:
+                logger.warning(f"Unknown PLAYWRIGHT_ENGINE='{engine}', falling back to chromium")
+
+            self.browser = await launcher.launch(
                 headless=headless,
                 args=[
                     '--no-sandbox',
@@ -231,8 +242,36 @@ class FieldMappingAnalyzer:
                 ]
             )
             # コンテキスト＋ページ作成（ページクローズ時の復旧を容易にする）
-            self.context = await self.browser.new_context()
+            self.context = await self.browser.new_context(
+                ignore_https_errors=True,
+                java_script_enabled=True,
+                bypass_csp=True,
+                viewport={"width": 1366, "height": 900},
+            )
+
+            # いくつかのサイトで発生する self-closing/popup リダイレクト対策
+            # - window.close を無効化
+            # - window.open は同一タブ遷移にフォールバック
+            await self.context.add_init_script(
+                """
+                (() => {
+                  try {
+                    const noop = () => false;
+                    Object.defineProperty(window, 'close', { value: noop, configurable: true });
+                    const _open = window.open;
+                    Object.defineProperty(window, 'open', { value: (url, target, features) => {
+                      try { window.location.href = url; } catch {}
+                      return window;
+                    }, configurable: true });
+                  } catch {}
+                })();
+                """
+            )
+
+            # ページクローズを検知して自動で新規ページを補充
+            self.context.set_default_navigation_timeout(30000)
             self.page = await self.context.new_page()
+            self.page.on("close", lambda: logger.debug("Active page closed (event)"))
 
             # 不要リソースのブロッキング（速度最適化）。
             # 以前は script を厳しくブロックしていたが、
@@ -327,9 +366,57 @@ class FieldMappingAnalyzer:
                         # ブラウザも無い場合は再初期化
                         await self._initialize_browser()
                         return
-                    self.context = await self.browser.new_context()
-                # ルーティングとヘッダは context に設定済み
+                    # 初期化時と同等のオプションを再適用
+                    self.context = await self.browser.new_context(
+                        ignore_https_errors=True,
+                        java_script_enabled=True,
+                        bypass_csp=True,
+                        viewport={"width": 1366, "height": 900},
+                    )
+
+                    # self-closing / popup 抑止 init_script を最優先で再適用
+                    await self.context.add_init_script(
+                        """
+                        (() => { try {
+                          const noop = () => false;
+                          Object.defineProperty(window, 'close', { value: noop, configurable: true });
+                          const _open = window.open;
+                          Object.defineProperty(window, 'open', { value: (url, target, features) => {
+                            try { window.location.href = url; } catch {}
+                            return window;
+                          }, configurable: true });
+                        } catch {} })();
+                        """
+                    )
+
+                    # User-Agent / タイムアウト再設定
+                    await self.context.set_extra_http_headers({
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    })
+                    self.context.set_default_navigation_timeout(30000)
+
+                    # 再ルーティング（初期化時と同様のブロッキング方針）
+                    async def handle_route(route):
+                        resource_type = route.request.resource_type
+                        url = route.request.url.lower()
+                        if resource_type in ["image", "media", "font", "manifest", "other"]:
+                            await route.abort(); return
+                        if resource_type == "stylesheet":
+                            await route.abort(); return
+                        if resource_type == "script":
+                            tracker_keywords = [
+                                "googletagmanager.com","google-analytics.com","www.google-analytics.com",
+                                "doubleclick.net","googlesyndication.com","facebook.net",
+                                "connect.facebook.net","hotjar.com","mixpanel.com","amplitude.com",
+                            ]
+                            if any(k in url for k in tracker_keywords):
+                                await route.abort(); return
+                        await route.continue_()
+                    await self.context.route("**/*", handle_route)
+
+                # 新規ページ生成とイベント再設定
                 self.page = await self.context.new_page()
+                self.page.on("close", lambda: logger.debug("Active page closed (event)"))
                 return
             except Exception as e:
                 last_err = e
@@ -404,11 +491,42 @@ class FieldMappingAnalyzer:
         logger.info(f"Target URL: ***URL_REDACTED***")
         
         try:
-            # Step 1: 高速な初回読み込み（現状維持）。ページが閉じられるケースはワンリトライ。
+            # Step 1: ナビゲーション（ポップアップ/セルフクローズに強い実装）
+            # 先にポップアップ監視を仕込む（once で自動解除）。
+            popup_captured: List[Page] = []
+            def _on_popup(p):
+                try:
+                    popup_captured.append(p)
+                    logger.debug("Popup captured during navigation")
+                except Exception:
+                    pass
+            self.page.once("popup", _on_popup)
+
             try:
                 await self.page.goto(form_url, wait_until='domcontentloaded', timeout=25000)
             except Exception as e:
-                if 'has been closed' in str(e):
+                # 旧ページが閉じられた場合でも、ポップアップが取れていればそちらを採用
+                if 'has been closed' in str(e) and popup_captured:
+                    try:
+                        candidate = popup_captured[-1]
+                        # 既に閉じていないか確認
+                        is_closed = False
+                        try:
+                            if hasattr(candidate, 'is_closed'):
+                                is_closed = bool(candidate.is_closed())
+                        except Exception:
+                            is_closed = False
+
+                        if not is_closed:
+                            self.page = candidate
+                            logger.info("Detected self-close -> switched to popup page")
+                        else:
+                            logger.info("Captured popup already closed. Recreating page and retrying...")
+                            await self._recreate_page()
+                            await self.page.goto(form_url, wait_until='domcontentloaded', timeout=25000)
+                    finally:
+                        popup_captured.clear()
+                elif 'has been closed' in str(e):
                     logger.info("Detected unexpected page close. Recreating page and retrying once...")
                     await self._recreate_page()
                     await self.page.goto(form_url, wait_until='domcontentloaded', timeout=25000)

@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, List, Any, Optional, Callable, Awaitable, Tuple
-from playwright.async_api import Page, Locator
+from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 
 from .element_scorer import ElementScorer
 from .context_text_extractor import ContextTextExtractor
@@ -34,6 +34,9 @@ class UnmappedElementHandler:
         self.field_patterns = field_patterns
         # 近傍コンテナの必須検出結果キャッシュ
         self._container_required_cache: Dict[str, bool] = {}
+
+        # 必須マーカー（重複利用を避けるためクラス定数的に保持）
+        self.REQUIRED_MARKERS = ['*','※','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］']
 
     async def _detect_group_required_via_container(self, first_radio: Locator) -> bool:
         """見出しコンテナ側の必須マーカーを探索して判定（設定化・キャッシュ付）。"""
@@ -449,9 +452,40 @@ class UnmappedElementHandler:
                 continue
             try:
                 element_info = await self.element_scorer._get_element_info(select)
-                if not element_info.get(
-                    "visible", True
-                ) or not await self.element_scorer._detect_required_status(select):
+                if not element_info.get("visible", True):
+                    continue
+
+                # 必須判定（フォールバック付き）
+                required = await self.element_scorer._detect_required_status(select)
+                if not required:
+                    # DL構造: <dd> の直前 <dt> に必須マーカーがあるか簡易チェック（JS側も try-catch）
+                    try:
+                        required = await select.evaluate(
+                            """
+                            (el, MARKERS) => {
+                              try {
+                                if (!el || !el.tagName) return false;
+                                let p = el;
+                                while (p && (p.tagName||'').toLowerCase() !== 'dd') p = p.parentElement;
+                                if (!p) return false;
+                                let dt = p.previousElementSibling;
+                                while (dt && (dt.tagName||'').toLowerCase() !== 'dt') dt = dt.previousElementSibling;
+                                if (!dt) return false;
+                                const t = (dt.innerText || dt.textContent || '').trim();
+                                if (!t) return false;
+                                return MARKERS.some(m => t.includes(m));
+                              } catch { return false; }
+                            }
+                            """,
+                            list(self.REQUIRED_MARKERS),
+                        )
+                    except PlaywrightTimeoutError as e:
+                        logger.debug(f"Timeout during DT/DD required detection for select: {e}")
+                        required = False
+                    except Exception as e:
+                        logger.debug(f"Unexpected error in DT/DD required detection for select: {e}")
+                        required = False
+                if not required:
                     continue
                 opt_data = await select.evaluate(
                     "el => Array.from(el.options).map(o => ({text: (o.textContent || '').trim(), value: o.value || ''}))"
