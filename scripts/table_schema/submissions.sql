@@ -3,6 +3,7 @@ create table public.submissions (
   targeting_id bigint not null,
   company_id bigint not null,
   error_type text null,
+  classify_detail jsonb null,
   submitted_at timestamp with time zone null,
   success boolean null,
   constraint submissions_pkey primary key (id)

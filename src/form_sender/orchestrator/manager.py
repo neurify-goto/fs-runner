@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from ..control.continuous_processor import ContinuousProcessController
+from ..utils.error_classifier import ErrorClassifier
 from ..communication.queue_manager import (
     QueueManager,
     WorkerResult,
@@ -650,6 +651,20 @@ class MultiProcessOrchestrator:
                 save_tasks = []
                 
                 # 基本の結果保存
+                # 詳細分類（可能なら付与）
+                detail = None
+                try:
+                    detail = ErrorClassifier.classify_detail(
+                        error_message=result.error_message or result.error_type or "",
+                        page_content="",
+                        http_status=None,
+                    )
+                    if result.error_type:
+                        # 既に決定済みのerror_typeを最優先
+                        detail['code'] = result.error_type
+                except Exception as _detail_err:
+                    logger.debug(f"classify_detail fallback: {_detail_err}")
+
                 save_task = asyncio.create_task(
                     asyncio.to_thread(
                         self.controller.save_result_immediately,
@@ -658,6 +673,7 @@ class MultiProcessOrchestrator:
                         result.error_type,
                         result.instruction_valid_updated,
                         result.bot_protection_detected,
+                        detail,
                     )
                 )
                 save_tasks.append(save_task)
@@ -939,12 +955,26 @@ class MultiProcessOrchestrator:
             result_data: 保存するデータ
         """
         try:
+            # 詳細分類（可能なら付与）
+            detail = None
+            try:
+                detail = ErrorClassifier.classify_detail(
+                    error_message=result_data.get('error_type') or "",
+                    page_content="",
+                    http_status=None,
+                )
+                if result_data.get('error_type'):
+                    detail['code'] = result_data.get('error_type')
+            except Exception as _detail_err:
+                logger.debug(f"classify_detail fallback (overflow): {_detail_err}")
+
             self.controller.save_result_immediately(
                 result_data['record_id'],
                 "success" if result_data['status'] == "SUCCESS" else "failed",
                 result_data['error_type'],
                 result_data['instruction_valid_updated'],
                 result_data['bot_protection_detected'],
+                detail,
             )
             
             if result_data['instruction_valid_updated']:

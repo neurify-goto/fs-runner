@@ -1,10 +1,21 @@
 """
-エラー分類ユーティリティ
+エラー分類ユーティリティ（拡張版）
 
-指示書問題と外部要因を正確に区別するための共通分類ロジック
-性能最適化版：パターンマッチング効率化、メソッド複雑度削減、例外チェーン保持
+目的:
+- 送信失敗時のエラーを、ネットワーク/HTTP/WAF/検証/要素/CSRF/重複/禁止 などに高精度に分類。
+- 既存の軽量パターン分類を維持しつつ、詳細カテゴリ/コード/再試行可否のヒントを付与可能な拡張APIを追加。
+
+方針:
+- 互換性維持: 既存の classify_error_type / classify_form_submission_error は従来どおり「文字列コード」を返す。
+- 機能拡張: 新規 classify_detail は詳細な辞書を返し、将来的なDB拡張に備える（呼び出し側は必須ではない）。
+- 定数管理: コアの代表パターンはコード内に保持。追加パターンは config/error_classification.json から任意ロード。
+
+セキュリティ:
+- ログ出力では機微情報を含まない（LogSanitizer 側でマスクされる前提だが、本モジュールは原則ロギング最小限）。
 """
 
+import json
+import os
 import re
 import logging
 from typing import Dict, Any, List, Pattern, Optional, Tuple
@@ -90,7 +101,31 @@ class ErrorClassifier:
             re.compile(r'invalid[\s\w]*input[\s\w]*value', re.IGNORECASE)
         ], 'FORM_VALIDATION_ERROR', 8)
     ]
-    
+
+    # === 追加: 詳細カテゴリ/コード判定用のパターン群 ==============================
+    # ネットワーク/ブラウザ/Playwright 系
+    NETWORK_TIMEOUT = re.compile(r'(timeout|timed\s*out|navigation\s*timeout|Timeout\s*\d+ms\s*exceeded)', re.IGNORECASE)
+    DNS_ERROR = re.compile(r'(ERR_NAME_NOT_RESOLVED|ENOTFOUND|DNS\s*lookup\s*failed)', re.IGNORECASE)
+    TLS_ERROR = re.compile(r'(SSL|TLS|CERT|CERTIFICATE|certificate\s*verify\s*failed|CERT_)', re.IGNORECASE)
+    CONN_RESET = re.compile(r'(ECONNRESET|Connection\s*reset|net::ERR_CONNECTION_RESET)', re.IGNORECASE)
+    PAGE_CLOSED = re.compile(r'(Target\s*closed|Execution\s*context\s*was\s*destroyed|frame\s*was\s*detached)', re.IGNORECASE)
+    NOT_INTERACTABLE = re.compile(r'(not\s*visible|zero\s*size|not\s*interactable|is\s*disabled)', re.IGNORECASE)
+    BLOCKED_BY_CLIENT = re.compile(r'(ERR_BLOCKED_BY_CLIENT)', re.IGNORECASE)
+
+    # HTTP / レートリミット / 認可
+    HTTP_STATUS = re.compile(r'\bHTTP\s*(\d{3})\b|\b(\d{3})\s*(Forbidden|Unauthorized|Not\s*Found|Too\s*Many\s*Requests|Service\s*Unavailable|Bad\s*Gateway)', re.IGNORECASE)
+    RATE_LIMIT = re.compile(r'(rate\s*limit|too\s*many\s*requests|429)', re.IGNORECASE)
+    HTTP_FORBIDDEN = re.compile(r'(403|forbidden|アクセス拒否|権限がありません)', re.IGNORECASE)
+    HTTP_UNAUTHORIZED = re.compile(r'(401|unauthorized|認証が必要)', re.IGNORECASE)
+
+    # WAF/ボット/チャレンジ
+    CLOUDFLARE = re.compile(r'(cloudflare|just\s*a\s*moment|checking\s*your\s*browser|ddos\s*protection)', re.IGNORECASE)
+    AKAMAI = re.compile(r'(akamai|Reference\s*#\d+\.\w+\.\w+)', re.IGNORECASE)
+    INCAPSULA = re.compile(r'(incapsula|imperva)', re.IGNORECASE)
+    PERIMETERX = re.compile(r'(perimeterx|px-)', re.IGNORECASE)
+    HUMAN_VERIF = re.compile(r'(are\s*you\s*a\s*human|human\s*verification|verify\s*you\s*are\s*human)', re.IGNORECASE)
+
+    # 既存: コンテンツ語彙（必須/フォーマット/CSRF/重複 など）
     # 最適化：キーワードをコンパイル済み正規表現に変更
     BOT_PATTERN = re.compile(r'\b(?:recaptcha|cloudflare|bot)\b', re.IGNORECASE)
     INSTRUCTION_KEYWORD_PATTERN = re.compile(r'\b(?:parse|decode|invalid|missing)\b', re.IGNORECASE)
@@ -138,6 +173,40 @@ class ErrorClassifier:
     ]
     DUPLICATE_TEXT_PATTERNS: List[Pattern] = [re.compile(r, re.IGNORECASE) for r in [r"重複", r"既に(送信|登録)", r"duplicate", r"already\s+submitted"]]
 
+    # === 外部設定のロード =========================================================
+    _external_rules_loaded: bool = False
+    _external_extra_patterns: Dict[str, List[Pattern]] = {}
+
+    @classmethod
+    def _load_external_rules(cls) -> None:
+        """config/error_classification.json が存在すれば追加パターンをロード"""
+        if cls._external_rules_loaded:
+            return
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            config_path = os.path.join(base_dir, 'config', 'error_classification.json')
+            if not os.path.exists(config_path):
+                cls._external_rules_loaded = True
+                return
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            extra: Dict[str, List[str]] = data.get('extra_patterns', {})
+            compiled: Dict[str, List[Pattern]] = {}
+            for key, patterns in extra.items():
+                compiled[key] = []
+                for p in patterns:
+                    try:
+                        compiled[key].append(re.compile(p, re.IGNORECASE))
+                    except re.error:
+                        # 無効な正規表現は黙って無視
+                        pass
+            cls._external_extra_patterns = compiled
+        except Exception:
+            # 設定読み込みの失敗は致命ではない
+            cls._external_extra_patterns = {}
+        finally:
+            cls._external_rules_loaded = True
+
     @classmethod
     def classify_error_type(cls, error_context: Dict[str, Any]) -> str:
         """
@@ -151,9 +220,12 @@ class ErrorClassifier:
         Returns:
             str: エラータイプ
         """
-        error_message = error_context.get('error_message', '').lower()
+        cls._load_external_rules()
+        error_message = (error_context.get('error_message') or '').lower()
         is_bot_detected = error_context.get('is_bot_detected', False)
         is_timeout = error_context.get('is_timeout', False)
+        page_content = (error_context.get('page_content') or '').lower()
+        http_status = error_context.get('http_status')
         
         try:
             # 1. 特別なケースを先に処理
@@ -161,11 +233,36 @@ class ErrorClassifier:
             if special_case:
                 return special_case
             
+            # 1.5 HTTP ステータス優先（存在すれば）
+            if isinstance(http_status, int):
+                if http_status == 429:
+                    return 'RATE_LIMIT'
+                if http_status == 403:
+                    # WAF/認可いずれか。コンテンツから補強
+                    if cls._contains_any(page_content, [cls.CLOUDFLARE, cls.AKAMAI, cls.INCAPSULA, cls.PERIMETERX, cls.HUMAN_VERIF]):
+                        return 'WAF_CHALLENGE'
+                    return 'ACCESS'
+                if http_status in (500, 502, 503, 504):
+                    return 'SERVER_ERROR'
+                if http_status == 422:
+                    return 'FORM_VALIDATION_ERROR'
+                if http_status == 404:
+                    return 'NOT_FOUND'
+                if http_status == 401:
+                    return 'UNAUTHORIZED'
+                if http_status == 405:
+                    return 'METHOD_NOT_ALLOWED'
+
             # 2. パターンベースの分類（最適化済み）
             pattern_result = cls._classify_by_patterns(error_message)
             if pattern_result:
                 return cls._refine_pattern_result(pattern_result, error_message)
             
+            # 2.5 ネットワーク/WAF系の詳細判定
+            detail = cls._classify_network_waf_detail(error_message, page_content)
+            if detail:
+                return detail
+
             # 3. フォールバック分類
             return cls._classify_fallback(error_message)
             
@@ -181,7 +278,7 @@ class ErrorClassifier:
             return 'BOT_DETECTED'
         
         # タイムアウト判定
-        if is_timeout or 'timeout' in error_message:
+        if is_timeout or cls.NETWORK_TIMEOUT.search(error_message):
             return 'TIMEOUT'
             
         return None
@@ -200,7 +297,17 @@ class ErrorClassifier:
     def _refine_pattern_result(cls, pattern_result: str, error_message: str) -> str:
         """パターン結果の細かい分類"""
         if pattern_result == 'EXTERNAL':
-            return 'TIMEOUT' if 'timeout' in error_message else 'ACCESS'
+            if cls.NETWORK_TIMEOUT.search(error_message):
+                return 'TIMEOUT'
+            if cls.DNS_ERROR.search(error_message):
+                return 'DNS_ERROR'
+            if cls.TLS_ERROR.search(error_message):
+                return 'TLS_ERROR'
+            if cls.CONN_RESET.search(error_message):
+                return 'CONNECTION_RESET'
+            if cls.BLOCKED_BY_CLIENT.search(error_message):
+                return 'BLOCKED_BY_CLIENT'
+            return 'ACCESS'
         elif pattern_result == 'SUBMIT_BUTTON':
             return cls._classify_submit_button_error(error_message)
         elif pattern_result == 'CONTENT_ANALYSIS':
@@ -247,6 +354,55 @@ class ErrorClassifier:
             return 'ACCESS'
         else:
             return 'SYSTEM'
+
+    # === 追加: ネットワーク/WAF 詳細分類 ========================================
+    @classmethod
+    def _contains_any(cls, text: str, patterns: List[Pattern]) -> bool:
+        if not text:
+            return False
+        for p in patterns:
+            if p.search(text):
+                return True
+        return False
+
+    @classmethod
+    def _classify_network_waf_detail(cls, error_message: str, page_content: str) -> Optional[str]:
+        # ネットワーク系
+        if cls.DNS_ERROR.search(error_message):
+            return 'DNS_ERROR'
+        if cls.TLS_ERROR.search(error_message):
+            return 'TLS_ERROR'
+        if cls.CONN_RESET.search(error_message):
+            return 'CONNECTION_RESET'
+        if cls.PAGE_CLOSED.search(error_message):
+            return 'PAGE_CLOSED'
+        if cls.NOT_INTERACTABLE.search(error_message):
+            return 'ELEMENT_NOT_INTERACTABLE'
+        if cls.BLOCKED_BY_CLIENT.search(error_message):
+            return 'BLOCKED_BY_CLIENT'
+
+        # HTTP/レートリミット（メッセージのみで判断）
+        if cls.RATE_LIMIT.search(error_message):
+            return 'RATE_LIMIT'
+        if cls.HTTP_FORBIDDEN.search(error_message):
+            if cls._contains_any(page_content, [cls.CLOUDFLARE, cls.AKAMAI, cls.INCAPSULA, cls.PERIMETERX, cls.HUMAN_VERIF]):
+                return 'WAF_CHALLENGE'
+            return 'ACCESS'
+
+        # WAF/ボット（コンテンツ）
+        if cls._contains_any(page_content, [cls.CLOUDFLARE, cls.AKAMAI, cls.INCAPSULA, cls.PERIMETERX, cls.HUMAN_VERIF]):
+            return 'WAF_CHALLENGE'
+
+        # 外部追加パターン
+        if cls._external_extra_patterns:
+            try:
+                for code, patterns in cls._external_extra_patterns.items():
+                    if cls._contains_any(error_message, patterns) or cls._contains_any(page_content, patterns):
+                        return code
+            except Exception:
+                pass
+
+        return None
     
     @classmethod
     def should_update_instruction_valid(cls, error_type: str) -> bool:
@@ -281,10 +437,11 @@ class ErrorClassifier:
         recoverable_types = [
             'TIMEOUT', 'ACCESS', 'ELEMENT_EXTERNAL', 
             'INPUT_EXTERNAL', 'SYSTEM',
-            # 新規追加：外部要因の可能性があるエラー
-            'ELEMENT_NOT_FOUND',  # サイト変更の可能性
-            'CONTENT_ANALYSIS_FAILED',  # 一時的な問題の可能性
-            'SUBMIT_BUTTON_NOT_FOUND'  # ページ変更の可能性
+            'ELEMENT_NOT_FOUND',            # サイト変更の可能性
+            'CONTENT_ANALYSIS_FAILED',     # 一時的な問題の可能性
+            'SUBMIT_BUTTON_NOT_FOUND',     # ページ変更の可能性
+            # 追加: ネットワーク/WAF/HTTP系
+            'DNS_ERROR', 'TLS_ERROR', 'CONNECTION_RESET', 'RATE_LIMIT', 'SERVER_ERROR',
         ]
         
         # 復旧不可能なエラータイプ（構造的問題）
@@ -293,7 +450,9 @@ class ErrorClassifier:
             'SUCCESS_DETERMINATION_FAILED', 'INPUT_TYPE_MISMATCH',
             'FORM_VALIDATION_ERROR', 'BOT_DETECTED',
             # 追加: マッピング/検証起因は自動復旧不可
-            'MAPPING', 'VALIDATION_FORMAT', 'CSRF_ERROR', 'DUPLICATE_SUBMISSION'
+            'MAPPING', 'VALIDATION_FORMAT', 'CSRF_ERROR', 'DUPLICATE_SUBMISSION',
+            # WAF系はクールダウンや人的対応を推奨（自動復旧対象外）
+            'WAF_CHALLENGE'
         ]
         
         if error_type in non_recoverable_types:
@@ -332,12 +491,9 @@ class ErrorClassifier:
             str: 詳細なエラータイプ
         """
         try:
-            # 送信ボタン関連の事前チェック
-            if not submit_selector or submit_selector.strip() == "":
-                return 'SUBMIT_BUTTON_SELECTOR_MISSING'
-            
+            cls._load_external_rules()
             # 最適化されたパターンマッチング
-            error_message_lower = error_message.lower()
+            error_message_lower = (error_message or '').lower()
             pattern_result = cls._classify_by_patterns(error_message_lower)
             
             if pattern_result:
@@ -347,6 +503,20 @@ class ErrorClassifier:
                     return cls._classify_content_analysis_error(error_message_lower)
                 elif pattern_result in ['SUCCESS_DETERMINATION_FAILED', 'FORM_VALIDATION_ERROR']:
                     return pattern_result
+
+            # まずはページ本文・メッセージの検証系を優先判定（selector有無より前）
+            content_lower = (page_content or '').lower()
+            for p in cls.REQUIRED_TEXT_PATTERNS:
+                if p.search(content_lower) or p.search(error_message_lower):
+                    return 'MAPPING'
+            for p in cls.FORMAT_TEXT_PATTERNS:
+                if p.search(content_lower) or p.search(error_message_lower):
+                    return 'VALIDATION_FORMAT'
+
+            # ネットワーク/WAF 詳細
+            detail = cls._classify_network_waf_detail(error_message_lower, content_lower)
+            if detail:
+                return detail
 
             # 従来の分類にフォールバック
             error_context = {
@@ -359,6 +529,13 @@ class ErrorClassifier:
             refined = cls._classify_from_page_content(error_context)
             if refined:
                 return refined
+            # submit_selector が無い場合でも検証系に該当しないなら最後に不足扱いへフォールバック
+            if not submit_selector or submit_selector.strip() == "":
+                # エラーメッセージに「not found」が含まれていれば NOT_FOUND を優先
+                if 'not found' in error_message_lower or 'no submit button' in error_message_lower:
+                    return 'SUBMIT_BUTTON_NOT_FOUND'
+                return 'SUBMIT_BUTTON_SELECTOR_MISSING'
+
             return cls.classify_error_type(error_context)
             
         except Exception as e:
@@ -422,7 +599,7 @@ class ErrorClassifier:
             str: 詳細なエラータイプ
         """
         try:
-            error_message_lower = error_message.lower()
+            error_message_lower = (error_message or '').lower()
             
             # 最適化されたパターンマッチング
             pattern_result = cls._classify_by_patterns(error_message_lower)
@@ -446,3 +623,79 @@ class ErrorClassifier:
             
         except Exception as e:
             raise RuntimeError(f"Form input error classification failed: {e}") from e
+
+    # === 追加: 詳細分類API（後方互換のため任意で使用可能） ========================
+    @classmethod
+    def classify_detail(
+        cls,
+        *,
+        error_message: str = "",
+        page_content: str = "",
+        http_status: Optional[int] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        詳細な分類情報を辞書で返す（後方互換のため任意で利用可能）
+
+        Returns:
+            {
+              'code': 'RATE_LIMIT',
+              'category': 'HTTP',
+              'retryable': True,
+              'cooldown_seconds': 300,
+              'confidence': 0.7,
+            }
+        """
+        cls._load_external_rules()
+        msg = (error_message or '').lower()
+        content = (page_content or '').lower()
+        code = None
+
+        # 1) まず既存/拡張ロジックでコードを決める
+        if http_status is not None:
+            code = cls.classify_error_type({'error_message': msg, 'http_status': http_status, 'page_content': content})
+        else:
+            # form submission 文脈を仮定
+            code = cls.classify_form_submission_error(error_message=msg, page_content=content, submit_selector='dummy')
+
+        # 2) カテゴリ/再試行可否/クールダウンのヒント
+        category_map = {
+            'RATE_LIMIT': 'HTTP',
+            'SERVER_ERROR': 'HTTP',
+            'ACCESS': 'HTTP',
+            'UNAUTHORIZED': 'HTTP',
+            'NOT_FOUND': 'HTTP',
+            'METHOD_NOT_ALLOWED': 'HTTP',
+            'DNS_ERROR': 'NETWORK',
+            'TLS_ERROR': 'NETWORK',
+            'CONNECTION_RESET': 'NETWORK',
+            'BLOCKED_BY_CLIENT': 'NETWORK',
+            'PAGE_CLOSED': 'BROWSER',
+            'TIMEOUT': 'NETWORK',
+            'WAF_CHALLENGE': 'WAF',
+            'BOT_DETECTED': 'WAF',
+            'CSRF_ERROR': 'SECURITY',
+            'MAPPING': 'VALIDATION',
+            'VALIDATION_FORMAT': 'VALIDATION',
+            'FORM_VALIDATION_ERROR': 'VALIDATION',
+            'DUPLICATE_SUBMISSION': 'BUSINESS',
+            'PROHIBITION_DETECTED': 'BUSINESS',
+        }
+        category = category_map.get(code, 'GENERAL')
+
+        retryable = code in {
+            'TIMEOUT', 'DNS_ERROR', 'TLS_ERROR', 'CONNECTION_RESET', 'BLOCKED_BY_CLIENT',
+            'RATE_LIMIT', 'SERVER_ERROR', 'ACCESS', 'ELEMENT_EXTERNAL', 'INPUT_EXTERNAL', 'SYSTEM'
+        }
+        cooldown = 300 if code in {'RATE_LIMIT', 'WAF_CHALLENGE'} else (60 if code in {'SERVER_ERROR', 'ACCESS'} else 0)
+
+        # 3) 信頼度の簡易推定（ヒューリスティック）
+        confidence = 0.9 if code in {'RATE_LIMIT', 'DNS_ERROR', 'TLS_ERROR', 'CSRF_ERROR'} else 0.7
+
+        return {
+            'code': code,
+            'category': category,
+            'retryable': retryable and code != 'WAF_CHALLENGE',
+            'cooldown_seconds': cooldown,
+            'confidence': confidence,
+        }
