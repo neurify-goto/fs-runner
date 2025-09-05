@@ -18,18 +18,14 @@ import asyncio
 import json
 import logging
 import multiprocessing as mp
-import queue
 import signal
 import sys
 import threading
 import time
-import atexit
-from pathlib import Path
-from typing import Dict, Any, Optional
 
 # マルチプロセス対応コンポーネントをインポート
 from form_sender.orchestrator.manager import ConfigurableOrchestrator
-from form_sender.utils.validation_config import get_validation_manager, validate_environment_variable
+from form_sender.utils.validation_config import get_validation_manager
 from form_sender.security.log_sanitizer import setup_sanitized_logging
 
 # ロギング設定（サニタイゼーション機能付き + HTTPXログ無効化）
@@ -63,28 +59,10 @@ setup_sanitized_logging()
 
 # グローバル停止制御（スレッドセーフ - 改良版）
 _shutdown_event = threading.Event()
-_orchestrator_instance = None
-_orchestrator_lock = threading.Lock()  # オーケストレーター管理用ロック
 _cleanup_lock = threading.Lock()
 _cleanup_completed = threading.Event()
 _signal_handlers_installed = False
 _signal_install_lock = threading.Lock()  # シグナルハンドラーインストール用ロック
-
-
-def get_orchestrator_instance():
-    """スレッドセーフなオーケストレーターインスタンス取得"""
-    global _orchestrator_instance
-    with _orchestrator_lock:
-        return _orchestrator_instance
-
-
-def set_orchestrator_instance(instance):
-    """スレッドセーフなオーケストレーターインスタンス設定"""
-    global _orchestrator_instance
-    with _orchestrator_lock:
-        _orchestrator_instance = instance
-        logger.info(f"Orchestrator instance set safely: {type(instance).__name__}")
-
 
 async def main():
     """メイン処理（マルチプロセス・アーキテクチャ版）"""
@@ -358,9 +336,6 @@ async def main():
         logger.info("Result saving mode set to: IMMEDIATE (per-record DB writes)")
     except Exception as _set_mode_err:
         logger.warning(f"Could not enforce immediate save mode explicitly: {_set_mode_err}")
-    
-    # スレッドセーフにオーケストレーターインスタンスを保存（クリーンアップ用）
-    set_orchestrator_instance(orchestrator)
     
     # スレッドセーフなシグナルハンドラー設定（改良版）
     def signal_handler(signum, frame):
