@@ -396,7 +396,9 @@ def main() -> None:
         
         print("✅ クライアント設定ファイルが正常に作成されました")
         print(f"   設定ファイル: {config_file_path}")
-        print("   targeting_id: ***REDACTED***")
+        # targeting_id は秘匿対象ではないため、そのまま出力する
+        # ワークフロー実行トレース性向上のため明示表示
+        print(f"   targeting_id: {targeting_id}")
         print("   設定: 検証済み")
         print(f"   キャッシュエントリ数: {len(_config_cache)}")
         # 構造種類を表示
