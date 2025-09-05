@@ -248,7 +248,15 @@ class ContinuousProcessController:
                 import re
                 try:
                     ng_regex = re.compile(ng_pattern, re.IGNORECASE)
-                    companies = [c for c in companies if not ng_regex.search(c.get('name', ''))]
+                    # RPC経路はSQL側で除外済みだが、フォールバック経路は company_name キーのみの場合がある。
+                    # 両方を安全に参照し、どちらかに一致したら除外する。
+                    def _get_company_name_for_filter(c: Dict[str, Any]) -> str:
+                        name1 = c.get('name') or ''
+                        if name1:
+                            return name1
+                        return c.get('company_name', '') or ''
+
+                    companies = [c for c in companies if not ng_regex.search(_get_company_name_for_filter(c))]
                     logger.debug(f"Applied ng_companies filter, remaining: {len(companies)}")
                 except re.error as e:
                     logger.warning(f"Invalid ng_companies regex pattern '{ng_pattern}': {e}")
@@ -389,13 +397,19 @@ class ContinuousProcessController:
             )
 
             rows = response.data or []
-            # Python側で最低限のフィルタを適用
+            # Python側で最低限のフィルタを適用 + 後段フィルタ互換のため company_name→name を補完
             filtered = []
             for r in rows:
                 if not r.get('form_url'):
                     continue
                 if r.get('instruction_valid') is False:
                     continue
+                # NGフィルタが name キーを参照するため、フォールバックは name を補完
+                try:
+                    if 'name' not in r and 'company_name' in r and r['company_name']:
+                        r = {**r, 'name': r['company_name']}
+                except Exception:
+                    pass
                 filtered.append(r)
             logger.warning(f"Using BASIC FALLBACK query results: {len(filtered)} items (raw={len(rows)})")
             return filtered
