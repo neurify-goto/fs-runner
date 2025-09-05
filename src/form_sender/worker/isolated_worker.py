@@ -991,8 +991,9 @@ class IsolatedFormWorker:
                                     continue
                             if not val and itype in ['checkbox','radio']:
                                 val = True
-                            if not val and itype in ['text','textarea']:
-                                val = '　'  # 全角スペース
+                            if (not val or (isinstance(val, str) and val.strip() == '')) and itype in ['text','textarea']:
+                                # 空白扱いの値はハンドラで弾かれるため、可視で安全な1文字にフォールバック
+                                val = 'ー'  # 全角ハイフン（必須バリデーション通過用）
                             if not sel:
                                 continue
                             field_info = { 'selector': sel, 'input_type': itype, 'type': itype }
