@@ -172,8 +172,9 @@ class MultiProcessOrchestrator:
             'skipped_companies': []
         }
 
-        # シャットダウン待機中の非同期排出フラグ
+        # シャットダウン待機中の非同期排出制御
         self._shutdown_draining: bool = False
+        self._shutdown_bg_tasks = set()
 
         logger.info(f"MultiProcessOrchestrator initialized: targeting_id={targeting_id}, workers={num_workers}")
         logger.info("Advanced prohibition detection enabled (Form Analyzer compatible)")
@@ -469,6 +470,12 @@ class MultiProcessOrchestrator:
             result: ワーカー処理結果
         """
         try:
+            # シャットダウン排出中は、DB保存や背圧フラッシュを行わず最小限のappendのみ
+            if getattr(self, '_shutdown_draining', False):
+                with self.buffer_lock:
+                    self.result_buffer.append(result)
+                return
+
             if result.record_id is None:
                 logger.warning(f"Worker result missing record_id: {result.task_id}")
                 return
@@ -1520,7 +1527,9 @@ class MultiProcessOrchestrator:
         全ワーカーのシャットダウン通知を待機しつつ、結果キューを安全に掃き出す。
 
         - 大量の通常結果がキューに滞留していても、WORKER_SHUTDOWN を確実に検出する。
-        - 非シャットダウンの結果はDB保存せず一旦バッファに積み、後続の cleanup でまとめて処理。
+        - 非シャットダウンの結果はDB保存や背圧処理を行わず、buffer_lock 配下で直接バッファへ append のみ行う。
+          （_buffer_worker_result は使用しない）
+        - DB反映は cleanup フェーズでまとめて実行（またはバックグラウンドの非同期フラッシュ）。
 
         Args:
             timeout: 最大待機秒数
@@ -1535,6 +1544,7 @@ class MultiProcessOrchestrator:
             buffered_count = 0
             buffer_errors = 0
             warn90 = False
+            last_periodic_flush = start
 
             # shutdown中は即時保存・自動フラッシュ・背圧フラッシュを停止して純粋にバッファへ退避
             prev_immediate = getattr(self, 'immediate_save', False)
@@ -1543,6 +1553,31 @@ class MultiProcessOrchestrator:
 
             # バックグラウンドフラッシュ制御
             flush_in_progress = False
+            def _schedule_bg_flush(reason: str = "periodic"):
+                nonlocal flush_in_progress, last_periodic_flush
+                if flush_in_progress:
+                    return
+                flush_in_progress = True
+                async def _bg_flush():
+                    nonlocal flush_in_progress
+                    try:
+                        await self._flush_result_buffer()
+                    except Exception as e:
+                        logger.warning(f"Background flush error ({reason}): {e}")
+                    finally:
+                        flush_in_progress = False
+                task = asyncio.create_task(_bg_flush())
+                # 追跡＋例外監視
+                self._shutdown_bg_tasks.add(task)
+                def _done_cb(t: asyncio.Task):
+                    try:
+                        _ = t.result()
+                    except Exception as e:
+                        logger.warning(f"Background flush task failed ({reason}): {e}")
+                    finally:
+                        self._shutdown_bg_tasks.discard(t)
+                task.add_done_callback(_done_cb)
+                last_periodic_flush = time.time()
 
             try:
                 while len(observed_shutdowns) < expected_workers:
@@ -1556,6 +1591,16 @@ class MultiProcessOrchestrator:
 
                     results = self.queue_manager.get_all_available_results()
                     if not results:
+                        # 5秒ごとの非同期フラッシュ（awaitしない）
+                        now = time.time()
+                        try:
+                            # バッファが空でなければperiodic flushをスケジュール
+                            buffer_len = len(self.result_buffer) if hasattr(self, 'result_buffer') else 0
+                            if buffer_len > 0 and (now - last_periodic_flush) >= 5.0:
+                                _schedule_bg_flush("periodic")
+                        except Exception as _pf:
+                            logger.warning(f"Periodic flush scheduling failed: {_pf}")
+
                         await asyncio.sleep(0.2)
                         continue
 
@@ -1583,18 +1628,11 @@ class MultiProcessOrchestrator:
 
                                 # メモリセーフガード：肥大し過ぎたら非同期フラッシュ（awaitしない）
                                 try:
-                                    if (not flush_in_progress) and current_buffer_size > int(self.MAX_BUFFER_SIZE) * 2:
+                                    if current_buffer_size > int(self.MAX_BUFFER_SIZE) * 2:
                                         logger.warning(
                                             f"Buffer growing large during shutdown (size={current_buffer_size}), scheduling background flush"
                                         )
-                                        flush_in_progress = True
-                                        async def _bg_flush():
-                                            nonlocal flush_in_progress
-                                            try:
-                                                await self._flush_result_buffer()
-                                            finally:
-                                                flush_in_progress = False
-                                        asyncio.create_task(_bg_flush())
+                                        _schedule_bg_flush("emergency")
                                 except Exception as _ge:
                                     logger.warning(f"Background flush scheduling failed: {_ge}")
                         except Exception as e:
@@ -1622,6 +1660,20 @@ class MultiProcessOrchestrator:
                 # 元の設定に戻す（cleanupで正式フラッシュ）
                 self._shutdown_draining = False
                 self.immediate_save = prev_immediate
+                # 未観測ワーカーの詳細を警告
+                if len(observed_shutdowns) < expected_workers:
+                    missing_workers = sorted(list(set(range(expected_workers)) - observed_shutdowns))
+                    logger.warning(f"Unobserved worker shutdowns: {missing_workers}")
+                # バックグラウンドフラッシュのクリーンアップ
+                try:
+                    if self._shutdown_bg_tasks:
+                        for t in list(self._shutdown_bg_tasks):
+                            if not t.done():
+                                t.cancel()
+                        # タスクの完了を短時間待機
+                        await asyncio.gather(*list(self._shutdown_bg_tasks), return_exceptions=True)
+                except Exception as _ce:
+                    logger.debug(f"Background flush cleanup error: {_ce}")
 
         try:
             expected_workers = len(self.worker_processes) if hasattr(self, 'worker_processes') else self.num_workers
