@@ -309,7 +309,9 @@ class ElementScorer:
                     score_details['score_breakdown'].get('name', 0) == 0 and
                     score_details['score_breakdown'].get('id', 0) == 0 and
                     score_details['score_breakdown'].get('placeholder', 0) == 0 and
-                    score_details['score_breakdown'].get('context', 0) == 0):
+                    score_details['score_breakdown'].get('context', 0) == 0 and
+                    # クラス一致がある場合は、name/id/placeholderが空でも汎用減点を適用しない
+                    score_details['score_breakdown'].get('class', 0) == 0):
                     # type(text) + tag(input) 程度の弱い一致は強く抑制
                     total_score -= 40
                     score_details['penalties'].append('generic_text_without_signals')
@@ -1142,16 +1144,33 @@ class ElementScorer:
             attr_value = element_info.get(attr, '').lower()
             if not attr_value:
                 continue
-            
-            # 除外パターンマッチング（厳格化）
+
+            # class 属性は「トークン（空白区切り）」を基本単位として扱い、
+            # 短い汎用語（例: 'name'）への部分一致で誤除外しない。
+            if attr == 'class':
+                class_tokens = [t for t in attr_value.split() if t]
+                for exclude_pattern in exclude_patterns:
+                    exclude_pattern_lower = exclude_pattern.lower()
+                    # class は原則「トークン完全一致」のみ除外対象
+                    if any(tok == exclude_pattern_lower for tok in class_tokens):
+                        logger.info(f"EXCLUSION(class exact): token matches '{exclude_pattern_lower}' in class='{attr_value}'")
+                        return True
+                    # 認証/確認など安全に除外すべき長語のみ、ハイフン/アンダースコアでの完全トークン一致を許可
+                    if len(exclude_pattern_lower) >= 8:
+                        if any(tok.replace('_','-') == exclude_pattern_lower.replace('_','-') for tok in class_tokens):
+                            logger.info(f"EXCLUSION(class long token): token matches '{exclude_pattern_lower}' in class='{attr_value}'")
+                            return True
+                continue  # class はここで完了
+
+            # name/id/placeholder は従来ルール（語境界優先）
             for exclude_pattern in exclude_patterns:
                 exclude_pattern_lower = exclude_pattern.lower()
-                
+
                 # 1. 完全一致チェック（最優先）
                 if attr_value == exclude_pattern_lower:
                     logger.info(f"EXCLUSION: {attr}='{attr_value}' exactly matches exclude_pattern '{exclude_pattern}'")
                     return True
-                
+
                 # 2. 単語境界を考慮した一致チェック（認証系パターン用）
                 if len(exclude_pattern_lower) >= 3:  # 短すぎるパターンは除外
                     # 単語境界またはアンダースコア/ハイフンで区切られた場合
@@ -1163,7 +1182,7 @@ class ElementScorer:
                        attr_value.endswith('-' + exclude_pattern_lower):
                         logger.info(f"EXCLUSION: {attr}='{attr_value}' contains word-boundary exclude_pattern '{exclude_pattern}'")
                         return True
-                
+
                 # 3. 特定長さ以上での部分一致（汎用除外用）
                 if len(exclude_pattern_lower) >= 5 and exclude_pattern_lower in attr_value:
                     logger.info(f"EXCLUSION: {attr}='{attr_value}' contains long exclude_pattern '{exclude_pattern}'")
@@ -1251,7 +1270,7 @@ class ElementScorer:
                 class_attr = ''
             class_lower = class_attr.lower()
             required_class_tokens = [
-                'required', 'mandatory', 'must', 'necessary', '必須',
+                'required', 'require', 'mandatory', 'must', 'necessary', '必須',
                 # Contact Form 7系
                 'wpcf7-validates-as-required'
             ]
@@ -1262,7 +1281,7 @@ class ElementScorer:
             try:
                 ancestor_has_required = await element.evaluate("""
                     el => {
-                      const TOKENS = ['required','mandatory','must','necessary','必須','wpcf7-validates-as-required'];
+                      const TOKENS = ['required','require','mandatory','must','necessary','必須','wpcf7-validates-as-required'];
                       let p = el.parentElement;
                       let depth = 0;
                       while (p && depth < 6) {
