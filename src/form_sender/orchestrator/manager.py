@@ -1528,9 +1528,25 @@ class MultiProcessOrchestrator:
         try:
             observed_shutdowns = set()
             start = time.time()
-            while len(observed_shutdowns) < self.num_workers and (time.time() - start) < timeout:
+            buffered_count = 0
+            buffer_errors = 0
+            last_periodic_flush = start
+
+            # 期待ワーカー数は実プロセス配列の長さを採用
+            expected_workers = len(self.worker_processes) if hasattr(self, 'worker_processes') else self.num_workers
+
+            while len(observed_shutdowns) < expected_workers and (time.time() - start) < timeout:
                 results = self.queue_manager.get_all_available_results()
                 if not results:
+                    # 定期フラッシュ（5秒ごと）
+                    now = time.time()
+                    if (now - last_periodic_flush) >= 5.0:
+                        try:
+                            await self._flush_result_buffer()
+                        except Exception as _fe:
+                            logger.warning(f"Periodic flush during shutdown wait failed: {_fe}")
+                        last_periodic_flush = now
+
                     await asyncio.sleep(0.2)
                     continue
 
@@ -1540,7 +1556,7 @@ class MultiProcessOrchestrator:
                             observed_shutdowns.add(result.worker_id)
                             logger.info(
                                 f"Worker {result.worker_id} shutdown observed "
-                                f"({len(observed_shutdowns)}/{self.num_workers})"
+                                f"({len(observed_shutdowns)}/{expected_workers})"
                             )
                             continue
 
@@ -1552,17 +1568,46 @@ class MultiProcessOrchestrator:
                             ResultStatus.PROHIBITION_DETECTED,
                         ]:
                             await self._buffer_worker_result(result)
+                            buffered_count += 1
+
+                            # メモリセーフガード：バッファ肥大時は強制フラッシュ
+                            try:
+                                current_buffer_size = len(self.result_buffer) if hasattr(self, 'result_buffer') else 0
+                                if current_buffer_size > int(self.MAX_BUFFER_SIZE) * 2:
+                                    logger.warning(
+                                        f"Buffer growing large during shutdown (size={current_buffer_size}), forcing flush"
+                                    )
+                                    await self._flush_result_buffer()
+                                    last_periodic_flush = time.time()
+                            except Exception as _ge:
+                                logger.warning(f"Buffer size check/flush failed during shutdown wait: {_ge}")
                     except Exception as e:
+                        buffer_errors += 1
                         logger.warning(f"Error while handling result during shutdown wait: {e}")
 
-            if len(observed_shutdowns) == self.num_workers:
-                logger.info("All worker shutdown notifications observed")
-                return True
-            else:
-                logger.warning(
-                    f"Observed {len(observed_shutdowns)}/{self.num_workers} worker shutdown notifications within timeout"
-                )
-                return False
+            # 追加メトリクスと未観測ワーカーの警告
+            elapsed = time.time() - start
+            try:
+                import psutil
+                rss = psutil.Process().memory_info().rss
+                rss_mb = rss / (1024 * 1024)
+                mem_msg = f", rss={rss_mb:.1f}MB"
+            except Exception:
+                mem_msg = ""
+
+            remaining = expected_workers - len(observed_shutdowns)
+            if remaining > 0:
+                missing_workers = set(range(expected_workers)) - observed_shutdowns
+                logger.warning(f"Workers {sorted(list(missing_workers))} did not send shutdown signal within timeout")
+
+            final_buffer_size = len(self.result_buffer) if hasattr(self, 'result_buffer') else 0
+            logger.info(
+                f"Shutdown wait summary: observed={len(observed_shutdowns)}/{expected_workers}, "
+                f"buffered={buffered_count}, buffer_errors={buffer_errors}, "
+                f"final_buffer={final_buffer_size}, elapsed={elapsed:.2f}s{mem_msg}"
+            )
+
+            return len(observed_shutdowns) == expected_workers
         except Exception as e:
             logger.error(f"Error awaiting worker shutdowns: {e}")
             return False
