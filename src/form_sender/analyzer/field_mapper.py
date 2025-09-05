@@ -189,6 +189,7 @@ class FieldMapper:
         # フォールバック: 重要コア項目の取りこぼし救済
         await self._fallback_map_message_field(classified_elements, field_mapping, used_elements)
         await self._fallback_map_email_field(classified_elements, field_mapping, used_elements)
+        await self._fallback_map_postal_field(classified_elements, field_mapping, used_elements)
         return field_mapping
 
     async def _find_best_element(self, field_name, field_patterns, classified_elements, target_element_types, used_elements, essential_fields_completed, required_elements_set:set) -> Tuple[Optional[Locator], float, Dict, List]:
@@ -429,6 +430,42 @@ class FieldMapper:
                 field_mapping[target_field] = info
                 logger.info(f"Fallback mapped '{target_field}' via label-context (score {score})")
 
+    async def _fallback_map_postal_field(self, classified_elements, field_mapping, used_elements):
+        """郵便番号の取りこぼし救済
+
+        - ラベル/属性に郵便番号系の強いシグナルがある input[type=text/tel] を安全側に昇格
+        - 既に『郵便番号』が確定している場合は何もしない
+        """
+        target_field = '郵便番号'
+        if target_field in field_mapping:
+            return
+        candidates = (classified_elements.get('tel_inputs') or []) + (classified_elements.get('text_inputs') or [])
+        if not candidates:
+            return
+        patterns = self.field_patterns.get_pattern(target_field) or {}
+        best = (None, 0, None, [])
+        for el in candidates:
+            if id(el) in used_elements:
+                continue
+            score, details, contexts = await self._score_element_in_detail(el, patterns, target_field)
+            if score > best[1]:
+                best = (el, score, details, contexts)
+        el, score, details, contexts = best
+        if not el:
+            return
+        threshold = max(60, int(self.settings.get('email_fallback_min_score', 60)))
+        if score >= threshold:
+            info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info['source'] = 'fallback'
+            except Exception:
+                pass
+            tmp = self._generate_temp_field_value(target_field)
+            if self.duplicate_prevention.register_field_assignment(target_field, tmp, score, info):
+                field_mapping[target_field] = info
+                used_elements.add(id(el))
+                logger.info(f"Fallback mapped '{target_field}' (score {score})")
+
     def _determine_target_element_types(self, field_patterns: Dict[str, Any]) -> List[str]:
         """候補バケットをフィールド定義から厳選
 
@@ -497,10 +534,14 @@ class FieldMapper:
     async def _ensure_required_mappings(self, classified_elements: Dict[str, List[Locator]],
                                          field_mapping: Dict[str, Dict[str, Any]], used_elements: set,
                                          required_elements_set: set) -> None:
-        """必須要素を必ず field_mapping に登録する救済フェーズ"""
-        if not required_elements_set:
-            return
+        """必須要素を必ず field_mapping に登録する救済フェーズ
 
+        改善点:
+        - required_elements_set が空（もしくは不十分）な場合でも、
+          コンテキストに必須マーカー（*, 必須, Required など）がある入力要素を救済登録する。
+        - これにより、<th>に必須マークがあり input 自体に required 属性が無いテーブル型フォームでも
+          『住所』『郵便番号』等の取りこぼしを防止する。
+        """
         # 既に使用済みname/idの組を控える
         used_names_ids = set()
         for info in field_mapping.values():
@@ -508,6 +549,10 @@ class FieldMapper:
                 used_names_ids.add((info.get('name',''), info.get('id','')))
             except Exception:
                 pass
+
+        # 必須マーカー
+        required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+        allowed_required_sources = {'dt_label', 'th_label', 'th_label_index', 'label_for', 'aria_labelledby', 'label_element'}
 
         # 走査対象
         buckets = ['email_inputs','tel_inputs','url_inputs','number_inputs','text_inputs','textareas','selects','radios','checkboxes']
@@ -520,7 +565,26 @@ class FieldMapper:
                     ei = await self.element_scorer._get_element_info(el)
                     nm = (ei.get('name') or '').strip()
                     idv = (ei.get('id') or '').strip()
-                    if not (nm in required_elements_set or idv in required_elements_set):
+                    # 既知の必須集合に含まれる、もしくは必須マーカーをコンテキストから検出
+                    in_known_required = (nm in required_elements_set or idv in required_elements_set)
+                    # ヒューリスティック: name/id に must/required を含む場合は必須とみなす
+                    if not in_known_required:
+                        low = f"{nm} {idv}".lower()
+                        if ('must' in low) or ('required' in low):
+                            in_known_required = True
+                    has_required_marker = False
+                    if not in_known_required:
+                        try:
+                            contexts = await self.context_text_extractor.extract_context_for_element(el)
+                            for ctx in contexts or []:
+                                if getattr(ctx, 'source_type', '') in allowed_required_sources:
+                                    txt = (ctx.text or '')
+                                    if any(m in txt for m in required_markers):
+                                        has_required_marker = True
+                                        break
+                        except Exception:
+                            has_required_marker = False
+                    if not (in_known_required or has_required_marker):
                         continue
 
                     if (nm, idv) in used_names_ids:
@@ -579,6 +643,28 @@ class FieldMapper:
             return '電話番号'
         if tag == 'textarea':
             return 'お問い合わせ本文'
+
+        # 郵便番号の推定（単一/分割どちらにも対応できる統合ラベル）
+        # name/id/class/placeholder/コンテキストに郵便関連トークンが含まれるかを確認
+        postal_tokens = [
+            '郵便番号', '郵便', '〒', 'zip', 'zipcode', 'zip_code', 'zip-code',
+            'postal', 'postalcode', 'postal_code', 'post_code', 'post-code', 'postcode',
+            '上3桁', '下4桁', '前3桁', '後4桁', 'yubin', 'yuubin', 'yubinbango', 'yuubinbango'
+        ]
+        if tag == 'input' and typ in ['', 'text', 'tel']:
+            blob = f"{name_id_cls} {ctx_text}"
+            if any(tok in blob for tok in postal_tokens):
+                return '郵便番号'
+
+        # 住所の推定（都道府県/市区町村/番地/建物名などの語を包括）
+        address_tokens = [
+            '住所', '所在地', 'address', 'addr', 'street', 'street_address', '番地', '建物', 'building',
+            '都道府県', 'prefecture', '県', '市区町村', '市区', 'city', '区', '町', 'town', '丁目', 'マンション', 'ビル', '部屋番号', 'room', 'apt', 'apartment'
+        ]
+        if tag in ['input', 'select'] and typ in ['', 'text']:
+            blob = f"{name_id_cls} {ctx_text}"
+            if any(tok in blob for tok in address_tokens):
+                return '住所'
 
         # 汎用入力(type=text)でも文脈/属性から論理フィールドを推定（救済判定）
         # 1) メールアドレス: ラベル/見出し/placeholder/属性にメール系語が含まれる
