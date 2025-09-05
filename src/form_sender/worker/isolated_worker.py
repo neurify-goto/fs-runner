@@ -616,7 +616,13 @@ class IsolatedFormWorker:
                         input_type = assign.get('input_type', 'text')
                         value = assign.get('value', '')
                         # 入力ハンドラは field_info から selector/type を参照するため整形
-                        field_info = {'selector': selector, 'input_type': input_type, 'type': input_type}
+                        field_info = {
+                            'selector': selector,
+                            'input_type': input_type,
+                            'type': input_type,
+                            'auto_action': assign.get('auto_action'),
+                            'selected_index': assign.get('selected_index')
+                        }
                         # チェックボックス/ラジオは値が空でも操作対象
                         if (value is not None and str(value).strip() != '') or input_type in ['checkbox', 'radio']:
                             success = await input_handler.fill_rule_based_field(field_name, field_info, value)
