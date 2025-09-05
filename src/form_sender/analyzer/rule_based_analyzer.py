@@ -205,6 +205,11 @@ class RuleBasedAnalyzer:
             if promoted:
                 for k in promoted:
                     auto_handled.pop(k, None)
+            # 追加: 必須カナの昇格（auto_unified_kana_* → 統合氏名カナ）
+            promoted_kana = await self.unmapped_handler.promote_required_kana_to_mapping(auto_handled, self.field_mapping)
+            if promoted_kana:
+                for k in promoted_kana:
+                    auto_handled.pop(k, None)
 
             # --- Value Assignment & Validation ---
             self.assigner.required_analysis = required_analysis

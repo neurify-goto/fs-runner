@@ -1420,7 +1420,8 @@ class ElementScorer:
                 return False
             
             # 同じグループ内の非入力要素から必須マーカーを探す
-            required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+            # 『※』は注記用途が多く誤検出の原因になるため除外
+            required_markers = ['*', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
             
             # グループ内の各要素の親コンテナ内で必須マーカーを探索
             for form_element in target_group:
@@ -1496,22 +1497,34 @@ class ElementScorer:
             if not self._context_extractor:
                 # フォールバック: 基本的な周辺テキスト取得
                 surrounding_text = await self._get_surrounding_text(element)
-                required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+                required_markers = ['*', '＊', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+                optional_markers = ['任意', 'optional', 'お分かりの場合', '分かる場合', 'お持ちの場合', 'あれば', '可能な範囲']
+                if any(tok in surrounding_text for tok in optional_markers):
+                    return False
                 return any(marker in surrounding_text for marker in required_markers)
             
             # ContextTextExtractorを使った高度な必須マーカー検出
             contexts = await self._context_extractor.extract_context_for_element(element)
-            required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
-            
+            required_markers = ['*', '＊', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+            optional_markers = ['任意', 'optional', 'お分かりの場合', '分かる場合', 'お持ちの場合', 'あれば', '可能な範囲']
+
+            found_required = False
             for context in contexts:
-                # 各コンテキストテキストで必須マーカーをチェック
-                if any(marker in context.text for marker in required_markers):
-                    # 強いコンテキスト（dt_label、th_label等）は信頼度高
-                    if context.source_type in {'dt_label', 'th_label', 'label_for', 'aria_labelledby'}:
-                        return True
+                text = context.text or ''
+                # オプション指示があれば必須扱いしない
+                if any(tok in text for tok in optional_markers):
+                    return False
+                if any(marker in text for marker in required_markers):
+                    # 強いコンテキスト（dt_label、th_label、th_label_index 等）は信頼度高
+                    if context.source_type in {'dt_label', 'th_label', 'th_label_index', 'label_for', 'aria_labelledby'}:
+                        found_required = True
+                        break
                     # 位置ベースのコンテキストも一定の信頼度があれば採用
                     elif context.confidence >= 0.7:
-                        return True
+                        found_required = True
+                        break
+            if found_required:
+                return True
                         
             return False
             
@@ -1519,7 +1532,10 @@ class ElementScorer:
             logger.debug(f"Failed to detect required markers with context: {e}")
             # フォールバック
             surrounding_text = await self._get_surrounding_text(element)
-            required_markers = ['*', '※', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+            required_markers = ['*', '＊', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
+            optional_markers = ['任意', 'optional', 'お分かりの場合', '分かる場合', 'お持ちの場合', 'あれば', '可能な範囲']
+            if any(tok in surrounding_text for tok in optional_markers):
+                return False
             return any(marker in surrounding_text for marker in required_markers)
 
     async def _get_surrounding_text(self, element: Locator) -> str:

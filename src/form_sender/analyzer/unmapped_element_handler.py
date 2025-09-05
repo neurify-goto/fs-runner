@@ -35,8 +35,8 @@ class UnmappedElementHandler:
         # 近傍コンテナの必須検出結果キャッシュ
         self._container_required_cache: Dict[str, bool] = {}
 
-        # 必須マーカー（重複利用を避けるためクラス定数的に保持）
-        self.REQUIRED_MARKERS = ['*','※','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］']
+        # 必須マーカー（『※』は注記用途が多く誤検出の原因になるため除外）
+        self.REQUIRED_MARKERS = ['*','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］']
 
     async def _detect_group_required_via_container(self, first_radio: Locator) -> bool:
         """見出しコンテナ側の必須マーカーを探索して判定（設定化・キャッシュ付）。"""
@@ -51,7 +51,7 @@ class UnmappedElementHandler:
         sib_depth = int(self.settings.get('radio_required_max_sibling_depth', 2))
         js = f"""
             (el) => {{
-              const MARKERS = ['*','※','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］'];
+              const MARKERS = ['*','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］'];
               const hasMarker = (node) => {{
                 if (!node) return false;
                 const txt = (node.innerText || node.textContent || '').trim();
@@ -132,13 +132,46 @@ class UnmappedElementHandler:
         has_unified_kana = "統合氏名カナ" in field_mapping
         has_split_kana = ("姓カナ" in field_mapping) and ("名カナ" in field_mapping)
         if not (has_unified_kana or has_split_kana):
-            kana_handled = await self._auto_handle_unified_kana(
-                classified_elements.get("text_inputs", []),
-                mapped_element_ids,
-                client_data,
-                form_structure,
+            text_inputs = classified_elements.get("text_inputs", [])
+            # まず分割カナ（セイ/メイ）候補が2つ以上揃っているかを軽量判定
+            last_like, first_like = None, None
+            for el in text_inputs:
+                try:
+                    info = await self.element_scorer._get_element_info(el)
+                    if not info.get("visible", True):
+                        continue
+                    name_id_cls = " ".join([info.get("name",""), info.get("id",""), info.get("class","")]).lower()
+                    contexts = await self.context_text_extractor.extract_context_for_element(el)
+                    best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
+                    kana_like = ("kana" in name_id_cls) or ("furigana" in name_id_cls) or ("katakana" in name_id_cls) or ("カナ" in best) or ("フリガナ" in best) or ("ふりがな" in best)
+                    if not kana_like:
+                        continue
+                    if any(t in (best+" "+name_id_cls) for t in ["sei","姓","セイ"]):
+                        last_like = el if last_like is None else last_like
+                    if any(t in (best+" "+name_id_cls) for t in ["mei","名","メイ"]):
+                        first_like = el if first_like is None else first_like
+                except Exception:
+                    continue
+            if last_like and first_like:
+                kana_split = await self._auto_handle_split_kana(text_inputs, mapped_element_ids, client_data)
+                auto_handled.update(kana_split)
+            else:
+                kana_handled = await self._auto_handle_unified_kana(
+                    text_inputs,
+                    mapped_element_ids,
+                    client_data,
+                    form_structure,
+                )
+                auto_handled.update(kana_handled)
+
+        # 任意のFAXフィールドがある場合、電話番号で補完（必須でない場合のみ）
+        try:
+            fax_handled = await self._auto_handle_fax(
+                classified_elements.get("text_inputs", []) or [], mapped_element_ids, client_data
             )
-            auto_handled.update(kana_handled)
+            auto_handled.update(fax_handled)
+        except Exception as e:
+            logger.debug(f"Auto handle fax skipped: {e}")
 
         logger.info(
             f"Auto-handled elements: checkboxes={len(checkbox_handled)}, radios={len(radio_handled)}, selects={len(select_handled)}"
@@ -493,6 +526,11 @@ class UnmappedElementHandler:
                 if len(opt_data) < 2:
                     continue
 
+                # 既定選択の保持（デフォルト優先）
+                try:
+                    pre_idx = await select.evaluate("el => el.selectedIndex")
+                except Exception:
+                    pre_idx = -1
                 texts = [d.get("text", "") for d in opt_data]
                 values = [d.get("value", "") for d in opt_data]
                 is_pref_select = any("東京都" in tx for tx in texts) and any(
@@ -505,6 +543,14 @@ class UnmappedElementHandler:
                     for tx in texts
                 )
                 idx = None
+                # 既定値が有効（先頭ダミーでない、かつ値が空でない）ならそれを優先採用
+                if isinstance(pre_idx, int) and 0 <= pre_idx < len(values):
+                    pre_text = (texts[pre_idx] or '').strip()
+                    pre_val = (values[pre_idx] or '').strip()
+                    dummy_tokens = ['選択', 'お選び', '選んで', 'choose', 'select', '---', '未選択']
+                    is_dummy = any(tok.lower() in pre_text.lower() for tok in dummy_tokens) or pre_val == ''
+                    if not is_dummy:
+                        idx = pre_idx
                 if is_gender_select and client_gender_norm:
                     # クライアント性別に一致する選択肢を優先
                     targets = {
@@ -749,6 +795,124 @@ class UnmappedElementHandler:
             logger.debug(f"Auto handle unified kana failed: {e}")
         return handled
 
+    async def _auto_handle_fax(
+        self,
+        text_inputs: List[Locator],
+        mapped_element_ids: set,
+        client_data: Optional[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """FAX番号入力欄を任意で自動入力（必須ではない場合のみ）。
+
+        - name/id/class/ラベルに fax/ファックス/FAX を含む要素を検出
+        - 必須判定が False の場合に限り、電話番号を代用して入力
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        # 設定で明示的に有効化された場合のみ実行（デフォルト無効）
+        if not bool(self.settings.get('enable_optional_fax_fill', False)):
+            return handled
+        try:
+            client = client_data.get('client', {}) if isinstance(client_data, dict) else {}
+            phone = ''.join([client.get('phone_1',''), client.get('phone_2',''), client.get('phone_3','')]).strip()
+            if not phone:
+                return handled
+            for i, el in enumerate(text_inputs):
+                if id(el) in mapped_element_ids:
+                    continue
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get('visible', True):
+                    continue
+                name_id_cls = ' '.join([info.get('name',''), info.get('id',''), info.get('class','')]).lower()
+                contexts = await self.context_text_extractor.extract_context_for_element(el)
+                best = (self.context_text_extractor.get_best_context_text(contexts) or '').lower()
+                if not (('fax' in name_id_cls) or ('ファックス' in best) or ('fax' in best)):
+                    continue
+                # 必須でない場合のみ自動入力
+                if await self.element_scorer._detect_required_status(el):
+                    continue
+                selector = await self._generate_playwright_selector(el)
+                handled[f'auto_fax_{i+1}'] = {
+                    'element': el,
+                    'selector': selector,
+                    'tag_name': info.get('tag_name','input'),
+                    'type': info.get('type','text') or 'text',
+                    'name': info.get('name',''),
+                    'id': info.get('id',''),
+                    'input_type': 'text',
+                    'auto_action': 'fill',
+                    'default_value': phone,
+                    'required': False,
+                    'auto_handled': True,
+                }
+        except Exception as e:
+            logger.debug(f"Auto handle fax failed: {e}")
+        return handled
+
+    async def _auto_handle_split_kana(
+        self,
+        text_inputs: List[Locator],
+        mapped_element_ids: set,
+        client_data: Optional[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """セイ/メイの分割カナ入力欄を自動入力（安全・汎用）。
+
+        判定:
+        - name/id/class に kana/furigana/katakana が含まれる、またはラベルに「カナ/フリガナ/ふりがな」
+        - かつ『セイ/姓/SEI』『メイ/名/MEI』の指標で last/first を分類
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        try:
+            last_el, first_el = None, None
+            for el in text_inputs:
+                if id(el) in mapped_element_ids:
+                    continue
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get('visible', True):
+                    continue
+                name_id_cls = " ".join([info.get('name',''), info.get('id',''), info.get('class','')]).lower()
+                contexts = await self.context_text_extractor.extract_context_for_element(el)
+                best = (self.context_text_extractor.get_best_context_text(contexts) or '').lower()
+                kana_like = ('kana' in name_id_cls) or ('furigana' in name_id_cls) or ('katakana' in name_id_cls) or ('カナ' in best) or ('フリガナ' in best) or ('ふりがな' in best)
+                if not kana_like:
+                    continue
+                blob = best + ' ' + name_id_cls
+                if any(t in blob for t in ['sei','姓','セイ']):
+                    last_el = last_el or el
+                if any(t in blob for t in ['mei','名','メイ']):
+                    first_el = first_el or el
+            if not (last_el and first_el):
+                return handled
+
+            client = client_data.get('client', {}) if isinstance(client_data, dict) else {}
+            last_kana = client.get('last_name_kana', '')
+            first_kana = client.get('first_name_kana', '')
+            if last_el and last_kana:
+                selector = await self._generate_playwright_selector(last_el)
+                handled['auto_split_kana_last'] = {
+                    'element': last_el,
+                    'selector': selector,
+                    'tag_name': 'input',
+                    'type': 'text',
+                    'input_type': 'text',
+                    'auto_action': 'fill',
+                    'default_value': last_kana,
+                    'required': await self.element_scorer._detect_required_status(last_el),
+                }
+            if first_el and first_kana:
+                selector = await self._generate_playwright_selector(first_el)
+                handled['auto_split_kana_first'] = {
+                    'element': first_el,
+                    'selector': selector,
+                    'tag_name': 'input',
+                    'type': 'text',
+                    'input_type': 'text',
+                    'auto_action': 'fill',
+                    'default_value': first_kana,
+                    'required': await self.element_scorer._detect_required_status(first_el),
+                }
+        except Exception as e:
+            logger.debug(f"Auto handle split kana failed: {e}")
+        return handled
+
     async def promote_required_fullname_to_mapping(
         self,
         auto_handled: Dict[str, Dict[str, Any]],
@@ -776,3 +940,37 @@ class UnmappedElementHandler:
         except Exception as e:
             logger.debug(f"Promote required fullname failed: {e}")
         return promoted_keys
+
+    async def promote_required_kana_to_mapping(
+        self,
+        auto_handled: Dict[str, Dict[str, Any]],
+        field_mapping: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        """必須の統合カナ(auto_unified_kana_*)を field_mapping に昇格。
+
+        - 既に『統合氏名カナ』/『姓カナ』『名カナ』が存在する場合は何もしない
+        - auto_handled に required=True の auto_unified_kana_* があれば、
+          『統合氏名カナ』として field_mapping に追加
+        """
+        promoted: List[str] = []
+        if ('統合氏名カナ' in field_mapping) or (('姓カナ' in field_mapping) and ('名カナ' in field_mapping)):
+            return promoted
+        for k, v in auto_handled.items():
+            if not k.startswith('auto_unified_kana_'):
+                continue
+            if not v.get('required', False):
+                continue
+            # フィールド名を昇格
+            try:
+                field_mapping['統合氏名カナ'] = {
+                    **{kk: vv for kk, vv in v.items() if kk not in ['auto_action', 'default_value']},
+                    'input_type': 'text',
+                    'value': v.get('default_value', ''),
+                    'required': True,
+                    'source': 'promoted'
+                }
+                promoted.append('統合氏名カナ')
+                break
+            except Exception:
+                continue
+        return promoted

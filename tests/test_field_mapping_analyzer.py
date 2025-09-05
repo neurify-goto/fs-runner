@@ -985,7 +985,8 @@ class FieldMappingAnalyzer:
             while next_sibling:
                 if hasattr(next_sibling, 'get_text'):
                     text = next_sibling.get_text().strip()
-                    if any(marker in text for marker in ['必須', 'Required', 'Mandatory', '*', '※']):
+                    # 『※』は注記用途が多く、必須の確証にならないため除外。全角スター『＊』は許可。
+                    if any(marker in text for marker in ['必須', 'Required', 'Mandatory', '*', '＊']):
                         return True
                 next_sibling = next_sibling.next_sibling
             
@@ -996,6 +997,22 @@ class FieldMappingAnalyzer:
                         text = sibling.get_text().strip()
                         if any(marker in text for marker in ['必須', 'Required', 'Mandatory']) and len(text) <= 10:
                             return True
+
+            # テーブルレイアウト対応: td内のinputに対して直前のthを確認
+            try:
+                td = element
+                # 祖先方向に辿って td を探す
+                while td and getattr(td, 'name', '') != 'td':
+                    td = td.parent
+                if td and td.parent:
+                    # 同じ tr 内の直前 th を探す
+                    prev = td.find_previous_sibling('th')
+                    if prev:
+                        th_text = prev.get_text().strip()
+                        if any(marker in th_text for marker in ['必須', 'Required', 'Mandatory', '＊', '*']):
+                            return True
+            except Exception:
+                pass
             
             return False
             
