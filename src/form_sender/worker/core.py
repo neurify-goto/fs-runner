@@ -969,7 +969,7 @@ class FormSenderWorker:
             logger.debug(f"Field {field_name} filled with textarea: {value}")
         elif input_type == "select":
             await self.page.select_option(selector, str(value))
-            logger.debug(f"Field {field_name} selected option: {value}")
+            logger.debug(f"Field {field_name} selected option (value redacted)")
         elif input_type == "checkbox":
             await self._handle_checkbox_input(field_name, selector, value)
         elif input_type == "radio":
@@ -1826,7 +1826,7 @@ class FormSenderWorker:
                 return await self._execute_textarea_input(element, value, field_name)
                 
             elif input_type == 'select':
-                return await self._execute_select_input(element, value, field_name, auto_action)
+                return await self._execute_select_input(element, value, field_name, auto_action, input_config.get('selected_index'))
                 
             elif input_type == 'checkbox':
                 return await self._execute_checkbox_input(element, value, field_name, auto_action)
@@ -1941,7 +1941,7 @@ class FormSenderWorker:
                 'input_type': 'textarea'
             }
     
-    async def _execute_select_input(self, element: "Locator", value: str, field_name: str, auto_action: str) -> Dict[str, Any]:
+    async def _execute_select_input(self, element: "Locator", value: str, field_name: str, auto_action: str, selected_index: Optional[int] = None) -> Dict[str, Any]:
         """select要素入力の実行"""
         try:
             # オプションの取得
@@ -1956,7 +1956,25 @@ class FormSenderWorker:
                 }
             
             # auto_actionに基づく選択
-            if auto_action == 'select_last' or not value:
+            if auto_action == 'select_index' and isinstance(selected_index, int) and selected_index >= 0:
+                try:
+                    await element.select_option(index=selected_index)
+                    logger.debug(f"Selected index {selected_index} for select field '{field_name}'")
+                    return {
+                        'success': True,
+                        'input_type': 'select',
+                        'selected_option': 'by_index',
+                        'selected_index': selected_index,
+                        'total_options': option_count
+                    }
+                except Exception as e:
+                    logger.warning(f"Failed to select index for field '{field_name}': {e}")
+
+            if auto_action == 'select_by_algorithm':
+                # 3段階フォールバックアルゴリズムを即適用
+                return await self._execute_select_fallback(element, options, option_count, field_name)
+
+            if auto_action == 'select_last':
                 # 最後の選択肢を選択（参考リポジトリの戦略）
                 try:
                     last_option_index = option_count - 1
@@ -1971,35 +1989,35 @@ class FormSenderWorker:
                         'input_type': 'select',
                         'selected_option': 'last',
                         'selected_index': last_option_index,
-                        'selected_value': last_option_value,
+                        'selected_value': '***VALUE_REDACTED***',
                         'total_options': option_count
                     }
                 except Exception as e:
                     logger.warning(f"Failed to select last option for field '{field_name}': {e}")
             
-            # 値による選択を試行
+            # 値による選択を試行（値はログに出さない）
             if value:
                 try:
                     # まず値で試行
                     await element.select_option(value=str(value))
-                    logger.debug(f"Selected option by value '{value}' for select field '{field_name}'")
+                    logger.debug(f"Selected option by value for select field '{field_name}' (redacted)")
                     return {
                         'success': True,
                         'input_type': 'select',
                         'selected_option': 'by_value',
-                        'selected_value': str(value),
+                        'selected_value': '***VALUE_REDACTED***',
                         'total_options': option_count
                     }
                 except:
                     try:
                         # テキストで試行
                         await element.select_option(label=str(value))
-                        logger.debug(f"Selected option by label '{value}' for select field '{field_name}'")
+                        logger.debug(f"Selected option by label for select field '{field_name}' (redacted)")
                         return {
                             'success': True,
                             'input_type': 'select',
                             'selected_option': 'by_label',
-                            'selected_value': str(value),
+                            'selected_value': '***VALUE_REDACTED***',
                             'total_options': option_count
                         }
                     except:
@@ -2013,18 +2031,18 @@ class FormSenderWorker:
                                 if (str(value).lower() in option_text.lower() or 
                                     str(value).lower() in option_value.lower()):
                                     await element.select_option(index=i)
-                                    logger.debug(f"Selected option by partial match '{value}' for select field '{field_name}'")
+                                    logger.debug(f"Selected option by partial match for select field '{field_name}' (redacted)")
                                     return {
                                         'success': True,
                                         'input_type': 'select',
                                         'selected_option': 'by_partial_match',
                                         'selected_index': i,
-                                        'selected_text': option_text,
+                                        'selected_text': '***VALUE_REDACTED***',
                                         'total_options': option_count
                                     }
                             except:
                                 continue
-            
+
             # 3段階フォールバックシステム（参考リポジトリの手法）
             return await self._execute_select_fallback(element, options, option_count, field_name)
             
@@ -2068,13 +2086,13 @@ class FormSenderWorker:
                         option_value == preferred.lower() or
                         option_text.strip() == preferred.lower().strip()):
                         await element.select_option(index=i)
-                        logger.info(f"Selected preferred option (exact match) '{option_text}' (index {i}) for select field '{field_name}'")
+                        logger.info(f"Selected preferred option (exact match) (index {i}) for select field '{field_name}'")
                         return {
                             'success': True,
                             'input_type': 'select',
                             'selected_option': 'preferred_exact',
                             'selected_index': i,
-                            'selected_text': option_text,
+                            'selected_text': '***VALUE_REDACTED***',
                             'match_pattern': preferred,
                             'total_options': option_count
                         }
@@ -2088,13 +2106,13 @@ class FormSenderWorker:
                             continue
                             
                         await element.select_option(index=i)
-                        logger.info(f"Selected preferred option (partial match) '{option_text}' (index {i}) for select field '{field_name}'")
+                        logger.info(f"Selected preferred option (partial match) (index {i}) for select field '{field_name}'")
                         return {
                             'success': True,
                             'input_type': 'select',
                             'selected_option': 'preferred_partial',
                             'selected_index': i,
-                            'selected_text': option_text,
+                            'selected_text': '***VALUE_REDACTED***',
                             'match_pattern': preferred,
                             'total_options': option_count
                         }
@@ -2110,14 +2128,14 @@ class FormSenderWorker:
                 last_option_text = await last_option.text_content() or ''
                 last_option_value = await last_option.get_attribute('value') or ''
                 
-                logger.info(f"Selected last option (index {last_index}) for select field '{field_name}': '{last_option_text}'")
+                logger.info(f"Selected last option (index {last_index}) for select field '{field_name}'")
                 return {
                     'success': True,
                     'input_type': 'select',
                     'selected_option': 'last_option',
                     'selected_index': last_index,
-                    'selected_text': last_option_text,
-                    'selected_value': last_option_value,
+                    'selected_text': '***VALUE_REDACTED***',
+                    'selected_value': '***VALUE_REDACTED***',
                     'total_options': option_count
                 }
         except Exception as e:
@@ -2132,14 +2150,14 @@ class FormSenderWorker:
                 
                 if option_value.strip() and option_text.strip():
                     await element.select_option(index=i)
-                    logger.warning(f"Selected fallback option (index {i}) for select field '{field_name}': '{option_text}'")
+                    logger.warning(f"Selected fallback option (index {i}) for select field '{field_name}'")
                     return {
                         'success': True,
                         'input_type': 'select',
                         'selected_option': 'fallback',
                         'selected_index': i,
-                        'selected_value': option_value,
-                        'selected_text': option_text,
+                        'selected_value': '***VALUE_REDACTED***',
+                        'selected_text': '***VALUE_REDACTED***',
                         'total_options': option_count
                     }
         except Exception as e:

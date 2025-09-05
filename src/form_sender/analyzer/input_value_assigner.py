@@ -27,13 +27,33 @@ class InputValueAssigner:
         for field_name, field_info in field_mapping.items():
             if not self._should_input_field(field_name, field_info):
                 continue
-            
+
+            input_type = field_info.get('input_type')
             input_value = split_assignments.get(field_name, self._generate_enhanced_input_value(field_name, field_info, client_data))
-            
-            input_assignments[field_name] = {
-                'selector': field_info['selector'], 'input_type': field_info['input_type'],
-                'value': input_value, 'required': field_info.get('required', False)
+
+            # 選択式（select/checkbox/radio）のクライアント値割り当て制約
+            # 方針: クライアント情報を当てはめる可能性があるのは address_1（都道府県）と gender のみ
+            # ここでは select のみを対象にし、性別以外はアルゴリズム選択に委譲する
+            auto_action = None
+            extra = {}
+            if input_type == 'select':
+                allowed = field_name in {'性別', '都道府県'}
+                if not allowed:
+                    # 値は使わず、3段階アルゴリズムで選択させる
+                    input_value = ''
+                    auto_action = 'select_by_algorithm'
+
+            assign = {
+                'selector': field_info['selector'],
+                'input_type': input_type,
+                'value': input_value,
+                'required': field_info.get('required', False)
             }
+            if auto_action:
+                assign['auto_action'] = auto_action
+            assign.update(extra)
+
+            input_assignments[field_name] = assign
 
         for field_name, field_info in auto_handled.items():
             value = field_info.get('default_value', True)
