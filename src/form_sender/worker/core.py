@@ -11,7 +11,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone, timedelta
-from pathlib import Path  # noqa: F401  # not used directly; kept if needed by type hints in older references
+# Pathは未使用のため削除（過去互換コメントを除去）
 from typing import Dict, Any, List, Optional, Tuple, Union, Callable
 
 try:
@@ -2331,8 +2331,17 @@ class FormSenderWorker:
 
     async def _execute_form_submission(self, expanded_instruction: Dict[str, Any], record_id: int) -> Dict[str, Any]:
         """フォーム送信と結果判定（instruction_json非依存）"""
-        # instruction_jsonは廃止。送信ボタンは内部ロジックで検出する。
-        submit_result = await self._submit_form({})
+        # ルールベース解析で検出した候補を優先的に使用
+        submit_cfg: Dict[str, Any] = {}
+        try:
+            candidates = getattr(self, "_submit_button_candidates", []) or []
+            if candidates:
+                submit_cfg["selector_candidates"] = candidates
+                logger.info(f"Using {len(candidates)} analyzer submit candidates for submission")
+        except Exception:
+            pass
+
+        submit_result = await self._submit_form(submit_cfg)
 
         return {
             "record_id": record_id,
