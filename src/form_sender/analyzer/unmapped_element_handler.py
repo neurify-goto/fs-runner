@@ -35,6 +35,9 @@ class UnmappedElementHandler:
         # 近傍コンテナの必須検出結果キャッシュ
         self._container_required_cache: Dict[str, bool] = {}
 
+        # 必須マーカー（重複利用を避けるためクラス定数的に保持）
+        self.REQUIRED_MARKERS = ['*','※','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］']
+
     async def _detect_group_required_via_container(self, first_radio: Locator) -> bool:
         """見出しコンテナ側の必須マーカーを探索して判定（設定化・キャッシュ付）。"""
         try:
@@ -455,21 +458,29 @@ class UnmappedElementHandler:
                 # 必須判定（フォールバック付き）
                 required = await self.element_scorer._detect_required_status(select)
                 if not required:
-                    # DL構造: <dd> の直前 <dt> に必須マーカーがあるか簡易チェック
+                    # DL構造: <dd> の直前 <dt> に必須マーカーがあるか簡易チェック（JS側も try-catch）
                     try:
                         required = await select.evaluate(
                             """
-                            (el) => {
-                              const MARKERS = ['*','※','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］'];
-                              let p = el; while (p && (p.tagName||'').toLowerCase() !== 'dd') p = p.parentElement;
-                              if (!p) return false; let dt = p.previousElementSibling;
-                              while (dt && (dt.tagName||'').toLowerCase() !== 'dt') dt = dt.previousElementSibling;
-                              if (!dt) return false; const t = (dt.innerText || dt.textContent || '').trim();
-                              return !!t && MARKERS.some(m => t.includes(m));
+                            (el, MARKERS) => {
+                              try {
+                                if (!el || !el.tagName) return false;
+                                let p = el;
+                                while (p && (p.tagName||'').toLowerCase() !== 'dd') p = p.parentElement;
+                                if (!p) return false;
+                                let dt = p.previousElementSibling;
+                                while (dt && (dt.tagName||'').toLowerCase() !== 'dt') dt = dt.previousElementSibling;
+                                if (!dt) return false;
+                                const t = (dt.innerText || dt.textContent || '').trim();
+                                if (!t) return false;
+                                return MARKERS.some(m => t.includes(m));
+                              } catch { return false; }
                             }
-                            """
+                            """,
+                            list(self.REQUIRED_MARKERS),
                         )
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"DT/DD required detection failed for select: {e}")
                         required = False
                 if not required:
                     continue

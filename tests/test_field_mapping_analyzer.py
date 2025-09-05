@@ -363,9 +363,57 @@ class FieldMappingAnalyzer:
                         # ブラウザも無い場合は再初期化
                         await self._initialize_browser()
                         return
-                    self.context = await self.browser.new_context()
-                # ルーティングとヘッダは context に設定済み
+                    # 初期化時と同等のオプションを再適用
+                    self.context = await self.browser.new_context(
+                        ignore_https_errors=True,
+                        java_script_enabled=True,
+                        bypass_csp=True,
+                        viewport={"width": 1366, "height": 900},
+                    )
+
+                    # 再ルーティング（初期化時と同様のブロッキング方針）
+                    async def handle_route(route):
+                        resource_type = route.request.resource_type
+                        url = route.request.url.lower()
+                        if resource_type in ["image", "media", "font", "manifest", "other"]:
+                            await route.abort(); return
+                        if resource_type == "stylesheet":
+                            await route.abort(); return
+                        if resource_type == "script":
+                            tracker_keywords = [
+                                "googletagmanager.com","google-analytics.com","www.google-analytics.com",
+                                "doubleclick.net","googlesyndication.com","facebook.net",
+                                "connect.facebook.net","hotjar.com","mixpanel.com","amplitude.com",
+                            ]
+                            if any(k in url for k in tracker_keywords):
+                                await route.abort(); return
+                        await route.continue_()
+                    await self.context.route("**/*", handle_route)
+
+                    # User-Agent / タイムアウト再設定
+                    await self.context.set_extra_http_headers({
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    })
+                    self.context.set_default_navigation_timeout(30000)
+
+                    # self-closing / popup 抑止 init_script を再適用
+                    await self.context.add_init_script(
+                        """
+                        (() => { try {
+                          const noop = () => false;
+                          Object.defineProperty(window, 'close', { value: noop, configurable: true });
+                          const _open = window.open;
+                          Object.defineProperty(window, 'open', { value: (url, target, features) => {
+                            try { window.location.href = url; } catch {}
+                            return window;
+                          }, configurable: true });
+                        } catch {} })();
+                        """
+                    )
+
+                # 新規ページ生成とイベント再設定
                 self.page = await self.context.new_page()
+                self.page.on("close", lambda: logger.debug("Active page closed (event)"))
                 return
             except Exception as e:
                 last_err = e
