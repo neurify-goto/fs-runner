@@ -56,3 +56,19 @@ def test_classify_detail_http_status():
     assert detail["code"] in {"WAF_CHALLENGE", "ACCESS"}
     assert isinstance(detail["retryable"], bool)
     assert "category" in detail
+
+
+def test_classify_detail_confidence_scores():
+    detail = ErrorClassifier.classify_detail(error_message="DNS lookup failed")
+    assert 0.0 <= detail["confidence"] <= 1.0
+
+
+def test_external_config_patterns_rate_limit():
+    # config/error_classification.json に定義済み: "throttled" -> RATE_LIMIT
+    code = ErrorClassifier.classify_form_submission_error(
+        error_message="Request throttled due to rate limiting",
+        has_url_change=False,
+        page_content="",
+        submit_selector=".btn",
+    )
+    assert code == "RATE_LIMIT"

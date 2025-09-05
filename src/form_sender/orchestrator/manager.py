@@ -663,7 +663,7 @@ class MultiProcessOrchestrator:
                         # 既に決定済みのerror_typeを最優先
                         detail['code'] = result.error_type
                 except Exception as _detail_err:
-                    logger.debug(f"classify_detail fallback: {_detail_err}")
+                    logger.warning(f"classify_detail failed, fallback without detail: {_detail_err}")
 
                 save_task = asyncio.create_task(
                     asyncio.to_thread(
@@ -966,7 +966,7 @@ class MultiProcessOrchestrator:
                 if result_data.get('error_type'):
                     detail['code'] = result_data.get('error_type')
             except Exception as _detail_err:
-                logger.debug(f"classify_detail fallback (overflow): {_detail_err}")
+                logger.warning(f"classify_detail failed (overflow), fallback without detail: {_detail_err}")
 
             self.controller.save_result_immediately(
                 result_data['record_id'],

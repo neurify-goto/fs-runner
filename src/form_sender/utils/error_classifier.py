@@ -133,7 +133,7 @@ class ErrorClassifier:
     INSTRUCTION_JSON_PATTERN = re.compile(r'\b(?:instruction|json)\b', re.IGNORECASE)
 
     # 追加: 日本語・英語の入力必須/未入力バリエーション（ページテキスト用）
-    REQUIRED_TEXT_PATTERNS: List[Pattern] = [
+    REQUIRED_TEXT_PATTERNS: List[Pattern[str]] = [
         re.compile(p) for p in [
             r"未入力",
             r"入力\s*してください",
@@ -151,7 +151,7 @@ class ErrorClassifier:
     ]
 
     # 追加: フォーマット不正バリエーション
-    FORMAT_TEXT_PATTERNS: List[Pattern] = [
+    FORMAT_TEXT_PATTERNS: List[Pattern[str]] = [
         re.compile(p, re.IGNORECASE) for p in [
             r"形式が正しくありません",
             r"正しく入力してください",
@@ -163,19 +163,19 @@ class ErrorClassifier:
     ]
 
     # 追加: その他代表的エラー
-    CAPTCHA_TEXT_PATTERNS: List[Pattern] = [re.compile(r, re.IGNORECASE) for r in [r"captcha", r"recaptcha", r"私はロボットではありません"]]
+    CAPTCHA_TEXT_PATTERNS: List[Pattern[str]] = [re.compile(r, re.IGNORECASE) for r in [r"captcha", r"recaptcha", r"私はロボットではありません"]]
     # CSRF は誤判定防止のため「token」単独では判定しない。エラー語と近接している場合のみ検出。
-    CSRF_NEAR_ERROR_PATTERNS: List[Pattern] = [
+    CSRF_NEAR_ERROR_PATTERNS: List[Pattern[str]] = [
         # 英語: CSRF/XSRF/forgery/authenticity + エラー語（invalid/mismatch/expired/missing/failedなど）が近接
         re.compile(r"(csrf|xsrf|forgery|authenticity)[^\n<]{0,80}(invalid|mismatch|expired|missing|required|failed|error)", re.IGNORECASE),
         # 日本語: (CSRF|ワンタイム(キー|トークン)|トークン) + エラー語（無効/不一致/期限/切れ/エラー）
         re.compile(r"(csrf|ワンタイム(?:キー|トークン)|トークン)[^\n<]{0,80}(無効|不一致|期限|切れ|エラー)")
     ]
-    DUPLICATE_TEXT_PATTERNS: List[Pattern] = [re.compile(r, re.IGNORECASE) for r in [r"重複", r"既に(送信|登録)", r"duplicate", r"already\s+submitted"]]
+    DUPLICATE_TEXT_PATTERNS: List[Pattern[str]] = [re.compile(r, re.IGNORECASE) for r in [r"重複", r"既に(送信|登録)", r"duplicate", r"already\s+submitted"]]
 
     # === 外部設定のロード =========================================================
     _external_rules_loaded: bool = False
-    _external_extra_patterns: Dict[str, List[Pattern]] = {}
+    _external_extra_patterns: Dict[str, List[Pattern[str]]] = {}
 
     @classmethod
     def _load_external_rules(cls) -> None:
@@ -191,7 +191,7 @@ class ErrorClassifier:
             with open(config_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             extra: Dict[str, List[str]] = data.get('extra_patterns', {})
-            compiled: Dict[str, List[Pattern]] = {}
+            compiled: Dict[str, List[Pattern[str]]] = {}
             for key, patterns in extra.items():
                 compiled[key] = []
                 for p in patterns:
@@ -357,7 +357,7 @@ class ErrorClassifier:
 
     # === 追加: ネットワーク/WAF 詳細分類 ========================================
     @classmethod
-    def _contains_any(cls, text: str, patterns: List[Pattern]) -> bool:
+    def _contains_any(cls, text: str, patterns: List[Pattern[str]]) -> bool:
         if not text:
             return False
         for p in patterns:
@@ -656,7 +656,8 @@ class ErrorClassifier:
             code = cls.classify_error_type({'error_message': msg, 'http_status': http_status, 'page_content': content})
         else:
             # form submission 文脈を仮定
-            code = cls.classify_form_submission_error(error_message=msg, page_content=content, submit_selector='dummy')
+            # submit_selector は未判明のため空文字を渡す（ハードコード値回避）
+            code = cls.classify_form_submission_error(error_message=msg, page_content=content, submit_selector="")
 
         # 2) カテゴリ/再試行可否/クールダウンのヒント
         category_map = {
@@ -690,7 +691,7 @@ class ErrorClassifier:
         cooldown = 300 if code in {'RATE_LIMIT', 'WAF_CHALLENGE'} else (60 if code in {'SERVER_ERROR', 'ACCESS'} else 0)
 
         # 3) 信頼度の簡易推定（ヒューリスティック）
-        confidence = 0.9 if code in {'RATE_LIMIT', 'DNS_ERROR', 'TLS_ERROR', 'CSRF_ERROR'} else 0.7
+        confidence = cls._calculate_confidence(code, msg, content)
 
         return {
             'code': code,
@@ -699,3 +700,45 @@ class ErrorClassifier:
             'cooldown_seconds': cooldown,
             'confidence': confidence,
         }
+
+    @classmethod
+    def _calculate_confidence(cls, code: str, error_message: str, page_content: str) -> float:
+        """信頼度スコア（0..1）を簡易ヒューリスティックで算出"""
+        msg = error_message or ""
+        content = page_content or ""
+        score = 0.0
+
+        # 強いエビデンス: 明示エラーパターン
+        strong_signals = [
+            (code == 'DNS_ERROR' and bool(cls.DNS_ERROR.search(msg))),
+            (code == 'TLS_ERROR' and bool(cls.TLS_ERROR.search(msg))),
+            (code == 'CONNECTION_RESET' and bool(cls.CONN_RESET.search(msg))),
+            (code == 'RATE_LIMIT' and bool(cls.RATE_LIMIT.search(msg) or '429' in msg)),
+            (code == 'WAF_CHALLENGE' and cls._contains_any(content, [cls.CLOUDFLARE, cls.AKAMAI, cls.INCAPSULA, cls.PERIMETERX, cls.HUMAN_VERIF])),
+            (code == 'CSRF_ERROR' and any(p.search(msg) or p.search(content) for p in cls.CSRF_NEAR_ERROR_PATTERNS)),
+            (code in {'MAPPING', 'VALIDATION_FORMAT'} and (
+                any(p.search(content) or p.search(msg) for p in cls.REQUIRED_TEXT_PATTERNS + cls.FORMAT_TEXT_PATTERNS)
+            )),
+        ]
+        score += 0.6 if any(strong_signals) else 0.0
+
+        # 補助シグナル: CAPTCHA/WAF語彙・HTTP語
+        if any(word in msg for word in ['http', 'status', 'error', 'forbidden', 'unauthorized']):
+            score += 0.1
+        if cls._contains_any(content, cls.CAPTCHA_TEXT_PATTERNS):
+            score += 0.1
+
+        # 低確信ケース: SYSTEM や 汎用カテゴリ
+        if code in {'SYSTEM', 'CONTENT_ANALYSIS_FAILED', 'SUBMIT'}:
+            score -= 0.2
+
+        # メッセージ/本文無しは減点
+        if not msg and not content:
+            score -= 0.2
+
+        # スコアクリップ
+        score = max(0.0, min(1.0, score))
+        # 最低保証
+        if score < 0.2:
+            score = 0.2
+        return score
