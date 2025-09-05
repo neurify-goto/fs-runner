@@ -698,7 +698,8 @@ class ContextTextExtractor:
                     for ref in str(labelledby_id).split():  # 空白区切りで複数IDに対応
                         if not ref:
                             continue
-                        loc = self.page.locator(f'#{ref}')
+                        esc_ref = ref.replace('\\', r'\\').replace('"', r'\"')
+                        loc = self.page.locator(f'[id=\"{esc_ref}\"]')
                         if await loc.count() > 0:
                             t = await loc.text_content()
                             if t and self._is_valid_text(t):

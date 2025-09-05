@@ -1384,18 +1384,24 @@ class ElementScorer:
             )
             
             if info.get('id'):
-                return f"#{info['id']}"
+                esc_id = str(info['id']).replace('\\', r'\\').replace('"', r'\"')
+                return f"[id=\"{esc_id}\"]"
                 
             name = info.get('name')
             tag = info.get('tag') or 'input'
             typ = info.get('type')
             
             if name:
+                esc_name = str(name).replace('\\', r'\\').replace('"', r'\"')
                 if typ:
-                    return f"{tag}[name=\"{name}\"][type=\"{typ}\"]"
-                return f"{tag}[name=\"{name}\"]"
+                    esc_type = str(typ).replace('\\', r'\\').replace('"', r'\"')
+                    return f"{tag}[name=\"{esc_name}\"][type=\"{esc_type}\"]"
+                return f"{tag}[name=\"{esc_name}\"]"
                 
-            return f"{tag}[type=\"{typ}\"]" if typ else tag
+            if typ:
+                esc_type2 = str(typ).replace('\\', r'\\').replace('"', r'\"')
+                return f"{tag}[type=\"{esc_type2}\"]"
+            return tag
             
         except Exception:
             return 'input'

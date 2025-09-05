@@ -248,7 +248,15 @@ class ContinuousProcessController:
                 import re
                 try:
                     ng_regex = re.compile(ng_pattern, re.IGNORECASE)
-                    companies = [c for c in companies if not ng_regex.search(c.get('name', ''))]
+                    # RPC経路はSQL側で除外済みだが、フォールバック経路は company_name キーのみの場合がある。
+                    # 両方を安全に参照し、どちらかに一致したら除外する。
+                    def _get_company_name_for_filter(c: Dict[str, Any]) -> str:
+                        name1 = c.get('name') or ''
+                        if name1:
+                            return name1
+                        return c.get('company_name', '') or ''
+
+                    companies = [c for c in companies if not ng_regex.search(_get_company_name_for_filter(c))]
                     logger.debug(f"Applied ng_companies filter, remaining: {len(companies)}")
                 except re.error as e:
                     logger.warning(f"Invalid ng_companies regex pattern '{ng_pattern}': {e}")
@@ -302,7 +310,7 @@ class ContinuousProcessController:
             return False  # エラー時は安全側に倒す
 
     def _call_get_target_companies_rpc(self, targeting_sql: str, ng_companies: str, start_id: int, limit: int, exclude_ids: set) -> List[Dict[str, Any]]:
-        """新しいRPC関数を呼び出して企業データを取得（セキュリティ強化版）"""
+        """新しいRPC関数を呼び出して企業データを取得（セキュリティ強化版 + 再試行）"""
         try:
             # 【セキュリティ強化】クライアントサイド事前検証
             if not self._validate_targeting_sql_client_side(targeting_sql):
@@ -317,14 +325,20 @@ class ContinuousProcessController:
             
             logger.info("🛡️ Client-side security validation passed")
             
-            # RPC関数を実行
-            response = self.supabase_client.rpc('get_target_companies_with_sql', {
-                'targeting_sql': targeting_sql,
-                'ng_companies': ng_companies,
-                'start_id': start_id,
-                'limit_count': limit,
-                'exclude_ids': exclude_ids_array
-            }).execute()
+            # RPC関数を実行（再試行付き）
+            def _rpc_call():
+                return self.supabase_client.rpc('get_target_companies_with_sql', {
+                    'targeting_sql': targeting_sql,
+                    'ng_companies': ng_companies,
+                    'start_id': start_id,
+                    'limit_count': limit,
+                    'exclude_ids': exclude_ids_array
+                }).execute()
+
+            response = self.db_manager.execute_with_retry_sync(
+                operation=f"rpc_get_target_companies_with_sql_targeting_{self.targeting_id}",
+                func=_rpc_call
+            )
             
             if response.data is None:
                 logger.warning("RPC function returned null data")
@@ -350,9 +364,63 @@ class ContinuousProcessController:
             else:
                 logger.error(f"Unknown error calling get_target_companies_with_sql RPC: {e}")
                 raise ValueError(f"Database operation failed: {e}") from e
+
+    def _fallback_query_companies_basic(self, client_config: Dict[str, Any], start_id: int, limit: int, exclude_ids: set) -> List[Dict[str, Any]]:
+        """RPC失敗時のフォールバック: companiesテーブルからの基本的取得
+
+        - form_url が存在
+        - instruction_valid が False でない
+        - id >= start_id, id NOT IN exclude_ids（可能なら）
+        - limit 件（不足時はそのまま）
+        """
+        try:
+            additional_cols = self._get_required_company_columns(client_config)
+            select_cols = self._build_select_columns(additional_cols)
+
+            def _query():
+                q = self.supabase_client.table('companies').select(select_cols) \
+                    .gte('id', start_id) \
+                    .order('id', desc=False) \
+                    .limit(max(1, int(limit)))
+                # 除外ID
+                try:
+                    if exclude_ids:
+                        q = q.not_.in_('id', list(exclude_ids))
+                except Exception:
+                    # postgrestのバージョン差異などでin_が使えない場合は無視
+                    pass
+                return q.execute()
+
+            response = self.db_manager.execute_with_retry_sync(
+                operation=f"fallback_basic_companies_query_targeting_{self.targeting_id}",
+                func=_query
+            )
+
+            rows = response.data or []
+            # Python側で最低限のフィルタを適用 + 後段フィルタ互換のため company_name→name を補完
+            filtered = []
+            for r in rows:
+                if not r.get('form_url'):
+                    continue
+                if r.get('instruction_valid') is False:
+                    continue
+                # NGフィルタが name キーを参照するため、フォールバックは name を補完
+                try:
+                    if 'name' not in r and 'company_name' in r and r['company_name']:
+                        r = {**r, 'name': r['company_name']}
+                except Exception:
+                    pass
+                filtered.append(r)
+            logger.warning(f"Using BASIC FALLBACK query results: {len(filtered)} items (raw={len(rows)})")
+            return filtered
+        except Exception as fe:
+            logger.error(f"Fallback basic query failed: {fe}")
+            return []
     
     def _get_companies_using_rpc(self, client_config: Dict[str, Any], start_id: int, limit: int, exclude_ids: set) -> List[Dict[str, Any]]:
-        """RPC関数を使用して企業データを取得（直接SQL WHERE句実行）"""
+        """RPC関数を使用して企業データを取得（直接SQL WHERE句実行）
+        失敗時は基本SELECTにフォールバック
+        """
         try:
             # 設定値を取得
             targeting_sql = self._get_config_value(client_config, 'targeting_sql', '') or ''
@@ -381,7 +449,13 @@ class ContinuousProcessController:
             
         except Exception as e:
             logger.error(f"Critical error using RPC function: {e}")
-            raise ValueError(f"Failed to get companies using RPC: {e}") from e
+            # フォールバック実行
+            fb = self._fallback_query_companies_basic(client_config, start_id, limit, exclude_ids)
+            if fb:
+                logger.info(f"RPC fallback succeeded with {len(fb)} companies")
+                return fb
+            # 完全に失敗した場合は例外を投げて上位で処理
+            raise ValueError(f"Failed to get companies using RPC and fallback: {e}") from e
 
 
         
@@ -640,7 +714,7 @@ class ContinuousProcessController:
         return select_string
     
     def _query_companies_from_id(self, client_config: Dict[str, Any], start_id: int, limit: int, exclude_ids: Optional[set] = None) -> List[Dict[str, Any]]:
-        """指定したID以上の企業を抽出（RPC関数使用、直接SQL WHERE句実行）"""
+        """指定したID以上の企業を抽出（RPC優先、失敗時フォールバック）"""
         try:
             # 除外IDセットを準備
             if exclude_ids is None:
@@ -661,7 +735,8 @@ class ContinuousProcessController:
             
         except Exception as e:
             logger.error(f"Error querying companies from ID {start_id} using RPC: {e}")
-            raise ValueError(f"Failed to query companies: {e}") from e
+            # 二段階失敗時は空配列で返す（上位のバッチ処理ループで待機→再試行）
+            return []
     
     def _fetch_companies_bulk(self, client_config: Dict[str, Any], limit: int = 1000) -> List[Dict[str, Any]]:
         """FORM_SENDER.md 1.4.1仕様準拠: 最大1000件の企業を一括取得（ランダムID開始点方式）"""
