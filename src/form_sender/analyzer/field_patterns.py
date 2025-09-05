@@ -157,7 +157,8 @@ class FieldPatterns:
                          "surname", "user_name", "member_name", "client_name", "contact_name", "person_name", "last-name-kanji", "last_name_kanji", "family-name-kanji", "family_name_kanji"],
                 "ids": ["lastname", "family-name", "last_name", "last-name", "sei", "surname", 
                        "personal_name", "user_name", "member_name", "last-name-kanji", "last_name_kanji", "family-name-kanji", "family_name_kanji"],
-                "classes": ["lastname", "family-name", "surname", "sei",
+                # class名の実態に合わせて 'last-name' / 'last_name' も許容
+                "classes": ["lastname", "last-name", "last_name", "input-last-name", "family-name", "surname", "sei",
                            "personal", "user", "member", "contact"],
                 "placeholders": ["姓", "Last Name", "苗字", "Family Name", "お名前（姓）", 
                                "ファミリーネーム", "姓名の姓", "Personal Name"],
@@ -176,7 +177,7 @@ class FieldPatterns:
                          "forename", "user_name", "member_name", "client_name", "contact_name", "person_name", "first-name-kanji", "first_name_kanji", "given-name-kanji", "given_name_kanji"],
                 "ids": ["firstname", "first-name", "first_name", "given_name", "given-name", "mei", 
                        "personal_name", "user_name", "member_name", "first-name-kanji", "first_name_kanji", "given-name-kanji", "given_name_kanji"],
-                "classes": ["firstname", "first-name", "given", "mei",
+                "classes": ["firstname", "first-name", "input-first-name", "given", "mei",
                            "personal", "user", "member", "contact"],
                 "placeholders": ["名", "First Name", "Given Name", "お名前（名）", 
                                "ファーストネーム", "姓名の名", "Personal Name"],

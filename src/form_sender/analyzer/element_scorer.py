@@ -49,6 +49,26 @@ class ElementScorer:
 
     # 誤検出を招きやすい曖昧トークン（語境界必須）
     AMBIGUOUS_TOKENS = {"firm", "corp", "org"}
+
+    # セキュリティ観点で class 除外を強く効かせたい短語（ハイフン/アンダースコア境界を対象）
+    CRITICAL_CLASS_EXCLUDE_TOKENS = {
+        'auth', 'login', 'signin', 'otp', 'mfa', 'totp',
+        'password', 'verify', 'verification', 'token', 'captcha',
+        'confirm', 'confirmation', 'confirm_email', 'email_confirmation',
+        # 追加: 5-7 文字の重要短語や広く使われる用語
+        'csrf', 'session'
+    }
+
+    # 長語のしきい値（class 部分一致を許可する長さ）
+    # 根拠: 実フォーム観察で security-critical な長語（verification/password/authentication 等）が
+    # 8文字以上に分布しており、false positive を最小化しつつ検出力を確保できる経験値。
+    # なお、より厳密にしたい場合は設定化の候補（現状はコード定数で運用）。
+    LONG_EXCLUDE_LENGTH = 8
+
+    # 汎用減点のバイパスを許可するフィールド（class 主導が妥当な代表）
+    CLASS_BYPASS_WHITELIST_FIELDS = {
+        '統合氏名', '姓', '名', '会社名', 'メールアドレス', '電話番号', 'お問い合わせ本文'
+    }
     
     def __init__(self, context_extractor=None, shared_cache: Optional[Dict[str, Dict[str, Any]]] = None):
         """
@@ -76,6 +96,27 @@ class ElementScorer:
             # 役職系（Job Title）
             '役職': ['役職', '職位', 'job title', 'job', 'position', 'role']
         }
+
+        # 重要短語の境界一致正規表現を事前コンパイル（ホットパス最適化）
+        try:
+            self._critical_boundary_regex = {
+                ep: re.compile(rf'(^|[-_]){re.escape(ep)}($|[-_])') for ep in self.CRITICAL_CLASS_EXCLUDE_TOKENS
+            }
+        except Exception:
+            self._critical_boundary_regex = {}
+
+    def _should_bypass_generic_text_penalty(self, field_name: str, score_details: Dict[str, Any]) -> bool:
+        """汎用減点をバイパスすべきか（可読性向上のため分離）。
+
+        - class一致が十分（class満点）かつ、ホワイトリスト化されたコア項目のみ許可。
+        """
+        try:
+            class_score = int(score_details.get('score_breakdown', {}).get('class', 0))
+            has_sufficient_class = class_score >= int(self.SCORE_WEIGHTS.get('class', 30))
+            is_whitelisted = field_name in self.CLASS_BYPASS_WHITELIST_FIELDS
+            return has_sufficient_class and is_whitelisted
+        except Exception:
+            return False
 
     def _contains_token_with_boundary(self, text: str, token: str) -> bool:
         """語境界を考慮した包含判定（日本語対応）。
@@ -309,7 +350,8 @@ class ElementScorer:
                     score_details['score_breakdown'].get('name', 0) == 0 and
                     score_details['score_breakdown'].get('id', 0) == 0 and
                     score_details['score_breakdown'].get('placeholder', 0) == 0 and
-                    score_details['score_breakdown'].get('context', 0) == 0):
+                    score_details['score_breakdown'].get('context', 0) == 0 and
+                    not self._should_bypass_generic_text_penalty(field_name, score_details)):
                     # type(text) + tag(input) 程度の弱い一致は強く抑制
                     total_score -= 40
                     score_details['penalties'].append('generic_text_without_signals')
@@ -1139,19 +1181,50 @@ class ElementScorer:
         attributes_to_check = ['name', 'id', 'class', 'placeholder']
         
         for attr in attributes_to_check:
-            attr_value = element_info.get(attr, '').lower()
+            attr_value = (element_info.get(attr, '') or '').lower()
             if not attr_value:
                 continue
-            
-            # 除外パターンマッチング（厳格化）
+
+            if attr == 'class':
+                # 空白トークン化に加え、ハイフン/アンダースコア境界も意識した判定を行う
+                class_tokens = [t for t in (attr_value.split() if isinstance(attr_value, str) else []) if t]
+                if not class_tokens:
+                    continue
+
+                for exclude_pattern in exclude_patterns:
+                    ep = (exclude_pattern or '').lower()
+                    if not ep:
+                        continue
+
+                    # 1) 完全一致（空白トークン）
+                    if any(tok == ep for tok in class_tokens):
+                        logger.debug(f"EXCLUSION(class exact): token matches '{ep}' in class='***CLASS_REDACTED***'")
+                        return True
+
+                    # 2) セキュリティ重要トークンは -/_ 境界での一致も許可（例: user-auth-input）
+                    if ep in self.CRITICAL_CLASS_EXCLUDE_TOKENS:
+                        boundary_re = self._critical_boundary_regex.get(ep)
+                        if boundary_re and any(boundary_re.search(tok) for tok in class_tokens):
+                            logger.debug(f"EXCLUSION(class critical-boundary): '{ep}' matched in class='***CLASS_REDACTED***'")
+                            return True
+
+                    # 3) 長い除外語はハイフン/アンダースコア連結でも部分一致を許容
+                    if len(ep) >= self.LONG_EXCLUDE_LENGTH:
+                        if any(ep in tok for tok in class_tokens):
+                            logger.debug(f"EXCLUSION(class long-substring): '{ep}' found in class='***CLASS_REDACTED***'")
+                            return True
+
+                continue  # class のチェックはここで終了
+
+            # name/id/placeholder は従来ルール（語境界優先）
             for exclude_pattern in exclude_patterns:
                 exclude_pattern_lower = exclude_pattern.lower()
-                
+
                 # 1. 完全一致チェック（最優先）
                 if attr_value == exclude_pattern_lower:
-                    logger.info(f"EXCLUSION: {attr}='{attr_value}' exactly matches exclude_pattern '{exclude_pattern}'")
+                    logger.debug(f"EXCLUSION: {attr}='***REDACTED***' exactly matches exclude_pattern '{exclude_pattern}'")
                     return True
-                
+
                 # 2. 単語境界を考慮した一致チェック（認証系パターン用）
                 if len(exclude_pattern_lower) >= 3:  # 短すぎるパターンは除外
                     # 単語境界またはアンダースコア/ハイフンで区切られた場合
@@ -1161,12 +1234,12 @@ class ElementScorer:
                        attr_value.startswith(exclude_pattern_lower + '-') or \
                        attr_value.endswith('_' + exclude_pattern_lower) or \
                        attr_value.endswith('-' + exclude_pattern_lower):
-                        logger.info(f"EXCLUSION: {attr}='{attr_value}' contains word-boundary exclude_pattern '{exclude_pattern}'")
+                        logger.debug(f"EXCLUSION: {attr}='***REDACTED***' contains word-boundary exclude_pattern '{exclude_pattern}'")
                         return True
-                
+
                 # 3. 特定長さ以上での部分一致（汎用除外用）
                 if len(exclude_pattern_lower) >= 5 and exclude_pattern_lower in attr_value:
-                    logger.info(f"EXCLUSION: {attr}='{attr_value}' contains long exclude_pattern '{exclude_pattern}'")
+                    logger.debug(f"EXCLUSION: {attr}='***REDACTED***' contains long exclude_pattern '{exclude_pattern}'")
                     return True
         
         return False
@@ -1216,7 +1289,7 @@ class ElementScorer:
                         
                         # コンテキストテキストでの完全一致またはキーワード含有チェック
                         if exclude_pattern_lower in context_text:
-                            logger.info(f"CONTEXT_EXCLUSION: context_text='{context_text}' contains exclude_pattern '{exclude_pattern}'")
+                            logger.debug(f"CONTEXT_EXCLUSION: context_text='***REDACTED***' contains exclude_pattern '{exclude_pattern}'")
                             return True
         except Exception as e:
             logger.error(f"Failed to check context exclusion: {e}")
@@ -1251,7 +1324,7 @@ class ElementScorer:
                 class_attr = ''
             class_lower = class_attr.lower()
             required_class_tokens = [
-                'required', 'mandatory', 'must', 'necessary', '必須',
+                'required', 'require', 'mandatory', 'must', 'necessary', '必須',
                 # Contact Form 7系
                 'wpcf7-validates-as-required'
             ]
@@ -1262,7 +1335,7 @@ class ElementScorer:
             try:
                 ancestor_has_required = await element.evaluate("""
                     el => {
-                      const TOKENS = ['required','mandatory','must','necessary','必須','wpcf7-validates-as-required'];
+                      const TOKENS = ['required','require','mandatory','must','necessary','必須','wpcf7-validates-as-required'];
                       let p = el.parentElement;
                       let depth = 0;
                       while (p && depth < 6) {
