@@ -1041,12 +1041,24 @@ class FormSenderWorker:
             return False
 
     async def _prepare_submit_button(self, submit_config: Dict[str, Any]) -> Optional[str]:
-        """送信ボタンの準備（セレクタ検出とフォールバック）"""
+        """送信ボタンの準備（候補優先 + セレクタ検出とフォールバック）"""
+        # 解析結果から供給された候補を優先
+        selector_candidates = submit_config.get("selector_candidates") or []
+        if selector_candidates:
+            logger.info("Trying analyzer-provided submit selector candidates first")
+            for cand in selector_candidates:
+                try:
+                    await self.page.wait_for_selector(cand, timeout=self.timeout_settings.get("element_wait", 15000))
+                    logger.debug(f"Submit button found via analyzer candidate: {cand}")
+                    return cand
+                except Exception:
+                    continue
+
         selector = submit_config.get("selector")
 
         # セレクタがnullまたは空の場合はデフォルトセレクタを使用
         if not selector:
-            logger.warning("Submit button selector is null, using fallback selectors")
+            logger.info("No explicit submit selector; using default/fallback selectors")
             selector = 'button[type="submit"], input[type="submit"]'
 
         # 設定ベースのタイムアウト制御
@@ -1220,14 +1232,14 @@ class FormSenderWorker:
         record_id = company.get("id")
         form_url = company.get("form_url")
 
-        # 旧ロジック: instruction_json の必須チェックを撤廃（ルールベース統一）
+        # 旧互換: URL欠落時は従来の分類（INSTRUCTION）を維持して下流互換を確保
         if not form_url:
             return {
                 "record_id": record_id,
                 "status": "failed",
-                "error_type": "INVALID_URL",
+                "error_type": "INSTRUCTION",
                 "submitted_at": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
-                "instruction_valid_updated": False,
+                "instruction_valid_updated": True,
             }
 
         # 自動復旧機能付きで処理実行
@@ -1634,6 +1646,18 @@ class FormSenderWorker:
             logger.info(f"Form analysis completed: {summary.get('mapping_coverage', 'N/A')} coverage, "
                        f"{summary.get('mapped_fields', 0)} mapped fields, "
                        f"{summary.get('auto_handled_fields', 0)} auto-handled fields")
+
+            # 送信ボタン候補を保存（instruction_json 廃止に伴う後方互換代替）
+            try:
+                submit_buttons = analysis_result.get('submit_buttons', []) or []
+                # selector のみ抽出し順序を保持（検出順＝優先度）
+                self._submit_button_candidates = [b.get('selector') for b in submit_buttons if b.get('selector')]
+                logger.info(
+                    f"Detected {len(self._submit_button_candidates)} submit button candidates via analyzer"
+                )
+            except Exception as submit_err:
+                self._submit_button_candidates = []
+                logger.warning(f"Failed to capture analyzer submit buttons: {submit_err}")
             
             # Phase 2: ルールベース入力実行
             input_assignments = analysis_result.get('input_assignments', {})
