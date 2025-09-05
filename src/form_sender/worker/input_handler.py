@@ -146,12 +146,33 @@ class FormInputHandler:
                 self.logger.debug(f"Select '{field_name}' keyword algorithm -> index {idx}")
                 return True
 
-            # Stage 2: 最後のオプション
+            # Stage 2: 最後のオプション（空プレースホルダーの場合は採用しない）
             if len(options) > 0:
-                await element.select_option(index=len(options)-1)
-                self.logger.debug(f"Select '{field_name}' fallback -> last option index {len(options)-1}")
-                return True
+                try:
+                    last_index = len(options) - 1
+                    last_text = (await options[last_index].text_content() or '').strip()
+                    last_value = (await options[last_index].get_attribute('value') or '').strip()
+                except Exception:
+                    last_text, last_value, last_index = '', '', len(options) - 1
 
+                if last_text or last_value:
+                    await element.select_option(index=last_index)
+                    self.logger.debug(f"Select '{field_name}' fallback -> last option index {last_index}")
+                    return True
+
+            # Stage 3: 最初の非空オプション
+            for i, opt in enumerate(options):
+                try:
+                    ov = (await opt.get_attribute('value') or '').strip()
+                    ot = (await opt.text_content() or '').strip()
+                except Exception:
+                    ov, ot = '', ''
+                if ov or ot:
+                    await element.select_option(index=i)
+                    self.logger.debug(f"Select '{field_name}' fallback -> first non-empty index {i}")
+                    return True
+
+            # すべて空
             return False
         except Exception as e:
             self.logger.debug(f"Keyword algorithm error for '{field_name}': {e}")
