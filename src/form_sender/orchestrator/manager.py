@@ -653,6 +653,25 @@ class MultiProcessOrchestrator:
                 # 基本の結果保存
                 # 詳細分類（可能なら付与）
                 detail = self._make_classify_detail(result.error_type, result.error_message)
+                # 追加入力リトライのメタがあれば classify_detail に統合
+                try:
+                    if result.additional_data and isinstance(result.additional_data, dict):
+                        retry_meta = result.additional_data.get('retry')
+                        if retry_meta:
+                            if detail is None:
+                                detail = {}
+                            # 機微情報を含まない最小限のメタのみ格納
+                            safe_retry = {
+                                'attempted': bool(retry_meta.get('attempted')),
+                                'reason': retry_meta.get('reason'),
+                                'invalid_count': int(retry_meta.get('invalid_count', 0)),
+                                'filled_count': int(retry_meta.get('filled_count', 0)),
+                                'filled_categories': list(retry_meta.get('filled_categories', []))[:10],
+                                'result': retry_meta.get('result'),
+                            }
+                            detail['retry'] = safe_retry
+                except Exception:
+                    pass
 
                 save_task = asyncio.create_task(
                     asyncio.to_thread(

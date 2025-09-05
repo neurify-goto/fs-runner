@@ -202,6 +202,7 @@ class IsolatedFormWorker:
                 instruction_valid_updated=result.get("instruction_valid_updated", False),
                 bot_protection_detected=result.get("bot_protection_detected", False),
                 processing_time=processing_time,
+                additional_data=result.get("additional_data") if isinstance(result, dict) else None,
             )
 
             logger.info(
@@ -575,6 +576,9 @@ class IsolatedFormWorker:
     ) -> Dict[str, Any]:
         """ルールベースフォーム入力実行"""
         try:
+            # 追加入力用にクライアントデータと初回入力セレクタを保持
+            self._current_client_data = client_data
+            self._initial_filled_selectors = set()
             logger.info(f"Worker {self.worker_id}: Starting rule-based form analysis for record_id {record_id}")
             await self._ensure_dynamic_form_ready()
 
@@ -618,6 +622,11 @@ class IsolatedFormWorker:
                             success = await input_handler.fill_rule_based_field(field_name, field_info, value)
                             if success:
                                 filled_fields += 1
+                                try:
+                                    if selector:
+                                        self._initial_filled_selectors.add(selector)
+                                except Exception:
+                                    pass
                             else:
                                 logger.warning(f"Worker {self.worker_id}: Field fill verification failed - {field_name}")
                         else:
@@ -637,6 +646,12 @@ class IsolatedFormWorker:
                             success = await input_handler.fill_rule_based_field(field_name, field_info, value)
                             if success:
                                 filled_fields += 1
+                                try:
+                                    selector = field_info.get('selector')
+                                    if selector:
+                                        self._initial_filled_selectors.add(selector)
+                                except Exception:
+                                    pass
                             else:
                                 logger.warning(f"Worker {self.worker_id}: Field fill verification failed - {field_name}")
                         else:
@@ -897,16 +912,151 @@ class IsolatedFormWorker:
                         "judgment": sj_result
                     }
                 else:
+                    # ここから未入力検出→追加入力→1回だけリトライ
                     logger.info(f"Worker {self.worker_id}: SuccessJudge failed: {sj_result.get('stage_name')} - {sj_result.get('message')}")
-                    return {
-                        "success": False,
-                        "error_message": sj_result.get('message', 'Submission verification failed'),
-                        "has_url_change": has_url_change,
-                        "page_content": page_content[:1000] if page_content else "",
-                        "submit_selector": used_selector,
-                        "bot_protection_detected": bool(sj_result.get('details', {}).get('bot_protection_detected', False)),
-                        "judgment": sj_result
+                    try:
+                        from ..utils.invalid_field_inspector import detect_invalid_required_fields
+                        invalids = await detect_invalid_required_fields(dom_ctx)
+                    except Exception:
+                        invalids = []
+
+                    # 初回入力済みは除外
+                    try:
+                        already = getattr(self, '_initial_filled_selectors', set()) or set()
+                        invalids = [f for f in invalids if f.get('selector') not in already]
+                    except Exception:
+                        pass
+
+                    if not invalids:
+                        return {
+                            "success": False,
+                            "error_message": sj_result.get('message', 'Submission verification failed'),
+                            "has_url_change": has_url_change,
+                            "page_content": page_content[:1000] if page_content else "",
+                            "submit_selector": used_selector,
+                            "bot_protection_detected": bool(sj_result.get('details', {}).get('bot_protection_detected', False)),
+                            "judgment": sj_result
+                        }
+
+                    # 詳細ログは環境変数で制御（CLIで伝搬）
+                    show_retry_logs = (os.getenv("SHOW_RETRY_LOGS", "").lower() in ["1","true","yes","on"])
+                    if show_retry_logs:
+                        logger.info(f"Worker {self.worker_id}: Retry filling {len(invalids)} invalid fields")
+                    else:
+                        logger.info(f"Worker {self.worker_id}: Retry due to missing required fields")
+
+                    # 追加入力実行
+                    from ..analyzer.field_combination_manager import FieldCombinationManager
+                    fcm = FieldCombinationManager()
+                    input_handler = FormInputHandler(dom_ctx, self.worker_id)
+                    client_blob = getattr(self, '_current_client_data', {}) or {}
+
+                    def _gen_value(itype: str, hint: str, meta: dict):
+                        hint_l = (hint or '').lower()
+                        name = (meta.get('name') or '').lower()
+                        _id = (meta.get('id') or '').lower()
+                        cls = (meta.get('class') or '').lower()
+                        blob = " ".join([hint_l, name, _id, cls])
+                        def has(tokens):
+                            return any(t in blob for t in tokens)
+                        if itype == 'email' or has(['email','e-mail','メール']):
+                            return fcm.get_field_value_for_type('メールアドレス','single', client_blob) or ''
+                        if itype == 'tel' or has(['tel','phone','電話']):
+                            return fcm.get_field_value_for_type('電話番号','single', client_blob) or ''
+                        if itype == 'textarea' or has(['お問い合わせ','問合せ','内容','本文','メッセージ','message']):
+                            tgt = client_blob.get('targeting', {}) if isinstance(client_blob, dict) else {}
+                            return (tgt.get('message') or '')
+                        if has(['件名','subject']):
+                            tgt = client_blob.get('targeting', {}) if isinstance(client_blob, dict) else {}
+                            return (tgt.get('subject') or 'お問い合わせ')
+                        if has(['会社','法人','社名','company','corp']):
+                            return fcm.get_field_value_for_type('会社名','single', client_blob) or ''
+                        if has(['住所','address']):
+                            return fcm.get_field_value_for_type('住所','single', client_blob) or ''
+                        if has(['郵便','〒','zip']):
+                            return fcm.get_field_value_for_type('郵便番号','single', client_blob) or ''
+                        return ''
+
+                    filled_ok = 0
+                    filled_categories = []
+                    for ent in invalids:
+                        try:
+                            sel = ent.get('selector')
+                            itype = ent.get('input_type','text')
+                            val = _gen_value(itype, ent.get('hint') or '', ent.get('meta') or {})
+                            if not val and itype == 'select':
+                                fo = ent.get('select_first_option') or {}
+                                val = fo.get('value') or fo.get('text') or ''
+                                if not val:
+                                    continue
+                            if not val and itype in ['checkbox','radio']:
+                                val = True
+                            if (not val or (isinstance(val, str) and val.strip() == '')) and itype in ['text','textarea']:
+                                # 空白扱いの値はハンドラで弾かれるため、可視で安全な1文字にフォールバック
+                                val = 'ー'  # 全角ハイフン（必須バリデーション通過用）
+                            if not sel:
+                                continue
+                            field_info = { 'selector': sel, 'input_type': itype, 'type': itype }
+                            ok = await input_handler.fill_rule_based_field('retry', field_info, val)
+                            if ok:
+                                filled_ok += 1
+                                filled_categories.append(itype)
+                                if show_retry_logs:
+                                    logger.debug(f"retry-filled {itype} via {sel}")
+                        except Exception as e:
+                            if show_retry_logs:
+                                logger.debug(f"retry-fill error: {e}")
+                            continue
+
+                    # 1回だけリトライ送信
+                    try:
+                        await dom_ctx.click(used_selector)
+                        await asyncio.sleep(2.0)
+                        try:
+                            await dom_ctx.wait_for_load_state('networkidle', timeout=8000)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                    # 再判定
+                    try:
+                        sj2 = SuccessJudge(dom_ctx)
+                        await sj2.initialize_before_submission()
+                        sj2_result = await sj2.judge_submission_success(timeout=15)
+                    except Exception:
+                        sj2_result = {"success": False, "message": "judge unavailable"}
+
+                    retry_meta = {
+                        "attempted": True,
+                        "reason": "missing_required_fields",
+                        "invalid_count": len(invalids),
+                        "filled_count": filled_ok,
+                        "filled_categories": list({c for c in filled_categories}),
+                        "result": "success" if sj2_result.get('success') else "failure"
                     }
+
+                    if sj2_result.get('success'):
+                        return {
+                            "success": True,
+                            "has_url_change": pre_submit_url != dom_ctx.url,
+                            "page_content": "",
+                            "submit_selector": used_selector,
+                            "judgment": sj2_result,
+                            "additional_data": {"retry": retry_meta}
+                        }
+                    else:
+                        # 失敗として返す
+                        return {
+                            "success": False,
+                            "error_message": sj2_result.get('message', sj_result.get('message','Submission verification failed')),
+                            "has_url_change": pre_submit_url != dom_ctx.url,
+                            "page_content": page_content[:1000] if page_content else "",
+                            "submit_selector": used_selector,
+                            "bot_protection_detected": bool(sj2_result.get('details', {}).get('bot_protection_detected', False)),
+                            "judgment": sj2_result,
+                            "additional_data": {"retry": retry_meta}
+                        }
             except Exception as e:
                 logger.warning(f"Worker {self.worker_id}: SuccessJudge exception: {e}")
                 # 最低限のフォールバック（URL変化を成功扱い）
@@ -1089,11 +1239,14 @@ class IsolatedFormWorker:
 
             if submit_result.get("success"):
                 logger.info(f"Worker {self.worker_id}: Form submission successful")
-                return {
+                success_payload = {
                     "record_id": record_id,
                     "status": "success",
                     "submitted_at": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
                 }
+                if submit_result.get('additional_data'):
+                    success_payload['additional_data'] = submit_result['additional_data']
+                return success_payload
             else:
                 error_message = submit_result.get("error_message", "Form submission failed")
                 logger.warning(f"Worker {self.worker_id}: Form submission failed: {error_message}")
@@ -1138,13 +1291,17 @@ class IsolatedFormWorker:
                 else:
                     error_type = mapped_from_judgment
 
-                return {
+                result_dict = {
                     "error": True,
                     "record_id": record_id,
                     "status": "failed",
                     "error_type": error_type,
                     "error_message": error_message,
                 }
+                # 追加: 追加入力/リトライのメタがあれば伝搬
+                if submit_result.get('additional_data'):
+                    result_dict['additional_data'] = submit_result['additional_data']
+                return result_dict
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Form submission execution error: {e}")
             return {
