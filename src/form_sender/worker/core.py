@@ -11,7 +11,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from pathlib import Path  # noqa: F401  # not used directly; kept if needed by type hints in older references
 from typing import Dict, Any, List, Optional, Tuple, Union, Callable
 
 try:
@@ -30,8 +30,7 @@ from supabase import create_client, Client
 
 from ..control.recovery_manager import AutoRecoveryManager
 from ..security.logger import SecurityLogger
-from ..template.processor import InstructionTemplateProcessor
-from ..template.company_processor import CompanyPlaceholderProcessor
+# 旧instruction_jsonベースのテンプレート処理は廃止（ルールベース解析に統一）
 from ..detection.bot_detector import BotDetectionSystem
 from ..utils.error_classifier import ErrorClassifier
 from ..utils.secure_logger import get_secure_logger, secure_log_decorator
@@ -1220,15 +1219,15 @@ class FormSenderWorker:
         """単一企業の処理（自動復旧機能付き）"""
         record_id = company.get("id")
         form_url = company.get("form_url")
-        instruction_json = company.get("instruction_json")
 
-        if not form_url or not instruction_json:
+        # 旧ロジック: instruction_json の必須チェックを撤廃（ルールベース統一）
+        if not form_url:
             return {
                 "record_id": record_id,
                 "status": "failed",
-                "error_type": "INSTRUCTION",
+                "error_type": "INVALID_URL",
                 "submitted_at": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
-                "instruction_valid_updated": True,
+                "instruction_valid_updated": False,
             }
 
         # 自動復旧機能付きで処理実行
@@ -1518,10 +1517,8 @@ class FormSenderWorker:
         record_id = company.get("id")
 
         try:
-            # Step 1: 指示書処理とプレースホルダ展開
-            expanded_instruction = await self._process_instruction(company, client_data)
-            if "error" in expanded_instruction:
-                return expanded_instruction
+            # Step 1: 旧instruction_json処理は廃止。ルールベースのみで実行。
+            expanded_instruction = {"instruction": {}}  # 後方互換のため空dictを渡す
 
             # Step 2: ブラウザページ初期化とアクセス
             access_result = await self._initialize_and_access_page(company)
@@ -1550,38 +1547,8 @@ class FormSenderWorker:
             raise
 
     async def _process_instruction(self, company: Dict[str, Any], client_data: Dict[str, Any]) -> Dict[str, Any]:
-        """指示書処理とプレースホルダ展開"""
-        record_id = company.get("id")
-        instruction_json = company.get("instruction_json")
-
-        # 指示書解析
-        if isinstance(instruction_json, str):
-            try:
-                instruction_data = json.loads(instruction_json)
-            except json.JSONDecodeError as e:
-                logger.error(f"Company {record_id} instruction_json parse error: {str(e)}")
-                return {
-                    "error": True,
-                    "record_id": record_id,
-                    "status": "failed",
-                    "error_type": "INVALID_INSTRUCTION",
-                    "submitted_at": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%dT%H:%M:%S+09:00"),
-                    "instruction_valid_updated": True,
-                }
-        else:
-            instruction_data = instruction_json
-
-        # プレースホルダ展開
-        template_processor = InstructionTemplateProcessor(client_data)
-        expanded_instruction = template_processor.expand_placeholders(instruction_data)
-
-        # 企業固有プレースホルダー展開
-        company_processor = CompanyPlaceholderProcessor(company)
-        expanded_instruction = self._process_company_placeholders_in_instruction(
-            expanded_instruction, company_processor
-        )
-
-        return {"instruction": expanded_instruction}
+        """[互換用] instruction_json処理は廃止。ルールベース統一に伴い空の指示を返す。"""
+        return {"instruction": {}}
 
     async def _initialize_and_access_page(self, company: Dict[str, Any]) -> Dict[str, Any]:
         """ブラウザページの初期化とアクセス"""
@@ -2339,8 +2306,9 @@ class FormSenderWorker:
             return False
 
     async def _execute_form_submission(self, expanded_instruction: Dict[str, Any], record_id: int) -> Dict[str, Any]:
-        """フォーム送信と結果判定"""
-        submit_result = await self._submit_form(expanded_instruction.get("submit_button", {}))
+        """フォーム送信と結果判定（instruction_json非依存）"""
+        # instruction_jsonは廃止。送信ボタンは内部ロジックで検出する。
+        submit_result = await self._submit_form({})
 
         return {
             "record_id": record_id,
@@ -2350,92 +2318,9 @@ class FormSenderWorker:
             "instruction_valid_updated": False,
         }
 
-    def _removed_classify_error_type(self, error_context: Dict[str, Any]) -> str:  # 削除予定
-        """
-        強化されたエラー分類システム（改良版）
+    # _removed_classify_error_type: 旧メソッドは未使用のため削除
 
-        指示書問題と外部要因を正確に区別する
-        """
-        error_message = error_context.get("error_message", "").lower()
-        is_bot_detected = error_context.get("is_bot_detected", False)
-        is_timeout = error_context.get("is_timeout", False)
-
-        # 1. 明確な外部要因パターン（最優先）
-        external_patterns = [
-            r"network.*timeout",
-            r"server.*error",
-            r"connection.*refused",
-            r"site.*maintenance",
-            r"cloudflare.*protection",
-            r"access.*denied",
-            r"page.*load.*timeout",
-        ]
-
-        if any(re.search(pattern, error_message) for pattern in external_patterns):
-            return "TIMEOUT" if "timeout" in error_message else "ACCESS"
-
-        # 2. Bot検知（確実）
-        if is_bot_detected or any(keyword in error_message for keyword in ["recaptcha", "cloudflare", "bot"]):
-            return "BOT_DETECTION"
-
-        # 3. 明確な指示書構造問題パターン
-        instruction_patterns = [
-            r"instruction_json.*invalid",
-            r"json.*decode.*error",
-            r"placeholder.*not.*found",
-            r"missing.*instruction",
-            r"invalid.*json",
-        ]
-
-        if any(re.search(pattern, error_message) for pattern in instruction_patterns):
-            return "INSTRUCTION"
-
-        # 4. より細かい分類（外部要因と指示書問題を区別）
-        if is_timeout or "timeout" in error_message:
-            return "TIMEOUT"
-        elif any(keyword in error_message for keyword in ["json", "placeholder", "instruction"]):
-            # より厳密に指示書問題かチェック
-            if any(keyword in error_message for keyword in ["parse", "decode", "invalid", "missing"]):
-                return "INSTRUCTION"
-            else:
-                return "SYSTEM"  # 曖昧な場合はSYSTEMに分類
-        elif any(keyword in error_message for keyword in ["element", "selector", "locator"]):
-            # サイト変更の可能性が高い
-            return "ELEMENT_EXTERNAL"  # 新しい分類：外部要因による要素問題
-        elif any(keyword in error_message for keyword in ["input", "fill", "click"]):
-            # 入力制限の可能性が高い
-            return "INPUT_EXTERNAL"  # 新しい分類：外部要因による入力問題
-        elif any(keyword in error_message for keyword in ["submit", "network", "request"]):
-            return "SUBMISSION"
-        else:
-            return "SYSTEM"
-
-    def _process_company_placeholders_in_instruction(
-        self, instruction: Dict[str, Any], company_processor: CompanyPlaceholderProcessor
-    ) -> Dict[str, Any]:
-        """instruction_json内の文字列フィールドで企業固有プレースホルダーを処理"""
-        processed_instruction = {}
-
-        for key, value in instruction.items():
-            if isinstance(value, str):
-                # 文字列フィールドは企業固有プレースホルダー処理を適用
-                processed_instruction[key] = company_processor.process_company_placeholders(value)
-            elif isinstance(value, dict):
-                # ネストした辞書は再帰的に処理
-                processed_instruction[key] = self._process_company_placeholders_in_instruction(value, company_processor)
-            elif isinstance(value, list):
-                # リストの各要素を処理
-                processed_instruction[key] = [
-                    self._process_company_placeholders_in_instruction(item, company_processor)
-                    if isinstance(item, dict)
-                    else (company_processor.process_company_placeholders(item) if isinstance(item, str) else item)
-                    for item in value
-                ]
-            else:
-                # その他の型はそのまま
-                processed_instruction[key] = value
-
-        return processed_instruction
+    # _process_company_placeholders_in_instruction: instruction_json廃止に伴い不要のため削除
 
     async def _wait_for_submission_response_with_mutation(self) -> Dict[str, Any]:
         """送信後の動的コンテンツ監視（設定ベース）- MutationObserver結果を返す"""
