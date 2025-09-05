@@ -49,6 +49,18 @@ class ElementScorer:
 
     # 誤検出を招きやすい曖昧トークン（語境界必須）
     AMBIGUOUS_TOKENS = {"firm", "corp", "org"}
+
+    # セキュリティ観点で class 除外を強く効かせたい短語（ハイフン/アンダースコア境界を対象）
+    CRITICAL_CLASS_EXCLUDE_TOKENS = {
+        'auth', 'login', 'signin', 'otp', 'mfa', 'totp',
+        'password', 'verify', 'verification', 'token', 'captcha',
+        'confirm', 'confirmation', 'confirm_email', 'email_confirmation'
+    }
+
+    # 汎用減点のバイパスを許可するフィールド（class 主導が妥当な代表）
+    CLASS_BYPASS_WHITELIST_FIELDS = {
+        '統合氏名', '姓', '名', '会社名', 'メールアドレス', '電話番号', 'お問い合わせ本文'
+    }
     
     def __init__(self, context_extractor=None, shared_cache: Optional[Dict[str, Dict[str, Any]]] = None):
         """
@@ -310,8 +322,11 @@ class ElementScorer:
                     score_details['score_breakdown'].get('id', 0) == 0 and
                     score_details['score_breakdown'].get('placeholder', 0) == 0 and
                     score_details['score_breakdown'].get('context', 0) == 0 and
-                    # クラス一致がある場合は、name/id/placeholderが空でも汎用減点を適用しない
-                    score_details['score_breakdown'].get('class', 0) == 0):
+                    # class一致があっても、ホワイトリスト以外のフィールドでは減点を適用
+                    not (
+                        score_details['score_breakdown'].get('class', 0) >= self.SCORE_WEIGHTS['class'] and
+                        field_name in self.CLASS_BYPASS_WHITELIST_FIELDS
+                    )):
                     # type(text) + tag(input) 程度の弱い一致は強く抑制
                     total_score -= 40
                     score_details['penalties'].append('generic_text_without_signals')
@@ -1141,26 +1156,40 @@ class ElementScorer:
         attributes_to_check = ['name', 'id', 'class', 'placeholder']
         
         for attr in attributes_to_check:
-            attr_value = element_info.get(attr, '').lower()
+            attr_value = (element_info.get(attr, '') or '').lower()
             if not attr_value:
                 continue
 
-            # class 属性は「トークン（空白区切り）」を基本単位として扱い、
-            # 短い汎用語（例: 'name'）への部分一致で誤除外しない。
             if attr == 'class':
-                class_tokens = [t for t in attr_value.split() if t]
+                # 空白トークン化に加え、ハイフン/アンダースコア境界も意識した判定を行う
+                class_tokens = [t for t in (attr_value.split() if isinstance(attr_value, str) else []) if t]
+                if not class_tokens:
+                    continue
+
                 for exclude_pattern in exclude_patterns:
-                    exclude_pattern_lower = exclude_pattern.lower()
-                    # class は原則「トークン完全一致」のみ除外対象
-                    if any(tok == exclude_pattern_lower for tok in class_tokens):
-                        logger.info(f"EXCLUSION(class exact): token matches '{exclude_pattern_lower}' in class='{attr_value}'")
+                    ep = (exclude_pattern or '').lower()
+                    if not ep:
+                        continue
+
+                    # 1) 完全一致（空白トークン）
+                    if any(tok == ep for tok in class_tokens):
+                        logger.info(f"EXCLUSION(class exact): token matches '{ep}' in class='{attr_value}'")
                         return True
-                    # 認証/確認など安全に除外すべき長語のみ、ハイフン/アンダースコアでの完全トークン一致を許可
-                    if len(exclude_pattern_lower) >= 8:
-                        if any(tok.replace('_','-') == exclude_pattern_lower.replace('_','-') for tok in class_tokens):
-                            logger.info(f"EXCLUSION(class long token): token matches '{exclude_pattern_lower}' in class='{attr_value}'")
+
+                    # 2) セキュリティ重要トークンは -/_ 境界での一致も許可（例: user-auth-input）
+                    if ep in self.CRITICAL_CLASS_EXCLUDE_TOKENS:
+                        boundary_re = re.compile(rf'(^|[-_]){re.escape(ep)}($|[-_])')
+                        if any(boundary_re.search(tok) for tok in class_tokens):
+                            logger.info(f"EXCLUSION(class critical-boundary): '{ep}' matched in class='{attr_value}'")
                             return True
-                continue  # class はここで完了
+
+                    # 3) 長い除外語はハイフン/アンダースコア連結でも部分一致を許容
+                    if len(ep) >= 8:
+                        if any(ep in tok for tok in class_tokens):
+                            logger.info(f"EXCLUSION(class long-substring): '{ep}' found in class='{attr_value}'")
+                            return True
+
+                continue  # class のチェックはここで終了
 
             # name/id/placeholder は従来ルール（語境界優先）
             for exclude_pattern in exclude_patterns:
