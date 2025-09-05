@@ -1173,20 +1173,20 @@ class ElementScorer:
 
                     # 1) 完全一致（空白トークン）
                     if any(tok == ep for tok in class_tokens):
-                        logger.info(f"EXCLUSION(class exact): token matches '{ep}' in class='{attr_value}'")
+                        logger.debug(f"EXCLUSION(class exact): token matches '{ep}' in class='***CLASS_REDACTED***'")
                         return True
 
                     # 2) セキュリティ重要トークンは -/_ 境界での一致も許可（例: user-auth-input）
                     if ep in self.CRITICAL_CLASS_EXCLUDE_TOKENS:
                         boundary_re = re.compile(rf'(^|[-_]){re.escape(ep)}($|[-_])')
                         if any(boundary_re.search(tok) for tok in class_tokens):
-                            logger.info(f"EXCLUSION(class critical-boundary): '{ep}' matched in class='{attr_value}'")
+                            logger.debug(f"EXCLUSION(class critical-boundary): '{ep}' matched in class='***CLASS_REDACTED***'")
                             return True
 
                     # 3) 長い除外語はハイフン/アンダースコア連結でも部分一致を許容
                     if len(ep) >= 8:
                         if any(ep in tok for tok in class_tokens):
-                            logger.info(f"EXCLUSION(class long-substring): '{ep}' found in class='{attr_value}'")
+                            logger.debug(f"EXCLUSION(class long-substring): '{ep}' found in class='***CLASS_REDACTED***'")
                             return True
 
                 continue  # class のチェックはここで終了
@@ -1197,7 +1197,7 @@ class ElementScorer:
 
                 # 1. 完全一致チェック（最優先）
                 if attr_value == exclude_pattern_lower:
-                    logger.info(f"EXCLUSION: {attr}='{attr_value}' exactly matches exclude_pattern '{exclude_pattern}'")
+                    logger.debug(f"EXCLUSION: {attr}='***REDACTED***' exactly matches exclude_pattern '{exclude_pattern}'")
                     return True
 
                 # 2. 単語境界を考慮した一致チェック（認証系パターン用）
@@ -1209,12 +1209,12 @@ class ElementScorer:
                        attr_value.startswith(exclude_pattern_lower + '-') or \
                        attr_value.endswith('_' + exclude_pattern_lower) or \
                        attr_value.endswith('-' + exclude_pattern_lower):
-                        logger.info(f"EXCLUSION: {attr}='{attr_value}' contains word-boundary exclude_pattern '{exclude_pattern}'")
+                        logger.debug(f"EXCLUSION: {attr}='***REDACTED***' contains word-boundary exclude_pattern '{exclude_pattern}'")
                         return True
 
                 # 3. 特定長さ以上での部分一致（汎用除外用）
                 if len(exclude_pattern_lower) >= 5 and exclude_pattern_lower in attr_value:
-                    logger.info(f"EXCLUSION: {attr}='{attr_value}' contains long exclude_pattern '{exclude_pattern}'")
+                    logger.debug(f"EXCLUSION: {attr}='***REDACTED***' contains long exclude_pattern '{exclude_pattern}'")
                     return True
         
         return False
@@ -1264,7 +1264,7 @@ class ElementScorer:
                         
                         # コンテキストテキストでの完全一致またはキーワード含有チェック
                         if exclude_pattern_lower in context_text:
-                            logger.info(f"CONTEXT_EXCLUSION: context_text='{context_text}' contains exclude_pattern '{exclude_pattern}'")
+                            logger.debug(f"CONTEXT_EXCLUSION: context_text='***REDACTED***' contains exclude_pattern '{exclude_pattern}'")
                             return True
         except Exception as e:
             logger.error(f"Failed to check context exclusion: {e}")

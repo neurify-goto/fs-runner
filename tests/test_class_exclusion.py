@@ -31,3 +31,16 @@ def test_class_exclusion_should_not_block_last_first_name():
     assert scorer._is_excluded_element(make_elem_info('input-last-name entry-component'), fp) is False
     assert scorer._is_excluded_element(make_elem_info('input-first-name entry-component'), fp) is False
 
+
+def test_long_exclusion_patterns_partial_match():
+    scorer = ElementScorer()
+    fp = {'exclude_patterns': ['verification', 'authentication']}
+    assert scorer._is_excluded_element(make_elem_info('email-verification-input'), fp) is True
+    assert scorer._is_excluded_element(make_elem_info('user_authentication_field'), fp) is True
+
+
+def test_class_exclusion_edge_cases():
+    scorer = ElementScorer()
+    fp = {'exclude_patterns': ['verification']}
+    assert scorer._is_excluded_element(make_elem_info(''), fp) is False
+    assert scorer._is_excluded_element(make_elem_info('special@#$chars'), fp) is False
