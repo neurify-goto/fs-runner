@@ -298,10 +298,11 @@ WHERE s.company_id IS NULL  -- 送信済みでない企業のみ取得
 INSERT INTO submissions (
   targeting_id,     -- 対応するtargeting.id
   company_id,       -- 対応するcompanies.id
-  status,           -- "success" または "failed" または "skipped"
+  status,           -- "success" または "failed" または "skipped"（実装上は success:boolean を使用）
   error_type,       -- エラー分類（失敗時のみ）
+  classify_detail,  -- JSONB: { code, category, retryable, cooldown_seconds, confidence }
   submitted_at      -- 送信日時（JST: 日本標準時）
-) VALUES (?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?)
 ```
 
 **連続処理での制限管理**: 営業時間制御や送信数上限制御などの詳細な制限管理については2.3.3節を参照。

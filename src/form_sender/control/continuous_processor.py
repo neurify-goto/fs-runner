@@ -478,7 +478,15 @@ class ContinuousProcessController:
         today_count = self.get_today_success_count()
         return today_count < max_daily_sends
     
-    def save_result_immediately(self, record_id: int, status: str, error_type: Optional[str] = None, instruction_valid_updated: bool = False, bot_protection_detected: bool = False):
+    def save_result_immediately(
+        self,
+        record_id: int,
+        status: str,
+        error_type: Optional[str] = None,
+        instruction_valid_updated: bool = False,
+        bot_protection_detected: bool = False,
+        classify_detail: Optional[Dict[str, Any]] = None,
+    ):
         """企業処理結果を即座にDBに保存（FORM_SENDER.md 308-332仕様準拠）"""
         try:
             # JST時刻で記録
@@ -493,6 +501,11 @@ class ContinuousProcessController:
                 'error_type': error_type,
                 'submitted_at': now_jst.isoformat()
             }
+
+            # 追加: 詳細分類情報（jsonb）
+            if classify_detail:
+                # Supabase Python SDK は dict を jsonb に自動変換
+                submission_data['classify_detail'] = classify_detail
             
             # 再試行機能付きでDB保存
             def insert_submission():
