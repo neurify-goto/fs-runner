@@ -60,6 +60,9 @@ class ElementScorer:
     }
 
     # 長語のしきい値（class 部分一致を許可する長さ）
+    # 根拠: 実フォーム観察で security-critical な長語（verification/password/authentication 等）が
+    # 8文字以上に分布しており、false positive を最小化しつつ検出力を確保できる経験値。
+    # なお、より厳密にしたい場合は設定化の候補（現状はコード定数で運用）。
     LONG_EXCLUDE_LENGTH = 8
 
     # 汎用減点のバイパスを許可するフィールド（class 主導が妥当な代表）
@@ -93,6 +96,27 @@ class ElementScorer:
             # 役職系（Job Title）
             '役職': ['役職', '職位', 'job title', 'job', 'position', 'role']
         }
+
+        # 重要短語の境界一致正規表現を事前コンパイル（ホットパス最適化）
+        try:
+            self._critical_boundary_regex = {
+                ep: re.compile(rf'(^|[-_]){re.escape(ep)}($|[-_])') for ep in self.CRITICAL_CLASS_EXCLUDE_TOKENS
+            }
+        except Exception:
+            self._critical_boundary_regex = {}
+
+    def _should_bypass_generic_text_penalty(self, field_name: str, score_details: Dict[str, Any]) -> bool:
+        """汎用減点をバイパスすべきか（可読性向上のため分離）。
+
+        - class一致が十分（class満点）かつ、ホワイトリスト化されたコア項目のみ許可。
+        """
+        try:
+            class_score = int(score_details.get('score_breakdown', {}).get('class', 0))
+            has_sufficient_class = class_score >= int(self.SCORE_WEIGHTS.get('class', 30))
+            is_whitelisted = field_name in self.CLASS_BYPASS_WHITELIST_FIELDS
+            return has_sufficient_class and is_whitelisted
+        except Exception:
+            return False
 
     def _contains_token_with_boundary(self, text: str, token: str) -> bool:
         """語境界を考慮した包含判定（日本語対応）。
@@ -327,11 +351,7 @@ class ElementScorer:
                     score_details['score_breakdown'].get('id', 0) == 0 and
                     score_details['score_breakdown'].get('placeholder', 0) == 0 and
                     score_details['score_breakdown'].get('context', 0) == 0 and
-                    # class一致があっても、ホワイトリスト以外のフィールドでは減点を適用
-                    not (
-                        score_details['score_breakdown'].get('class', 0) >= self.SCORE_WEIGHTS['class'] and
-                        field_name in self.CLASS_BYPASS_WHITELIST_FIELDS
-                    )):
+                    not self._should_bypass_generic_text_penalty(field_name, score_details)):
                     # type(text) + tag(input) 程度の弱い一致は強く抑制
                     total_score -= 40
                     score_details['penalties'].append('generic_text_without_signals')
@@ -1183,8 +1203,8 @@ class ElementScorer:
 
                     # 2) セキュリティ重要トークンは -/_ 境界での一致も許可（例: user-auth-input）
                     if ep in self.CRITICAL_CLASS_EXCLUDE_TOKENS:
-                        boundary_re = re.compile(rf'(^|[-_]){re.escape(ep)}($|[-_])')
-                        if any(boundary_re.search(tok) for tok in class_tokens):
+                        boundary_re = self._critical_boundary_regex.get(ep)
+                        if boundary_re and any(boundary_re.search(tok) for tok in class_tokens):
                             logger.debug(f"EXCLUSION(class critical-boundary): '{ep}' matched in class='***CLASS_REDACTED***'")
                             return True
 
