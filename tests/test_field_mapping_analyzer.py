@@ -206,11 +206,14 @@ class FieldMappingAnalyzer:
 
             # ブラウザエンジン選択（デフォルト: chromium）。問題発生時に切替可能。
             engine = os.getenv('PLAYWRIGHT_ENGINE', 'chromium').lower()
-            launcher = {
+            engine_map = {
                 'chromium': self.playwright.chromium,
                 'webkit': self.playwright.webkit,
                 'firefox': self.playwright.firefox,
-            }.get(engine, self.playwright.chromium)
+            }
+            launcher = engine_map.get(engine, self.playwright.chromium)
+            if engine not in engine_map:
+                logger.warning(f"Unknown PLAYWRIGHT_ENGINE='{engine}', falling back to chromium")
 
             self.browser = await launcher.launch(
                 headless=headless,
@@ -371,6 +374,27 @@ class FieldMappingAnalyzer:
                         viewport={"width": 1366, "height": 900},
                     )
 
+                    # self-closing / popup 抑止 init_script を最優先で再適用
+                    await self.context.add_init_script(
+                        """
+                        (() => { try {
+                          const noop = () => false;
+                          Object.defineProperty(window, 'close', { value: noop, configurable: true });
+                          const _open = window.open;
+                          Object.defineProperty(window, 'open', { value: (url, target, features) => {
+                            try { window.location.href = url; } catch {}
+                            return window;
+                          }, configurable: true });
+                        } catch {} })();
+                        """
+                    )
+
+                    # User-Agent / タイムアウト再設定
+                    await self.context.set_extra_http_headers({
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    })
+                    self.context.set_default_navigation_timeout(30000)
+
                     # 再ルーティング（初期化時と同様のブロッキング方針）
                     async def handle_route(route):
                         resource_type = route.request.resource_type
@@ -389,27 +413,6 @@ class FieldMappingAnalyzer:
                                 await route.abort(); return
                         await route.continue_()
                     await self.context.route("**/*", handle_route)
-
-                    # User-Agent / タイムアウト再設定
-                    await self.context.set_extra_http_headers({
-                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                    })
-                    self.context.set_default_navigation_timeout(30000)
-
-                    # self-closing / popup 抑止 init_script を再適用
-                    await self.context.add_init_script(
-                        """
-                        (() => { try {
-                          const noop = () => false;
-                          Object.defineProperty(window, 'close', { value: noop, configurable: true });
-                          const _open = window.open;
-                          Object.defineProperty(window, 'open', { value: (url, target, features) => {
-                            try { window.location.href = url; } catch {}
-                            return window;
-                          }, configurable: true });
-                        } catch {} })();
-                        """
-                    )
 
                 # 新規ページ生成とイベント再設定
                 self.page = await self.context.new_page()
