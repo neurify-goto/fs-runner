@@ -122,16 +122,25 @@ class FormInputHandler:
             pri1 = ["営業", "提案", "メール", "contact", "inquiry", "問合せ", "お問い合わせ"]
             pri2 = ["その他", "other", "該当なし", "該当しない", "not applicable", "n/a"]
 
-            # 文字列配列化
-            texts: list[str] = []
-            values: list[str] = []
-            for opt in options:
-                try:
-                    texts.append((await opt.text_content()) or '')
-                    values.append((await opt.get_attribute('value')) or '')
-                except Exception:
-                    texts.append('')
-                    values.append('')
+            # 文字列配列化（evaluateで一括取得して往復を削減）
+            try:
+                opt_data = await element.evaluate(
+                    "el => Array.from(el.options).map(o => ({text: (o.textContent||'').trim(), value: (o.value||'').trim()}))"
+                )
+            except Exception:
+                # フォールバック（遅いが確実）
+                opt_data = []
+                for opt in options:
+                    try:
+                        opt_data.append({
+                            'text': (await opt.text_content()) or '',
+                            'value': (await opt.get_attribute('value')) or ''
+                        })
+                    except Exception:
+                        opt_data.append({'text': '', 'value': ''})
+
+            texts = [d.get('text','') for d in opt_data]
+            values = [d.get('value','') for d in opt_data]
 
             def _last_match(keys, seq):
                 idxs = [i for i, t in enumerate(seq) if any(k.lower() in (t or '').lower() for k in keys)]
@@ -147,30 +156,29 @@ class FormInputHandler:
                 return True
 
             # Stage 2: 最後のオプション（空プレースホルダーの場合は採用しない）
-            if len(options) > 0:
-                try:
-                    last_index = len(options) - 1
-                    last_text = (await options[last_index].text_content() or '').strip()
-                    last_value = (await options[last_index].get_attribute('value') or '').strip()
-                except Exception:
-                    last_text, last_value, last_index = '', '', len(options) - 1
-
+            if len(texts) > 0:
+                last_index = len(texts) - 1
+                last_text = (texts[last_index] or '').strip()
+                last_value = (values[last_index] or '').strip()
                 if last_text or last_value:
                     await element.select_option(index=last_index)
                     self.logger.debug(f"Select '{field_name}' fallback -> last option index {last_index}")
                     return True
 
             # Stage 3: 最初の非空オプション
-            for i, opt in enumerate(options):
-                try:
-                    ov = (await opt.get_attribute('value') or '').strip()
-                    ot = (await opt.text_content() or '').strip()
-                except Exception:
-                    ov, ot = '', ''
-                if ov or ot:
-                    await element.select_option(index=i)
-                    self.logger.debug(f"Select '{field_name}' fallback -> first non-empty index {i}")
-                    return True
+            placeholder_tokens = [
+                '選択してください', '選択して下さい', 'お選びください', 'お選び下さい',
+                'please select', 'select', 'choose', '未選択', '未定'
+            ]
+            for i in range(len(texts)):
+                ot = (texts[i] or '').strip(); ov = (values[i] or '').strip()
+                if not (ov or ot):
+                    continue
+                if any(tok in ot.lower() for tok in placeholder_tokens):
+                    continue
+                await element.select_option(index=i)
+                self.logger.debug(f"Select '{field_name}' fallback -> first non-empty index {i}")
+                return True
 
             # すべて空
             return False
