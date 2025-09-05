@@ -158,7 +158,7 @@ class FieldMapper:
                     ]).lower()
                     best_txt = (self.context_text_extractor.get_best_context_text(best_context) or '').lower() if best_context else ''
                     pos_attr = any(t in attrs_blob for t in ['tel', 'phone'])
-                    pos_ctx = '電話' in best_txt or 'tel' in best_txt or 'phone' in best_txt
+                    pos_ctx = any(t in best_txt for t in ['電話','tel','phone','携帯','mobile','cell'])
                     neg_ctx = any(t in best_txt for t in ['時', '時頃', '午前', '午後', '連絡方法']) or any(t in attrs_blob for t in ['timeno', 'h1', 'h2'])
                     if not (etype == 'tel' or pos_attr or (pos_ctx and not neg_ctx)):
                         map_ok = False

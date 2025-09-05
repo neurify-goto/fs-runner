@@ -836,10 +836,9 @@ class ElementScorer:
             '役職': ['役職', '職位', 'job title', 'position', 'role', 'job']
         }
 
-        # 特別ガード: 電話番号は『携帯』『mobile』『cell』が明示された場合は優先度を下げる
+        # 特別ガード: 電話番号
         if field_name == '電話番号':
-            if any(k in context_lower for k in ['携帯', 'mobile', 'cell']):
-                return -60
+            # FAXは明確に不適合
             if any(k in context_lower for k in ['fax', 'ファックス', 'ファクス']):
                 return -80
 
@@ -964,7 +963,7 @@ class ElementScorer:
         semantic_mappings = {
             # 一般化改善: '連絡先' はグループ見出しで曖昧なためメールの同義語から除外
             'メールアドレス': ['メール', 'mail', 'email', 'e-mail', 'アドレス'],
-            '電話番号': ['電話', 'tel', 'phone', '番号', '連絡先'],
+            '電話番号': ['電話', 'tel', 'phone', '番号', '連絡先', '携帯', 'mobile', 'cell'],
             # 会社/団体/組織/施設の各種ラベル
             '会社名': ['会社', '企業', '法人', '団体', '組織', '社名', '法人名', '団体名', '組織名', '部署名', '学校名', '店舗名', '病院名', '施設名'],
             '姓': ['姓', '苗字', '名字', 'せい', 'みょうじ'],
