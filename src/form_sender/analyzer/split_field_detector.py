@@ -57,7 +57,8 @@ class SplitFieldDetector:
                 'max_fields': 5
             },
             'phone': {
-                'keywords': ['電話', 'tel', 'phone', '市外局番', '局番', '番号'],
+                # 『番号』は郵便番号/会員番号等と衝突しやすいため除外
+                'keywords': ['電話', 'tel', 'phone', '市外局番', '局番'],
                 'split_patterns': {
                     2: SplitPattern.PHONE_2_SPLIT,
                     3: SplitPattern.PHONE_3_SPLIT
@@ -1070,6 +1071,12 @@ class SplitFieldDetector:
                 continue
             
             # Critical修正1: 入力戦略に基づく処理分岐
+            # 特例: phone/postal/address で検出フィールドが1つしかない場合は常に統合値を割り当て
+            if group.field_type in {'phone', 'postal_code', 'address'} and len(group.fields) == 1:
+                value = self._generate_single_field_value(group, client_data)
+                assignments[group.fields[0].get('field_name','')] = value
+                continue
+
             if group.input_strategy == 'split':
                 # 分割入力：個別フィールドに分割された値を割り当て
                 split_assignments = self._generate_split_field_assignments(group, client_data)
@@ -1082,6 +1089,29 @@ class SplitFieldDetector:
                 logger.info(f"Generated combine assignments for {group.field_type}: {len(combine_assignments)} fields")
         
         return assignments
+
+    def _generate_single_field_value(self, group: SplitFieldGroup, client_data: Dict[str, Any]) -> str:
+        """単一フィールド時に割り当てる統合値を生成（共通化）。"""
+        try:
+            ci = (client_data.get('client', {}) if isinstance(client_data, dict) else client_data)
+            if group.field_type == 'phone':
+                return ''.join([
+                    ci.get('phone_1','').strip(),
+                    ci.get('phone_2','').strip(),
+                    ci.get('phone_3','').strip()
+                ])
+            if group.field_type == 'postal_code':
+                return ''.join([
+                    ci.get('postal_code_1','').strip(),
+                    ci.get('postal_code_2','').strip()
+                ])
+            if group.field_type == 'address':
+                addr = ''.join([ci.get(f'address_{i}','').strip() for i in range(1,5)])
+                bld  = ci.get('address_5','').strip()
+                return f"{addr}　{bld}" if bld else addr
+        except Exception as e:
+            logger.debug(f"single field value generation failed: {e}")
+        return ''
     
     def _generate_split_field_assignments(self, group: SplitFieldGroup, 
                                         client_data: Dict[str, Any]) -> Dict[str, str]:
@@ -1118,10 +1148,26 @@ class SplitFieldDetector:
         
         # パターンに応じた値の組み合わせ
         if group.pattern in [SplitPattern.ADDRESS_2_SPLIT, SplitPattern.ADDRESS_3_SPLIT, SplitPattern.ADDRESS_4_SPLIT]:
-            assignments.update(self._generate_address_assignments(group, groups_def, client_info))
+            # 単一フィールドしか検出されていない場合は住所全体を割り当て
+            if len(group.fields) == 1:
+                addr = ''.join([client_info.get(f'address_{i}', '').strip() for i in range(1,5)])
+                bld  = client_info.get('address_5','').strip()
+                value = f"{addr}　{bld}" if bld else addr
+                assignments[group.fields[0].get('field_name','')] = value
+            else:
+                assignments.update(self._generate_address_assignments(group, groups_def, client_info))
         
         elif group.pattern in [SplitPattern.PHONE_2_SPLIT, SplitPattern.PHONE_3_SPLIT]:
-            assignments.update(self._generate_phone_assignments(group, groups_def, client_info))
+            # 単一フィールドのみの場合は統合電話番号を割り当て
+            if len(group.fields) == 1:
+                phone = ''.join([
+                    client_info.get('phone_1','').strip(),
+                    client_info.get('phone_2','').strip(),
+                    client_info.get('phone_3','').strip()
+                ])
+                assignments[group.fields[0].get('field_name','')] = phone
+            else:
+                assignments.update(self._generate_phone_assignments(group, groups_def, client_info))
         
         elif group.pattern == SplitPattern.NAME_2_SPLIT:
             assignments.update(self._generate_name_assignments(group, client_info))
@@ -1130,7 +1176,14 @@ class SplitFieldDetector:
             assignments.update(self._generate_email_assignments(group, client_info))
         
         elif group.pattern == SplitPattern.POSTAL_2_SPLIT:
-            assignments.update(self._generate_postal_assignments(group, client_info))
+            if len(group.fields) == 1:
+                postal = ''.join([
+                    client_info.get('postal_code_1','').strip(),
+                    client_info.get('postal_code_2','').strip()
+                ])
+                assignments[group.fields[0].get('field_name','')] = postal
+            else:
+                assignments.update(self._generate_postal_assignments(group, client_info))
         
         return assignments
     

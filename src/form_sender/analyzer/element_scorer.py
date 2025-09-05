@@ -105,6 +105,25 @@ class ElementScorer:
         except Exception:
             self._critical_boundary_regex = {}
 
+        # CJK検出のための正規表現を事前コンパイル（ホットパス最適化）
+        # ひらがな/カタカナ/CJK統合漢字/半角カナ
+        try:
+            self._cjk_re = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]")
+        except Exception:
+            # フォールバック（コンパイル失敗時は None）
+            self._cjk_re = None
+
+    def _has_cjk(self, s: str) -> bool:
+        """日本語(CJK)文字を含むかの軽量判定（事前コンパイル済みのパターンを使用）。"""
+        try:
+            if not s:
+                return False
+            if self._cjk_re is None:
+                return bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]", s))
+            return self._cjk_re.search(s) is not None
+        except Exception:
+            return False
+
     def _should_bypass_generic_text_penalty(self, field_name: str, score_details: Dict[str, Any]) -> bool:
         """汎用減点をバイパスすべきか（可読性向上のため分離）。
 
@@ -145,11 +164,8 @@ class ElementScorer:
                 return True
 
             # 2) 日本語(CJK)を含むトークンの緩和マッチ（安全側）
-            def has_cjk(s: str) -> bool:
-                return re.search(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]", s) is not None
-
             t = token
-            if has_cjk(t):
+            if self._has_cjk(t):
                 # 単文字一般は広すぎて危険だが、『姓』だけは許容（『姓名』を拾うため）
                 if len(t) == 1 and t != '姓':
                     return False
@@ -790,9 +806,9 @@ class ElementScorer:
             if final_score > 0:
                 logger.debug(f"Context match found for {field_name}: {final_score} points")
             
-            # セマンティック不整合等による減点を適用（負スコアはコンテキスト総合スコアから差し引く）
+            # セマンティック不整合等による減点を適用（負スコアはそのまま減点として反映）
             if min_penalty < 0:
-                final_score = max(0, final_score + min_penalty)
+                final_score = max(-100, final_score + min_penalty)
                 logger.debug(f"Applied context penalty {min_penalty} for {field_name}, final={final_score}")
                 # 強否定（例: ふりがな/カナ/ひらがな）の場合は汎用ブーストの影響を打ち消し、
                 # 個人名系フィールドの誤検出を抑止するため0にクリップ
@@ -895,6 +911,11 @@ class ElementScorer:
                 return -70
             if any(k in context_lower for k in ['竣工', '年月日']):
                 return -50
+
+        # 特別ガード: 郵便番号 vs 従業員番号の取り違え抑止
+        if field_name == '郵便番号':
+            if any(k in context_lower for k in ['従業員番号', '社員番号', 'employee id', 'employee number']):
+                return -90
 
         # 汎用ガード: 『名』『カナ』等の個人名系フィールドは、
         # 会社名・建物名・商品名などの「〇〇名」複合語と衝突する。
@@ -1216,9 +1237,18 @@ class ElementScorer:
 
                 continue  # class のチェックはここで終了
 
-            # name/id/placeholder は従来ルール（語境界優先）
+            # name/id/placeholder は語境界（日本語含む）も考慮
             for exclude_pattern in exclude_patterns:
                 exclude_pattern_lower = exclude_pattern.lower()
+
+                # CJKや短いトークン（例:『姓』）は日本語境界マッチで厳密に判定
+                if len(exclude_pattern_lower) <= 2 or self._has_cjk(exclude_pattern_lower):
+                    try:
+                        if self._contains_token_with_boundary(attr_value, exclude_pattern_lower):
+                            logger.debug(f"EXCLUSION(boundary jp): {attr}='***REDACTED***' contains token '{exclude_pattern}'")
+                            return True
+                    except Exception:
+                        pass
 
                 # 1. 完全一致チェック（最優先）
                 if attr_value == exclude_pattern_lower:
@@ -1286,8 +1316,15 @@ class ElementScorer:
                     # 除外パターンマッチング
                     for exclude_pattern in exclude_patterns:
                         exclude_pattern_lower = exclude_pattern.lower()
-                        
-                        # コンテキストテキストでの完全一致またはキーワード含有チェック
+                        # CJKや短いトークンは日本語境界を考慮
+                        if len(exclude_pattern_lower) <= 2 or self._has_cjk(exclude_pattern_lower):
+                            try:
+                                if self._contains_token_with_boundary(context_text, exclude_pattern_lower):
+                                    logger.debug(f"CONTEXT_EXCLUSION(boundary jp): context_text='***REDACTED***' contains '{exclude_pattern}'")
+                                    return True
+                            except Exception:
+                                pass
+                        # コンテキストテキストでの完全一致またはキーワード含有チェック（通常）
                         if exclude_pattern_lower in context_text:
                             logger.debug(f"CONTEXT_EXCLUSION: context_text='***REDACTED***' contains exclude_pattern '{exclude_pattern}'")
                             return True
@@ -1380,6 +1417,45 @@ class ElementScorer:
             except Exception:
                 dt_class = ''
             if isinstance(dt_class, str) and any(k in dt_class for k in ['need', 'required', '必須']):
+                return True
+
+            # 5.5) ラベル近傍の必須マーク（span.require 等）の明示検出
+            try:
+                near_mark = await element.evaluate("""
+                    el => {
+                      const hasMark = (node) => {
+                        if (!node) return false;
+                        const txt = (node.innerText || node.textContent || '').trim();
+                        const cls = (node.getAttribute && (node.getAttribute('class') || '').toLowerCase()) || '';
+                        return cls.includes('require') || cls.includes('required') ||
+                               txt === '*' || txt === '＊' || txt.includes('必須');
+                      };
+                      let p = el.parentElement; let depth = 0;
+                      while (p && depth < 4) {
+                        // 兄弟方向にスキャン
+                        let sib = p.previousElementSibling; let s = 0;
+                        while (sib && s < 3) {
+                          if (hasMark(sib)) return true;
+                          const spans = sib.querySelectorAll('span,i,em,b,strong');
+                          for (const sp of spans) { if (hasMark(sp)) return true; }
+                          sib = sib.previousElementSibling; s++;
+                        }
+                        // 親内の強調要素を走査
+                        const spans = p.querySelectorAll('span.require, span.required, i, em, b, strong');
+                        for (const sp of spans) { if (hasMark(sp)) return true; }
+                        p = p.parentElement; depth++;
+                      }
+                      const id = el.getAttribute('id');
+                      if (id) {
+                        const labels = document.querySelectorAll(`label[for="${id}"] span, label[for="${id}"] i, label[for="${id}"] b, label[for="${id}"] strong`);
+                        for (const sp of labels) { if (hasMark(sp)) return true; }
+                      }
+                      return false;
+                    }
+                """)
+            except Exception:
+                near_mark = False
+            if near_mark:
                 return True
 
             # 6) 並列グループ内の必須マーカー検出（新規追加）

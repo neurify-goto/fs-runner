@@ -110,6 +110,18 @@ class UnmappedElementHandler:
         )
         auto_handled.update(select_handled)
 
+        # 汎用昇格: 都道府県フィールド（select/text）が未マッピングなら field_mapping に昇格
+        try:
+            promoted_pref = await self._promote_prefecture_field(
+                (classified_elements.get("selects", []) or []),
+                (classified_elements.get("text_inputs", []) or []),
+                field_mapping
+            )
+            if promoted_pref:
+                auto_handled.update(promoted_pref)
+        except Exception as e:
+            logger.debug(f"Promote prefecture select skipped: {e}")
+
         email_conf = await self._auto_handle_email_confirmation(
             classified_elements.get("email_inputs", [])
             + classified_elements.get("text_inputs", []),
@@ -173,10 +185,245 @@ class UnmappedElementHandler:
         except Exception as e:
             logger.debug(f"Auto handle fax skipped: {e}")
 
+        # 配列形式の姓名・カナ（name[0]/name[1], kana[0]/kana[1]）の汎用処理
+        try:
+            split_name = await self._auto_handle_split_name_arrays(
+                classified_elements.get("text_inputs", []) or [], mapped_element_ids
+            )
+            auto_handled.update(split_name)
+        except Exception as e:
+            logger.debug(f"Auto handle split name arrays skipped: {e}")
+
+        # family_name / given_name の汎用処理
+        try:
+            fam_given = await self._auto_handle_family_given_names(
+                classified_elements.get("text_inputs", []) or [], mapped_element_ids
+            )
+            auto_handled.update(fam_given)
+        except Exception as e:
+            logger.debug(f"Auto handle family/given skipped: {e}")
+
+        # 汎用救済: 未マッピングの必須テキスト入力に全角空白を入力
+        try:
+            req_texts = await self._auto_handle_required_texts(
+                classified_elements.get("text_inputs", []) or [], mapped_element_ids, field_mapping
+            )
+            auto_handled.update(req_texts)
+        except Exception as e:
+            logger.debug(f"Auto handle required texts skipped: {e}")
+
         logger.info(
             f"Auto-handled elements: checkboxes={len(checkbox_handled)}, radios={len(radio_handled)}, selects={len(select_handled)}"
         )
         return auto_handled
+
+    async def _auto_handle_required_texts(
+        self,
+        text_inputs: List[Locator],
+        mapped_element_ids: set,
+        field_mapping: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """未マッピングの必須テキスト/テキストエリアを汎用的に入力（全角空白）。
+
+        仕様:
+        - required属性/aria-required/周辺コンテキストの必須マーカー(*, 必須 等)のいずれかで必須と判断
+        - 既にマッピング済みの要素は対象外
+        - 『captcha/token/確認用』等は除外（_is_nonfillable_required に準拠）
+        - 値は『　』（全角スペース）を入力
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        idx = 1
+        for el in text_inputs:
+            try:
+                if id(el) in mapped_element_ids:
+                    continue
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get('visible', True):
+                    continue
+                # 既存のマッピングと同一セレクタはスキップ（重複対策）
+                try:
+                    sel = await self._generate_playwright_selector(el)
+                    if any((fm.get('selector') == sel) for fm in field_mapping.values() if isinstance(fm, dict)):
+                        continue
+                except Exception:
+                    pass
+                # 除外（確認用/認証等）
+                try:
+                    from .field_mapper import FieldMapper
+                    fm = FieldMapper(self.page, self.element_scorer, self.context_text_extractor, self.field_combination_manager, self.settings, None, None, None)
+                    if fm._is_nonfillable_required(info):
+                        continue
+                except Exception:
+                    pass
+                # カナ/ふりがな等はここでは扱わない（後段の昇格/assignerに委譲）
+                try:
+                    blob = ' '.join([
+                        (info.get('name','') or ''),
+                        (info.get('id','') or ''),
+                        (info.get('class','') or ''),
+                        (info.get('placeholder','') or ''),
+                    ]).lower()
+                    # context からも簡易取得
+                    ctxs = await self.context_text_extractor.extract_context_for_element(el)
+                    ctx_text = ' '.join([(getattr(c,'text','') or '') for c in (ctxs or [])])
+                    if any(t in (blob + ' ' + ctx_text) for t in ['furigana','kana','katakana','カナ','フリガナ','ふりがな','ひらがな']):
+                        continue
+                except Exception:
+                    pass
+                # 必須判定
+                required = await self.element_scorer._detect_required_status(el)
+                if not required:
+                    continue
+                selector = await self._generate_playwright_selector(el)
+                field_name = f"auto_required_text_{idx}"
+                handled[field_name] = {
+                    'element': el,
+                    'selector': selector,
+                    'tag_name': info.get('tag_name','input') or 'input',
+                    'type': info.get('type','text') or 'text',
+                    'name': info.get('name',''),
+                    'id': info.get('id',''),
+                    'input_type': 'text',
+                    'auto_action': 'fill',
+                    'default_value': '　',
+                    'required': True,
+                    'auto_handled': True,
+                }
+                idx += 1
+            except Exception as e:
+                logger.debug(f"required text auto-handle failed: {e}")
+        return handled
+
+    async def _promote_prefecture_field(
+        self, selects: List[Locator], text_inputs: List[Locator], field_mapping: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """select要素の中から『都道府県』を示すものを汎用判定し、未マッピングなら昇格する。
+
+        判定基準（すべて汎用）:
+        - tag が select
+        - 以下のいずれかを満たす
+          * name/id/class に 'pref' または 'prefecture'
+          * label/aria-labelledby 等のコンテキストに『都道府県』/『Prefecture』
+        - 既に field_mapping に『都道府県』がある場合は処理しない
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        if '都道府県' in field_mapping:
+            return handled
+        tokens_attr = ['pref', 'prefecture']
+        tokens_ctx = ['都道府県', 'prefecture']
+
+        # 1) select を優先
+        for el in selects:
+            try:
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get('visible', True):
+                    continue
+                blob = ' '.join([
+                    (info.get('name','') or '').lower(),
+                    (info.get('id','') or '').lower(),
+                    (info.get('class','') or '').lower(),
+                    (info.get('placeholder','') or '').lower(),
+                ])
+                attr_hit = any(t in blob for t in tokens_attr)
+
+                ctx_hit = False
+                if not attr_hit:
+                    try:
+                        contexts = await self.context_text_extractor.extract_context_for_element(el)
+                        texts = ' '.join([(c.text or '').lower() for c in (contexts or [])])
+                        ctx_hit = any(t in texts for t in tokens_ctx)
+                    except Exception:
+                        ctx_hit = False
+
+                if not (attr_hit or ctx_hit):
+                    continue
+
+                selector = await self._generate_playwright_selector(el)
+                required = await self.element_scorer._detect_required_status(el)
+                # field_mapping に正式登録（assigner が『都道府県』を特別扱い）
+                field_mapping['都道府県'] = {
+                    'element': el,
+                    'selector': selector,
+                    'tag_name': 'select',
+                    'type': 'select',
+                    'name': info.get('name',''),
+                    'id': info.get('id',''),
+                    'input_type': 'select',
+                    'default_value': '',
+                    'required': required,
+                    'visible': info.get('visible', True),
+                    'enabled': info.get('enabled', True),
+                    'score': 0,
+                }
+                handled['都道府県'] = field_mapping['都道府県']
+                # 既に同一要素が『住所』として登録されていれば除去（誤上書き防止）
+                try:
+                    for k, v in list(field_mapping.items()):
+                        if k.startswith('住所') and v.get('selector') == selector:
+                            field_mapping.pop(k, None)
+                    
+                except Exception:
+                    pass
+                logger.info("Promoted '都道府県' select to field_mapping")
+                break
+            except Exception as e:
+                logger.debug(f"prefecture promotion failed: {e}")
+        # 2) input[type=text] でも『都道府県』と確信できるものを昇格
+        for el in text_inputs:
+            try:
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get('visible', True):
+                    continue
+                t = (info.get('type','') or '').lower()
+                if t not in ['', 'text']:
+                    continue
+                blob = ' '.join([
+                    (info.get('name','') or '').lower(),
+                    (info.get('id','') or '').lower(),
+                    (info.get('class','') or '').lower(),
+                    (info.get('placeholder','') or '').lower(),
+                ])
+                # input系は属性に 'pref' があるか、placeholder/ラベルに『都道府県』がある場合のみ
+                attr_hit = any(k in blob for k in ['pref', 'prefecture'])
+                ctx_hit = False
+                if not attr_hit:
+                    try:
+                        contexts = await self.context_text_extractor.extract_context_for_element(el)
+                        texts = ' '.join([(c.text or '').lower() for c in (contexts or [])])
+                        ctx_hit = ('都道府県' in texts or 'prefecture' in texts)
+                    except Exception:
+                        ctx_hit = False
+                if not (attr_hit or ctx_hit):
+                    continue
+                selector = await self._generate_playwright_selector(el)
+                required = await self.element_scorer._detect_required_status(el)
+                field_mapping['都道府県'] = {
+                    'element': el,
+                    'selector': selector,
+                    'tag_name': info.get('tag_name','input') or 'input',
+                    'type': info.get('type','text') or 'text',
+                    'name': info.get('name',''),
+                    'id': info.get('id',''),
+                    'input_type': 'text',
+                    'default_value': '',
+                    'required': required,
+                    'visible': info.get('visible', True),
+                    'enabled': info.get('enabled', True),
+                    'score': 0,
+                }
+                handled['都道府県'] = field_mapping['都道府県']
+                # 既に同一要素が『住所』として登録されていれば除去
+                try:
+                    for k, v in list(field_mapping.items()):
+                        if k.startswith('住所') and v.get('selector') == selector:
+                            field_mapping.pop(k, None)
+                except Exception:
+                    pass
+                logger.info("Promoted '都道府県' input(text) to field_mapping")
+                break
+            except Exception as e:
+                logger.debug(f"prefecture text promotion failed: {e}")
+        return handled
 
     async def _auto_handle_checkboxes(
         self, checkboxes: List[Locator], mapped_element_ids: set
@@ -320,7 +567,7 @@ class UnmappedElementHandler:
                 logger.debug(f"Error grouping radio: {e}")
 
         pri1 = ["営業", "提案", "メール"]
-        pri2 = ["その他"]
+        pri2 = ["その他", "other", "該当なし"]
 
         # クライアント性別の正規化（male/female/other）
         def _normalize_gender(val: str) -> Optional[str]:
@@ -372,8 +619,7 @@ class UnmappedElementHandler:
                     group_required = await self._detect_group_required_via_container(radio_list[0][0])
                 except Exception as e:
                     logger.debug(f"Container required detection error for group '{group_name}': {e}")
-            if not group_required:
-                continue
+            # 任意グループでも送信成功率向上のため一つ選択（『その他』優先）
 
             texts: List[str] = []
             for radio, info in radio_list:
@@ -432,7 +678,7 @@ class UnmappedElementHandler:
                 "selected_index": idx,
                 "selected_option_text": texts[idx],
                 "default_value": True,
-                "required": True,
+                "required": bool(group_required),
                 "auto_handled": True,
                 "group_size": len(radio_list),
             }
@@ -640,6 +886,7 @@ class UnmappedElementHandler:
             "email_confirmation",
             "confirm_email",
             "confirm_mail",
+            "mail2", "mail_2", "email2", "email_2", "confirm-mail", "email-confirm",
             "メール確認",
             "確認用メール",
             "email_check",
@@ -676,6 +923,136 @@ class UnmappedElementHandler:
                 }
         return handled
 
+    async def _auto_handle_split_name_arrays(self, text_inputs: List[Locator], mapped_element_ids: set) -> Dict[str, Dict[str, Any]]:
+        """name[0]/name[1], kana[0]/kana[1] のような配列入力を汎用対応。
+
+        ルール:
+        - name[0] -> 姓, name[1] -> 名
+        - kana[0] -> 姓カナ, kana[1] -> 名カナ
+        - 既に姓/名（またはカナ）がマッピング済みの場合はスキップ
+        - 要素が不可視/同一要素に既に割当済みの場合はスキップ
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        try:
+            pairs = {
+                'name': [('姓', 0), ('名', 1)],
+                'kana': [('姓カナ', 0), ('名カナ', 1)]
+            }
+            buckets = {k: {} for k in pairs.keys()}  # base -> {index: (locator, info)}
+            order_buckets = {k: [] for k in pairs.keys()}  # base -> [(locator, info)] (順序用)
+            for el in text_inputs:
+                if id(el) in mapped_element_ids:
+                    continue
+                try:
+                    info = await self.element_scorer._get_element_info(el)
+                except Exception:
+                    continue
+                if not info.get('visible', True):
+                    continue
+                nm = (info.get('name','') or '').lower()
+                for base in pairs.keys():
+                    if nm.startswith(base + '[') and nm.endswith(']'):
+                        try:
+                            idx = int(nm[len(base)+1:-1])
+                        except Exception:
+                            continue
+                        if idx in (0,1):
+                            buckets[base][idx] = (el, info)
+                    elif nm == base + '[]':
+                        # インデックス無しの配列は出現順で割当
+                        order_buckets[base].append((el, info))
+            for base, mapping in buckets.items():
+                if 0 in mapping and 1 in mapping:
+                    for field_name, idx in pairs[base]:
+                        if field_name in handled:
+                            continue
+                        if field_name in getattr(self, 'field_mapping', {}):
+                            # UnmappedElementHandler では self.field_mapping 参照不可のため抑制
+                            pass
+                        el, info = mapping[idx]
+                        selector = await self._generate_playwright_selector(el)
+                        required = await self.element_scorer._detect_required_status(el)
+                        handled[field_name] = {
+                            'element': el,
+                            'selector': selector,
+                            'tag_name': info.get('tag_name','input') or 'input',
+                            'type': info.get('type','text') or 'text',
+                            'name': info.get('name',''),
+                            'id': info.get('id',''),
+                            'input_type': 'text',
+                            'default_value': '',
+                            'required': required,
+                            'visible': info.get('visible', True),
+                            'enabled': info.get('enabled', True),
+                            'auto_handled': True,
+                        }
+            # 順序割当（name[] / kana[]）
+            for base, items in order_buckets.items():
+                if len(items) >= 2:
+                    for (field_name, idx), (el, info) in zip(pairs[base], items[:2]):
+                        selector = await self._generate_playwright_selector(el)
+                        required = await self.element_scorer._detect_required_status(el)
+                        handled[field_name] = {
+                            'element': el,
+                            'selector': selector,
+                            'tag_name': info.get('tag_name','input') or 'input',
+                            'type': info.get('type','text') or 'text',
+                            'name': info.get('name',''),
+                            'id': info.get('id',''),
+                            'input_type': 'text',
+                            'default_value': '',
+                            'required': required,
+                            'visible': info.get('visible', True),
+                            'enabled': info.get('enabled', True),
+                            'auto_handled': True,
+                        }
+        except Exception as e:
+            logger.debug(f"split name arrays handler error: {e}")
+        return handled
+
+    async def _auto_handle_family_given_names(self, text_inputs: List[Locator], mapped_element_ids: set) -> Dict[str, Dict[str, Any]]:
+        handled: Dict[str, Dict[str, Any]] = {}
+        try:
+            cand = []
+            for el in text_inputs:
+                if id(el) in mapped_element_ids:
+                    continue
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get('visible', True):
+                    continue
+                nm = (info.get('name','') or '').lower()
+                idv= (info.get('id','') or '').lower()
+                blob = nm + ' ' + idv
+                kind = None
+                if any(t in blob for t in ['family_name','family-name','lastname','last_name','surname','family']):
+                    kind = '姓'
+                elif any(t in blob for t in ['given_name','given-name','firstname','first_name','given']):
+                    kind = '名'
+                if kind:
+                    cand.append((kind, el, info))
+            for kind, el, info in cand:
+                if kind in handled:
+                    continue
+                selector = await self._generate_playwright_selector(el)
+                required = await self.element_scorer._detect_required_status(el)
+                handled[kind] = {
+                    'element': el,
+                    'selector': selector,
+                    'tag_name': info.get('tag_name','input') or 'input',
+                    'type': info.get('type','text') or 'text',
+                    'name': info.get('name',''),
+                    'id': info.get('id',''),
+                    'input_type': 'text',
+                    'default_value': '',
+                    'required': required,
+                    'visible': info.get('visible', True),
+                    'enabled': info.get('enabled', True),
+                    'auto_handled': True,
+                }
+        except Exception as e:
+            logger.debug(f"family/given name handler error: {e}")
+        return handled
+
     async def _auto_handle_unified_fullname(
         self,
         text_inputs: List[Locator],
@@ -696,6 +1073,12 @@ class UnmappedElementHandler:
                 ):
                     info = await self.element_scorer._get_element_info(fe.locator)
                     if not info.get("visible", True):
+                        continue
+                    # 追加ガード: email/確認系には統合氏名を適用しない
+                    typ = (info.get('type','') or '').lower()
+                    nm  = (info.get('name','') or '').lower()
+                    cls = (info.get('class','') or '').lower()
+                    if (typ == 'email') or ('mail' in nm) or ('email' in nm) or ('mail' in cls) or ('email' in cls):
                         continue
                     selector = await self._generate_playwright_selector(fe.locator)
                     required = await self.element_scorer._detect_required_status(
@@ -962,14 +1345,23 @@ class UnmappedElementHandler:
                 continue
             # フィールド名を昇格
             try:
+                el = v.get('element')
+                # 可能なら要素詳細を取得してプレースホルダー/属性を含める
+                element_info = await self._get_element_details(el) if el else {
+                    **{kk: vv for kk, vv in v.items() if kk not in ['auto_action', 'default_value']}
+                }
+                # 入力値はここでは設定せず（assignerが安全に決定）
+                element_info.update({
+                    'score': element_info.get('score', 0) or 100,
+                })
                 field_mapping['統合氏名カナ'] = {
-                    **{kk: vv for kk, vv in v.items() if kk not in ['auto_action', 'default_value']},
+                    **{kk: vv for kk, vv in element_info.items() if kk not in ['auto_action', 'default_value']},
                     'input_type': 'text',
-                    'value': v.get('default_value', ''),
                     'required': True,
                     'source': 'promoted'
                 }
-                promoted.append('統合氏名カナ')
+                # 呼び出し側で auto_handled から除去できるよう、昇格元キー（auto_*）を返す
+                promoted.append(k)
                 break
             except Exception:
                 continue

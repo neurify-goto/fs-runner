@@ -29,7 +29,15 @@ class InputValueAssigner:
                 continue
 
             input_type = field_info.get('input_type')
-            input_value = split_assignments.get(field_name, self._generate_enhanced_input_value(field_name, field_info, client_data))
+            # 住所/都道府県は分割割当よりも文脈ヒューリスティクスを優先
+            if field_name == '都道府県':
+                input_value = self._handle_prefecture_assignment(field_info, client_data)
+            elif field_name.startswith('住所'):
+                input_value = self._handle_address_assignment(field_name, field_info, client_data)
+            else:
+                input_value = split_assignments.get(field_name)
+                if input_value is None or str(input_value).strip() == '':
+                    input_value = self._generate_enhanced_input_value(field_name, field_info, client_data)
 
             # 選択式（select/checkbox/radio）のクライアント値割り当て制約
             # 方針: クライアント情報を当てはめる可能性があるのは address_1（都道府県）と gender のみ
@@ -42,6 +50,10 @@ class InputValueAssigner:
                     # 値は使わず、3段階アルゴリズムで選択させる
                     input_value = ''
                     auto_action = 'select_by_algorithm'
+                else:
+                    # 許可フィールドでも値が無ければアルゴリズム選択を有効化
+                    if not (input_value or '').strip():
+                        auto_action = 'select_by_algorithm'
 
             assign = {
                 'selector': field_info['selector'],
@@ -73,6 +85,18 @@ class InputValueAssigner:
         except Exception as e:
             logger.debug(f"name selector mismatch fix skipped: {e}")
 
+        # 追加の安全弁: 都道府県の空値補完（text/selectを問わず）
+        try:
+            if '都道府県' in input_assignments:
+                v = str(input_assignments['都道府県'].get('value','') or '').strip()
+                if not v:
+                    pref = self._handle_prefecture_assignment({}, client_data)
+                    if pref:
+                        input_assignments['都道府県']['value'] = pref
+                        logger.info("Filled empty '都道府県' from client address_1 (fallback)")
+        except Exception:
+            pass
+
         return input_assignments
 
     def _should_input_field(self, field_name: str, field_info: Dict[str, Any]) -> bool:
@@ -91,32 +115,97 @@ class InputValueAssigner:
     def _generate_enhanced_input_value(self, field_name: str, field_info: Dict[str, Any], client_data: Dict[str, Any]) -> str:
         # Get value from field combination manager
         value = self.field_combination_manager.get_field_value_for_type(field_name, 'single', client_data)
-        
-        # If empty value returned, try specific field mappings
-        if not value:
-            # Map Japanese field names to appropriate combination types
-            if field_name == "統合氏名":
-                value = self.field_combination_manager.generate_combined_value('full_name', client_data)
-            elif field_name == "統合氏名カナ":
-                # ラベル/コンテキストから ひらがな/カタカナ を簡易判定
-                kana_type = 'katakana'
-                try:
-                    ctx = (field_info.get('best_context_text') or '')
-                    if not ctx and isinstance(field_info.get('context'), list):
-                        # 最良コンテキストが無い場合は先頭のcontextを参照
-                        ctx = next((c.get('text','') for c in field_info['context'] if isinstance(c, dict) and c.get('text')), '')
-                    ctx_lower = str(ctx)
-                    if ('ひらがな' in ctx_lower) or ('hiragana' in ctx_lower):
-                        kana_type = 'hiragana'
-                except Exception:
-                    pass
-                # ふりがな/カナに応じた統合値を生成
-                value = self.field_combination_manager.generate_unified_kana_value(kana_type, client_data)
-            elif field_name == "お問い合わせ本文":
-                # Get message from targeting data
-                if isinstance(client_data, dict):
-                    targeting_info = client_data.get('targeting', {})
-                    value = targeting_info.get('message', '')
+
+        # 住所/郵便/電話/都道府県の汎用整形・割当（追加）
+        def _client() -> Dict[str, Any]:
+            return client_data.get('client') if isinstance(client_data, dict) and 'client' in client_data else client_data
+
+        def _ctx_blob() -> str:
+            try:
+                best = (field_info.get('best_context_text') or '')
+            except Exception:
+                best = ''
+            parts = [field_info.get('name',''), field_info.get('id',''), field_info.get('class',''), field_info.get('placeholder',''), best]
+            return ' '.join([p for p in parts if p]).lower()
+
+        def _format_postal(v: str) -> str:
+            vv = (v or '').replace('-', '').strip()
+            ph = (field_info.get('placeholder','') or '')
+            if len(vv) == 7 and ('-' in ph or '〒' in ph or '〒' in _ctx_blob()):
+                return f"{vv[:3]}-{vv[3:]}"
+            return vv
+
+        def _format_phone(v: str) -> str:
+            vv = (v or '').replace('-', '').strip()
+            ph = (field_info.get('placeholder','') or '').lower()
+            if '-' in ph and vv.isdigit() and len(vv) in (10,11):
+                if len(vv) == 10:
+                    return f"{vv[:2]}-{vv[2:6]}-{vv[6:]}"
+                else:
+                    return f"{vv[:3]}-{vv[3:7]}-{vv[7:]}"
+            return vv
+
+        blob = _ctx_blob()
+        client = _client()
+
+        if field_name == '郵便番号':
+            pv = self.field_combination_manager.get_field_value_for_type('郵便番号', 'single', client_data)
+            return _format_postal(pv)
+
+        if field_name == '電話番号':
+            phv = self.field_combination_manager.get_field_value_for_type('電話番号', 'single', client_data)
+            return _format_phone(phv or value)
+
+        if field_name == '都道府県':
+            return self._handle_prefecture_assignment(field_info, client_data)
+
+        # 本文は常に確定値を適用（フォールバック条件に依存しない）
+        if field_name == 'お問い合わせ本文':
+            if isinstance(client_data, dict):
+                t = client_data.get('targeting', {})
+                msg = t.get('message','')
+                if msg:
+                    return msg
+        # 統合氏名は組み合わせ値を使用
+        if field_name == '統合氏名':
+            full = self.field_combination_manager.generate_combined_value('full_name', client_data)
+            if full:
+                return full
+        # 統合氏名カナは種別判定のうえ確定値を生成
+        if field_name == "統合氏名カナ":
+            kana_type = 'katakana'
+            try:
+                # 1) コンテキスト
+                ctx = (field_info.get('best_context_text') or '')
+                if not ctx and isinstance(field_info.get('context'), list):
+                    ctx = next((c.get('text','') for c in field_info['context'] if isinstance(c, dict) and c.get('text')), '')
+                ctx_blob = str(ctx)
+                if ('ひらがな' in ctx_blob) or ('hiragana' in ctx_blob.lower()):
+                    kana_type = 'hiragana'
+                else:
+                    # 2) プレースホルダーの文字種
+                    placeholder = str(field_info.get('placeholder', '') or '')
+                    def _has_hiragana(s: str) -> bool:
+                        return any('ぁ' <= ch <= 'ゖ' for ch in s)
+                    def _has_katakana(s: str) -> bool:
+                        return any('ァ' <= ch <= 'ヺ' or ch == 'ー' for ch in s)
+                    if placeholder:
+                        if _has_hiragana(placeholder) and not _has_katakana(placeholder):
+                            kana_type = 'hiragana'
+                        elif _has_katakana(placeholder) and not _has_hiragana(placeholder):
+                            kana_type = 'katakana'
+                    # 3) name/id/class のヒント
+                    if kana_type == 'katakana':
+                        blob = ' '.join([
+                            str(field_info.get('name','') or ''),
+                            str(field_info.get('id','') or ''),
+                            str(field_info.get('class','') or ''),
+                        ]).lower()
+                        if 'hiragana' in blob:
+                            kana_type = 'hiragana'
+            except Exception:
+                pass
+            return self.field_combination_manager.generate_unified_kana_value(kana_type, client_data)
             
             # If still empty after specific mapping, use fallback
             if not value:
@@ -127,8 +216,71 @@ class InputValueAssigner:
                 else:
                     # For non-required fields, use empty string
                     value = ""
-        
+
+        # 住所/住所_補助* の文脈に応じた割当
+        if field_name.startswith('住所'):
+            addr = self._handle_address_assignment(field_name, field_info, client_data)
+            if addr:
+                return addr
+
         return value
+
+    def _handle_prefecture_assignment(self, field_info: Dict[str, Any], client_data: Dict[str, Any]) -> str:
+        """都道府県フィールドへの値割り当て。
+        - クライアントデータの `address_1` を最優先
+        - 異常時は空文字を返す
+        """
+        try:
+            client = client_data.get('client') if isinstance(client_data, dict) and 'client' in client_data else client_data
+            pref = (client or {}).get('address_1', '')
+            return str(pref or '').strip()
+        except Exception as e:
+            logger.debug(f"prefecture assignment skipped: {e}")
+            return ''
+
+    def _handle_address_assignment(self, field_name: str, field_info: Dict[str, Any], client_data: Dict[str, Any]) -> str:
+        """住所関連フィールドへの値割り当て（文脈駆動）。
+        - 住所_補助*, 市区町村、番地/建物などの文脈を見て適切に構成
+        - デフォルトは住所全体
+        """
+        try:
+            def _client() -> Dict[str, Any]:
+                return client_data.get('client') if isinstance(client_data, dict) and 'client' in client_data else client_data
+
+            client = _client()
+            blob = ''
+            try:
+                best = (field_info.get('best_context_text') or '')
+            except Exception:
+                best = ''
+            parts = [field_info.get('name',''), field_info.get('id',''), field_info.get('class',''), field_info.get('placeholder',''), best]
+            blob = ' '.join([p for p in parts if p]).lower()
+
+            city_tokens = ['市区町村','市区','city','区','町','town','丁目']
+            detail_tokens = ['番地','丁目','建物','building','マンション','ビル','部屋','room','apt','apartment','号室','詳細']
+            pref_tokens = ['都道府県','prefecture','県','都','府']
+
+            def join_nonempty(parts, sep=''):
+                return sep.join([p for p in parts if p])
+
+            if any(t in blob for t in pref_tokens):
+                v = client.get('address_1','')
+                if v:
+                    return v
+            if field_name.startswith('住所_補助') or any(t in blob for t in detail_tokens):
+                v = join_nonempty([client.get('address_4',''), client.get('address_5','')], '　')
+                if v:
+                    return v
+            if any(t in blob for t in city_tokens):
+                v = join_nonempty([client.get('address_2',''), client.get('address_3','')])
+                if v:
+                    return v
+            # デフォルトは住所全体
+            full_addr = self.field_combination_manager.generate_combined_value('address', client_data)
+            return full_addr or ''
+        except Exception as e:
+            logger.debug(f"address assignment skipped: {e}")
+            return ''
 
     def _fix_name_selector_mismatch(self, field_mapping: Dict[str, Dict[str, Any]], input_assignments: Dict[str, Any]) -> None:
         """
