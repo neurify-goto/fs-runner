@@ -38,9 +38,9 @@ class BrowserManager:
         worker_cfg = self.config.get("worker_config", {})
         browser_cfg = worker_cfg.get("browser", {})
         rb_cfg = browser_cfg.get("resource_blocking", {})
-        # 既定はブロックしない（安定性を優先）。設定で上書き可能。
-        self._rb_block_images = bool(rb_cfg.get("block_images", False))
-        self._rb_block_fonts = bool(rb_cfg.get("block_fonts", False))
+        # 既定は設計方針に合わせてブロックON（画像/フォント）。設定で上書き可能。
+        self._rb_block_images = bool(rb_cfg.get("block_images", True))
+        self._rb_block_fonts = bool(rb_cfg.get("block_fonts", True))
         self._rb_block_stylesheets = bool(rb_cfg.get("block_stylesheets", False))
 
     async def launch(self) -> bool:
