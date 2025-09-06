@@ -271,6 +271,13 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_bot_protection': bool(bp),
             'p_submitted_at': jst_now().isoformat()
         }).execute()
+        # 成功時は当日成功数キャッシュを無効化（最新値を反映させる）
+        if is_success:
+            try:
+                key = f"{targeting_id}:{target_date.isoformat()}"
+                _SUCC_CACHE.pop(key, None)
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"mark_done RPC error ({company_id}): {e}")
 

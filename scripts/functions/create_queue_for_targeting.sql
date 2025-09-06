@@ -23,8 +23,14 @@ begin
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
   if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
     -- 危険キーワード/記号を禁止（大文字小文字無視）
-    if trim(p_targeting_sql) ~* '(;|--|/\*|\*/|\\x00|insert\s|update\s|delete\s|drop\s|alter\s|create\s|grant\s|revoke\s|truncate\s|commit\s|rollback\s)' then
+    -- 1) 区切り記号/コメント/ヌルバイト
+    if trim(p_targeting_sql) ~* '(;|--|/\*|\*/|\\x00)' then
       raise exception 'Invalid targeting_sql: contains forbidden tokens';
+    end if;
+    -- 2) 危険なステートメント単語（単語境界で判定）
+    --    \m / \M は PostgreSQL の単語境界（ARE）
+    if trim(p_targeting_sql) ~* '(\m(insert|update|delete|drop|alter|create|grant|revoke|truncate|commit|rollback|with|union)\M)' then
+      raise exception 'Invalid targeting_sql: contains forbidden statements';
     end if;
   end if;
   -- NGリストを配列化
