@@ -1597,6 +1597,42 @@ class ElementScorer:
             if parallel_groups and await self._detect_required_in_parallel_group(element, parallel_groups):
                 return True
 
+            # 6.5) 追加フォールバック: 親→前方兄弟ブロックの明示『必須』検出
+            # 事例: <div class="contact__title"><p>ふりがな</p><p>必須</p></div>
+            #       <input name="姓ふりがな"> <input name="名ふりがな">
+            # 入力要素の直近親から最大3階層まで遡り、それぞれの直前の兄弟ブロック（最大3つ）に
+            # 『必須/Required/Mandatory/Must』が含まれていれば必須とみなす。
+            try:
+                extended_mark = await element.evaluate("""
+                    el => {
+                      const MARKS = ['必須','required','Required','MANDATORY','Mandatory','Must'];
+                      const hasReq = (node) => {
+                        if (!node) return false;
+                        try {
+                          const txt = (node.innerText || node.textContent || '').trim();
+                          if (!txt) return false;
+                          return MARKS.some(m => txt.includes(m));
+                        } catch { return false; }
+                      };
+                      let p = el.parentElement;
+                      for (let depth = 0; p && depth < 3; depth++) {
+                        let sib = p.previousElementSibling;
+                        let steps = 0;
+                        while (sib && steps < 3) {
+                          if (hasReq(sib)) return true;
+                          sib = sib.previousElementSibling;
+                          steps++;
+                        }
+                        p = p.parentElement;
+                      }
+                      return false;
+                    }
+                """)
+            except Exception:
+                extended_mark = False
+            if extended_mark:
+                return True
+
             return False
 
         except Exception as e:
