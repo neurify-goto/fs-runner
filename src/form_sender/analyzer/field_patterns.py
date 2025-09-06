@@ -506,11 +506,13 @@ class FieldPatterns:
                     # 汎用追加: よくある言い換え
                     "ご意見", "ご感想", "ご相談内容", "ご連絡内容", "お問い合わせの内容",
                     # 表記ゆれ対策（お問い/お問/問合せ）
-                    "お問合せ", "お問合わせ", "お問合せ内容", "お問合わせ内容", "お問い合わせ", "otoiawase"
+                    "お問合せ", "お問合わせ", "お問合せ内容", "お問合わせ内容", "お問い合わせ", "otoiawase",
+                    # 汎用追加: 単純な 'body' キー（日本語フォームでも広く使用）
+                    "body"
                 ],  # ご質問・ご要望パターン追加（汎用語 'text' は除外）
                 "ids": [
                     "message", "inquiry-body", "contact-message", "comment", "inquiry_content",
-                    "question", "request", "inquiry", "content", "details"
+                    "question", "request", "inquiry", "content", "details", "body"
                 ],  # 汎用語 'text' を除外し誤検出抑制
                 "classes": [
                     "message", "inquiry", "comment", "inquiry-content", "contact-message",

@@ -182,7 +182,8 @@ class FieldMappingAnalyzer:
         """Supabase接続初期化"""
         try:
             from dotenv import load_dotenv
-            load_dotenv()
+            # OS 環境に同名変数が存在しても .env の値を優先
+            load_dotenv(override=True)
             
             supabase_url = os.getenv('SUPABASE_URL')
             supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')

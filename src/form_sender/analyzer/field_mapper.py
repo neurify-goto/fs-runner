@@ -277,9 +277,14 @@ class FieldMapper:
                 if ('tel' not in blob and 'phone' not in blob):
                     continue
                 m = re.search(r'(?:tel|phone)[^\d]*([123])(?!.*\d)', blob)
-                if not m:
-                    continue
-                idx = int(m.group(1))
+                if m:
+                    idx = int(m.group(1))
+                else:
+                    # 'tel' / 'phone' に数字が無い場合は 1 と見なす（一般的な your-tel, tel, phone）
+                    if re.search(r'(?:^|\b)(tel|phone)(?:\b|[_-])', blob):
+                        idx = 1
+                    else:
+                        continue
                 if idx in (1,2,3):
                     candidates[idx] = el
             except Exception:
