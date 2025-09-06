@@ -778,9 +778,20 @@ class ElementScorer:
         # 対策: 『会社名』フィールドでは、プレースホルダーに企業を示唆する語が
         #       一切含まれない場合は placeholder マッチを無効化する。
         if field_name == '会社名':
-            corp_hints = ['会社', '企業', '法人', '団体', '組織', '社名', '御社', '貴社',
-                          '会社・団体', '店舗', '病院', '施設', '学校', '大学', '園', '館', '事業者', '屋号']
-            if not any(h in placeholder_lower for h in corp_hints):
+            # 多言語対応の企業性ヒント
+            # - 日本語: 会社/企業/法人/団体/組織/社名/御社/貴社 など
+            # - 英語: company/corporation/corporate/corp/organization/organisation/business/enterprise/firm/employer
+            #   及び "company name"/"corporate name"/"business name" 等のフレーズ
+            jp_hints = ['会社', '企業', '法人', '団体', '組織', '社名', '御社', '貴社',
+                        '会社・団体', '店舗', '病院', '施設', '学校', '大学', '園', '館', '事業者', '屋号']
+            import re
+            en_word_boundary = re.compile(r"\b(company|companies|corp|corporation|corporate|organization|organisation|business|enterprise|firm|employer)\b")
+            en_phrase = re.compile(r"\b(company\s+name|corporate\s+name|organization\s+name|organisation\s+name|business\s+name|enterprise\s+name|employer\s+name)\b")
+
+            has_jp = any(h in placeholder_lower for h in jp_hints)
+            has_en = bool(en_word_boundary.search(placeholder_lower) or en_phrase.search(placeholder_lower))
+
+            if not (has_jp or has_en):
                 # 企業性を示すヒントがなければ placeholder による加点はしない
                 pattern_placeholders = []
 
