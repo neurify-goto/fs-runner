@@ -9,7 +9,7 @@ create or replace function public.mark_done(
   p_bot_protection boolean,
   p_submitted_at timestamptz
 )
-returns void
+returns integer
 language plpgsql
 as $$
 declare
@@ -38,5 +38,6 @@ begin
   if v_updated = 0 then
     raise notice 'mark_done: send_queue row not found for date=%, targeting_id=%, company_id=%', p_target_date, p_targeting_id, p_company_id;
   end if;
+  return v_updated;
 end;
 $$;
