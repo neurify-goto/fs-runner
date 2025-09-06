@@ -59,7 +59,8 @@ function getActiveTargetingIdsFromSheet() {
       active: headers.indexOf('active'),
       id: headers.indexOf('id'),
       client_id: headers.indexOf('client_id'),
-      description: headers.indexOf('description')
+      description: headers.indexOf('description'),
+      concurrent_workflow: headers.indexOf('concurrent_workflow')
     };
     
     // 必須カラムの存在確認
@@ -116,11 +117,22 @@ function getActiveTargetingIdsFromSheet() {
       // 管理用情報を取得
       const description = colIndexes.description >= 0 ? row[colIndexes.description] || '' : '';
       
+      // 並列起動数（未定義/不正値は1）
+      let cw = 1;
+      try {
+        if (colIndexes.concurrent_workflow >= 0) {
+          const v = row[colIndexes.concurrent_workflow];
+          const n = parseInt(v);
+          cw = (isNaN(n) || n <= 0) ? 1 : n;
+        }
+      } catch (e) { cw = 1; }
+
       activeTargetings.push({
         targeting_id: targetingId,
         client_id: clientId,
         description: description,
-        row_number: i + 1
+        row_number: i + 1,
+        concurrent_workflow: cw
       });
       
       console.log(`行 ${i + 1}: targeting_id ${targetingId} (client_id: ${clientId}) をアクティブとして追加`);
@@ -235,6 +247,7 @@ function validateSpreadsheetConfig() {
       'id', 'active', 'client_id', 'description', 'subject', 'message',
       'targeting_sql', 'ng_companies', 'max_daily_sends',
       'send_start_time', 'send_end_time', 'send_days_of_week'
+      // 'concurrent_workflow' はオプショナル（空/未定義なら 1 として扱う）
     ];
     const targetingMissingColumns = targetingRequiredColumns.filter(col => !targetingHeaders.includes(col));
     
@@ -580,7 +593,18 @@ function getTargetingConfig(targetingId) {
         max_daily_sends: parseInt(targetingRow[targetingColMap['max_daily_sends'] || -1]) || 100,
         send_start_time: targetingRow[targetingColMap['send_start_time'] || -1] || '09:00',
         send_end_time: targetingRow[targetingColMap['send_end_time'] || -1] || '18:00',
-        send_days_of_week: parseSendDaysOfWeek(targetingRow[targetingColMap['send_days_of_week'] || -1])
+        send_days_of_week: parseSendDaysOfWeek(targetingRow[targetingColMap['send_days_of_week'] || -1]),
+        // 追加: 並列起動数（新規 M 列）
+        concurrent_workflow: (function() {
+          try {
+            const v = targetingRow[targetingColMap['concurrent_workflow'] || -1];
+            const n = parseInt(v);
+            if (isNaN(n) || n <= 0) return 1;
+            return n;
+          } catch (e) {
+            return 1;
+          }
+        })()
       }
     };
     

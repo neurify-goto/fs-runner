@@ -413,7 +413,7 @@ function showSystemInfo() {
 
 /**
  * targeting submissions統計更新のメイン実行関数
- * targetingテーブルの各行のid列を使ってM列・N列に統計を書き込む
+ * targetingテーブルの各行のid列を使って N-Q 列に統計を書き込む
  * @returns {Object} 実行結果
  */
 function updateTargetingStats() {

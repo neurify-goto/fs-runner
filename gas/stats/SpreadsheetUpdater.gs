@@ -11,12 +11,13 @@ const SPREADSHEET_CONFIG = {
 };
 
 // targeting シート列配置設定
+// M列に concurrent_workflow を新設したため、統計出力列を1列ずらして N-Q に変更
 const TARGETING_COLUMN_CONFIG = {
   ID_COLUMN: 2,                    // B列 - targeting_id
-  SUBMISSIONS_TOTAL_ALL: 13,       // M列 - submissions総数（通算）
-  SUBMISSIONS_SUCCESS_ALL: 14,     // N列 - 成功submissions数（通算）
-  SUBMISSIONS_TOTAL_TODAY: 15,     // O列 - submissions総数（本日）
-  SUBMISSIONS_SUCCESS_TODAY: 16    // P列 - 成功submissions数（本日）
+  SUBMISSIONS_TOTAL_ALL: 14,       // N列 - submissions総数（通算）
+  SUBMISSIONS_SUCCESS_ALL: 15,     // O列 - 成功submissions数（通算）
+  SUBMISSIONS_TOTAL_TODAY: 16,     // P列 - submissions総数（本日）
+  SUBMISSIONS_SUCCESS_TODAY: 17    // Q列 - 成功submissions数（本日）
 };
 
 // セル配置設定（1行目：タイトル行、2行目以降：統計データ）
@@ -700,11 +701,11 @@ function testStatsLogFunctions() {
 }
 
 /**
- * targetingテーブルのM列・N列・O列・P列にsubmissions統計を更新
- * M列: 各targeting_idのsubmissions総数（通算）
- * N列: 各targeting_idの成功submissions数（通算、success=true）
- * O列: 各targeting_idの本日submissions総数
- * P列: 各targeting_idの本日成功submissions数（success=true）
+ * targetingテーブルのN列・O列・P列・Q列にsubmissions統計を更新
+ * N列: 各targeting_idのsubmissions総数（通算）
+ * O列: 各targeting_idの成功submissions数（通算、success=true）
+ * P列: 各targeting_idの本日submissions総数
+ * Q列: 各targeting_idの本日成功submissions数（success=true）
  * @returns {Object} 更新結果
  */
 function updateTargetingSubmissionsStats() {
@@ -736,7 +737,7 @@ function updateTargetingSubmissionsStats() {
     const oColumnIndex = TARGETING_COLUMN_CONFIG.SUBMISSIONS_TOTAL_TODAY;
     const pColumnIndex = TARGETING_COLUMN_CONFIG.SUBMISSIONS_SUCCESS_TODAY;
     
-    console.log(`targetingシート列配置: ID=${idColumnIndex}, M=${mColumnIndex}, N=${nColumnIndex}, O=${oColumnIndex}, P=${pColumnIndex}`);
+    console.log(`targetingシート列配置: ID=${idColumnIndex}, N=${mColumnIndex}, O=${nColumnIndex}, P=${oColumnIndex}, Q=${pColumnIndex}`);
     
     // データ行の範囲を取得（ヘッダー行を除く）
     const dataRowCount = targetingSheet.getLastRow() - 1;
@@ -781,10 +782,10 @@ function updateTargetingSubmissionsStats() {
     console.log(`本日統計一括取得完了: ${Object.keys(allTodayStats).length}件の本日統計を取得, 処理時間: ${todayBatchTime}ms`);
     
     // 各行のsubmissions統計を設定（通算＋本日）
-    const mColumnValues = []; // M列用（submissions総数・通算）
-    const nColumnValues = []; // N列用（成功submissions数・通算）
-    const oColumnValues = []; // O列用（submissions総数・本日）
-    const pColumnValues = []; // P列用（成功submissions数・本日）
+    const mColumnValues = []; // N列用（submissions総数・通算）
+    const nColumnValues = []; // O列用（成功submissions数・通算）
+    const oColumnValues = []; // P列用（submissions総数・本日）
+    const pColumnValues = []; // Q列用（成功submissions数・本日）
     
     let successCount = 0;
     let invalidCount = 0;
@@ -819,11 +820,11 @@ function updateTargetingSubmissionsStats() {
       oColumnValues.push([todayTotalCount]);
       pColumnValues.push([todaySuccessSubmissionsCount]);
       
-      console.log(`行 ${rowNumber} (targeting_id=${targetingId}): 通算(M=${totalCount}, N=${successSubmissionsCount}) 本日(O=${todayTotalCount}, P=${todaySuccessSubmissionsCount})`);
+      console.log(`行 ${rowNumber} (targeting_id=${targetingId}): 通算(N=${totalCount}, O=${successSubmissionsCount}) 本日(P=${todayTotalCount}, Q=${todaySuccessSubmissionsCount})`);
       successCount++;
     }
     
-    // M列・N列・O列・P列を一括更新（値のみ）
+    // N列・O列・P列・Q列を一括更新（値のみ）
     const mRange = targetingSheet.getRange(2, mColumnIndex, dataRowCount, 1);
     mRange.setValues(mColumnValues);
     
