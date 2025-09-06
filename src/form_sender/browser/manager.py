@@ -151,6 +151,7 @@ class BrowserManager:
             # 既存のコンテキストは極力再利用（GUI安定性優先）
             last_err: Optional[Exception] = None
             for i in range(2):
+                page: Optional[Page] = None
                 try:
                     # コンテキストが無い場合のみ作成
                     if not self.context:
@@ -189,14 +190,16 @@ class BrowserManager:
                 except PlaywrightTimeoutError as e:
                     last_err = e
                     try:
-                        await page.close()
+                        if page:
+                            await page.close()
                     except Exception:
                         pass
                     logger.error(f"Worker {self.worker_id}: Page load timeout for ***URL_REDACTED*** (attempt {i+1}/2)")
                 except Exception as e:
                     last_err = e
                     try:
-                        await page.close()
+                        if page:
+                            await page.close()
                     except Exception:
                         pass
                     # ターゲット/接続クローズは一度だけ再試行
