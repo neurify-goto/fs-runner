@@ -48,6 +48,23 @@ async def run_once(html_path: Path) -> Path:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_path = html_path.parent / f"analysis_result_rerun_{timestamp}.json"
 
+    def _make_json_serializable(obj):
+        if isinstance(obj, dict):
+            return {k: _make_json_serializable(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_make_json_serializable(x) for x in obj]
+        # Playwright Locator やページ要素などは文字列にフォールバック
+        try:
+            from playwright.async_api import Locator
+            if isinstance(obj, Locator):
+                return str(obj)
+        except Exception:
+            pass
+        # 任意オブジェクトは安全側で文字列化
+        if hasattr(obj, "__dict__"):
+            return str(obj)
+        return obj
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(ignore_https_errors=True, viewport={"width": 1366, "height": 900})
@@ -58,7 +75,7 @@ async def run_once(html_path: Path) -> Path:
         client_cfg = create_test_client_config()
         result = await analyzer.analyze_form(client_cfg)
 
-        serializable = result  # analyze_form 返却は JSON 直列化済みの想定
+        serializable = _make_json_serializable(result)
         with open(out_path, 'w', encoding='utf-8') as f:
             json.dump(serializable, f, ensure_ascii=False, indent=2)
 
