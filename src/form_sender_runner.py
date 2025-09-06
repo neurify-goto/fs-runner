@@ -25,6 +25,8 @@ from datetime import datetime, timezone, timedelta, date
 from typing import Optional, Dict, Any, List
 
 from supabase import create_client
+import random
+import time as _time
 
 from form_sender.worker.isolated_worker import IsolatedFormWorker
 from form_sender.security.log_sanitizer import setup_sanitized_logging
@@ -57,23 +59,42 @@ def _build_supabase_client():
     key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
     if not url or not key:
         raise RuntimeError('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY is required')
+    # 基本妥当性検証（https強制）
+    if not str(url).startswith('https://'):
+        raise ValueError('SUPABASE_URL must start with https://')
     return create_client(url, key)
 
 def _extract_max_daily_sends(client_data: Dict[str, Any]) -> Optional[int]:
+    """max_daily_sends を安全に抽出（正の整数のみ有効）"""
     try:
         targeting = client_data.get('targeting', {})
         mds = targeting.get('max_daily_sends')
         if mds is None:
             return None
         if isinstance(mds, str):
-            mds = int(mds.strip())
-        return int(mds)
+            s = mds.strip()
+            if not s.isdigit():
+                return None
+            mds = int(s)
+        mds = int(mds)
+        return mds if mds > 0 else None
     except Exception:
         return None
+
+_SUCC_CACHE: Dict[str, Any] = {}
 
 def _get_success_count_today_jst(supabase, targeting_id: int, target_date: date) -> int:
     """当日(JST)成功数をUTC境界で集計"""
     try:
+        # キャッシュキー（targeting_id + JST日付文字列）
+        key = f"{targeting_id}:{target_date.isoformat()}"
+        cfg = get_worker_config().get('runner', {})
+        cache_sec = int(cfg.get('success_count_cache_seconds', 30))
+        now = _time.time()
+        ent = _SUCC_CACHE.get(key)
+        if ent and (now - ent.get('ts', 0) < cache_sec):
+            return int(ent.get('count', 0))
+
         start_utc, end_utc = jst_utc_bounds(target_date)
         resp = (
             supabase.table('submissions')
@@ -85,10 +106,12 @@ def _get_success_count_today_jst(supabase, targeting_id: int, target_date: date)
             .execute()
         )
         cnt = getattr(resp, 'count', None)
-        if isinstance(cnt, int):
-            return cnt
-        data = getattr(resp, 'data', None) or []
-        return len(data)
+        if not isinstance(cnt, int):
+            data = getattr(resp, 'data', None) or []
+            cnt = len(data)
+        # 更新
+        _SUCC_CACHE[key] = {'count': int(cnt), 'ts': now}
+        return int(cnt)
     except Exception:
         return 0
 
@@ -295,7 +318,14 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                         logger.warning(f"daily cap check failed: {e}")
                 had_work = await _process_one(supabase, worker, targeting_id, client_data, target_date, run_id, shard_id, fixed_company_id)
                 if not had_work:
-                    await asyncio.sleep(backoff)
+                    # ジッター付き指数バックオフ（コンボイ緩和）
+                    try:
+                        jitter_ratio = float(get_worker_config().get('runner', {}).get('backoff_jitter_ratio', 0.2))
+                    except Exception:
+                        jitter_ratio = 0.2
+                    jitter = backoff * jitter_ratio
+                    sleep_for = max(0.1, backoff + random.uniform(-jitter, jitter))
+                    await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, backoff_max)
                 else:
                     backoff = backoff_initial
