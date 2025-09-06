@@ -198,7 +198,7 @@ class FieldPatterns:
             # カナ名フィールド (5-8) - 実システム必須
             
             # 5. 姓カナ (last_name_kana) - GAS/スプレッドシート必須 
-            "姓カナ": {
+        "姓カナ": {
                 "names": ["last_name_kana", "lastname_kana", "last-name-kana", "kana_last", "katakana_sei", 
                          "セイ", "カナ姓", "sei_kana", "family_kana", "lastname_katakana", "lastkananame"],
                 "ids": ["lastname_kana", "last_name_kana", "last-name-kana", "kana-last", "katakana-sei", "sei", "lastname_katakana", "lastkananame"],
@@ -212,7 +212,17 @@ class FieldPatterns:
                 # かな判定: フィールド名に"kana"が含まれているかで判断
                 "kana_indicator": ["kana", "カナ", "katakana"],
                 # 除外パターンから漢字フィールドを強く除外
-                "exclude_patterns": ["company", "会社", "corp", "corporation", "firm", "organization", "business", "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", "email", "mail", "メール", "subject", "件名", "message", "本文", "漢字", "氏名", "市町村", "都道府県", "prefecture", "city", "unified_name_field"]  # カナフィールド名は除外しない
+                "exclude_patterns": [
+                    "company", "会社", "corp", "corporation", "firm", "organization", "business",
+                    "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", 
+                    "email", "mail", "メール", "subject", "件名", "message", "本文", "漢字", 
+                    "氏名", "市町村", "都道府県", "prefecture", "city", "unified_name_field",
+                    # 認証/ログイン系の強い除外（一般化）
+                    "LOGIN_ID", "login_id", "login", "signin", "sign_in", "auth", "authentication",
+                    "PASSWORD", "password", "pass", "pswd",
+                    "OTP", "TOTP", "MFAOTP", "mfa", "otp", "totp",
+                    "captcha", "image_auth", "image-auth", "spam-block", "verify", "verification"
+                ]  # カナフィールド名は除外しない
             },
             
             # 6. 名カナ (first_name_kana) - GAS/スプレッドシート必須
@@ -229,7 +239,17 @@ class FieldPatterns:
                 "strict_patterns": ["メイ", "名カナ", "mei_kana", "firstname_kana", "katakana_mei", "kana"],
                 "kana_indicator": ["kana", "カナ", "katakana"],
                 # ふりがな系の属性名（furigana）は分割カナで一般的に使われるため除外しない
-                "exclude_patterns": ["company", "会社", "corp", "corporation", "firm", "organization", "business", "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", "email", "mail", "メール", "subject", "件名", "message", "本文", "漢字", "氏名", "市町村", "都道府県", "prefecture", "city", "town", "unified_name_field"]
+                "exclude_patterns": [
+                    "company", "会社", "corp", "corporation", "firm", "organization", "business",
+                    "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", 
+                    "email", "mail", "メール", "subject", "件名", "message", "本文", "漢字", 
+                    "氏名", "市町村", "都道府県", "prefecture", "city", "town", "unified_name_field",
+                    # 認証/ログイン系の強い除外（一般化）
+                    "LOGIN_ID", "login_id", "login", "signin", "sign_in", "auth", "authentication",
+                    "PASSWORD", "password", "pass", "pswd",
+                    "OTP", "TOTP", "MFAOTP", "mfa", "otp", "totp",
+                    "captcha", "image_auth", "image-auth", "spam-block", "verify", "verification"
+                ]
             },
             
             # 7. 姓ひらがな (last_name_hiragana) - GAS必須
@@ -499,8 +519,8 @@ class FieldPatterns:
                                    "郵便番号"]  # セマンティック除外強化: 郵便番号を除外追加
             },
             
-            # 20. お問い合わせ本文 (message) - 最重要
-            "お問い合わせ本文": {
+        # 20. お問い合わせ本文 (message) - 最重要
+        "お問い合わせ本文": {
                 "names": [
                     "message", "inquiry_body", "inquiry_content", "本文", "メッセージ",
                     "comment", "inquiry_message", "contact_message", "message_body",
@@ -537,7 +557,16 @@ class FieldPatterns:
                 "types": ["text"],
                 "tags": ["textarea", "input"],
                 "weight": 20,  # 最重要
-                "strict_patterns": ["本文", "メッセージ", "inquiry", "message", "comment", "ご質問・ご要望", "ご質問", "ご要望", "お問合せ", "お問合わせ", "お問い合わせ", "ご相談内容"]  # 厳密一致用に追加
+                "strict_patterns": ["本文", "メッセージ", "inquiry", "message", "comment", "ご質問・ご要望", "ご質問", "ご要望", "お問合せ", "お問合わせ", "お問い合わせ", "ご相談内容"],  # 厳密一致用に追加
+                # 認証/検索/ログイン関連のフィールドに誤割当てしないための除外
+                # 汎用改善: 問い合わせ本文はログイン/認証/検索には絶対にマッピングしない
+                "exclude_patterns": [
+                    "LOGIN_ID", "login_id", "login", "signin", "sign_in", "auth", "authentication",
+                    "PASSWORD", "password", "pass", "pswd",
+                    "OTP", "TOTP", "MFAOTP", "mfa", "otp", "totp",
+                    "captcha", "image_auth", "image-auth", "spam-block", "verify", "verification",
+                    "q", "search", "検索", "site-search", "keyword"
+                ]
             },
             
         # 21. 件名 (subject) - targeting情報・重要度高
@@ -585,10 +614,15 @@ class FieldPatterns:
                 # 分割（郵便番号1/2）を優先するため統合は相対的に低くする
                 "weight": 8,
                 "strict_patterns": ["郵便番号", "zip", "postal", "postcode", "zipcode"],
-                "exclude_patterns": ["address", "住所", "addr", "street", "building", 
-                                   "phone", "tel", "電話", "fax", "ファックス",
-                                   "your-name", "your_name", "name", "お名前", "fullname",
-                                   "email", "mail", "メール", "company", "会社"]
+                "exclude_patterns": [
+                    "address", "住所", "addr", "street", "building",
+                    "phone", "tel", "電話", "fax", "ファックス",
+                    "your-name", "your_name", "name", "お名前", "fullname",
+                    "email", "mail", "メール", "company", "会社",
+                    # 認証/確認系（誤検出抑止：CAPTCHA/OTP/トークン等）
+                    "captcha", "image_auth", "image-auth", "spam-block",
+                    "token", "otp", "totp", "mfa", "verification", "verify", "confirm", "確認"
+                ]
                 # 「郵便番号」自体は除外パターンから削除
             },
             

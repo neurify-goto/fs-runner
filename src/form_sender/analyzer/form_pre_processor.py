@@ -244,6 +244,7 @@ class FormPreProcessor:
             # スコアリング
             scores = {
                 'contact_form': 0.0,
+                'auth_form': 0.0,
                 'search_form': 0.0,
                 'newsletter_form': 0.0,
                 'order_form': 0.0,
@@ -258,6 +259,20 @@ class FormPreProcessor:
                 scores['contact_form'] += 2.0
             if cnt['email'] > 0:
                 scores['contact_form'] += 0.5  # 問い合わせでもよくある
+
+            # auth: password/otp/captcha/login tokens
+            # 強い指標: input[type=password] が存在
+            if any(' password ' in f' {tok} ' for tok in tokens) or any('otp' in tok or 'captcha' in tok for tok in tokens):
+                scores['auth_form'] += 1.0
+            try:
+                pwd_count = sum(1 for el in structured_elements if el.tag_name == 'input' and (el.element_type or '').lower() == 'password')
+            except Exception:
+                pwd_count = 0
+            if pwd_count > 0:
+                scores['auth_form'] += 3.0
+            auth_kw = ['login', 'signin', 'sign-in', 'sign_in', 'auth', 'authentication', 'ログイン', 'サインイン', 'パスワード', '認証', '二段階', 'ワンタイム', '確認コード', '認証コード', 'captcha', 'otp', 'mfa']
+            if any_token(auth_kw) or has_any(form_attr_text, auth_kw):
+                scores['auth_form'] += 2.0
 
             # search: search input or q/検索
             if cnt['search'] > 0:
@@ -299,22 +314,33 @@ class FormPreProcessor:
                     primary_type = 'other_form'
                     top_score = scores['other_form']
 
+            # auth_form は最優先で非対象扱い
+            if scores['auth_form'] >= max(scores['contact_form'], scores['newsletter_form'], scores['search_form'], scores['order_form'], scores['feedback_form'], scores['other_form']):
+                primary_type = 'auth_form'
+                top_score = scores['auth_form']
+
             # 信頼度（0-1に正規化の簡易版）
             confidence = min(1.0, max(0.0, top_score / 5.0))
 
             # 参考: 関連/非関連フィールド
-            if primary_type == 'newsletter_form':
+            if primary_type == 'auth_form':
+                relevant_fields = []
+                irrelevant_fields = list(self.field_patterns.get_patterns().keys())
+            elif primary_type == 'newsletter_form':
                 relevant_fields = ['メールアドレス']
+                irrelevant_fields = []
             elif primary_type == 'search_form':
                 relevant_fields = []
+                irrelevant_fields = []
             else:
                 relevant_fields = list(self.field_patterns.get_patterns().keys())
+                irrelevant_fields = []
 
             return {
                 'primary_type': primary_type,
                 'confidence': confidence,
                 'relevant_fields': relevant_fields,
-                'irrelevant_fields': []
+                'irrelevant_fields': irrelevant_fields
             }
         except Exception as e:
             logger.debug(f"detect_form_type failed, fallback to contact_form: {e}")

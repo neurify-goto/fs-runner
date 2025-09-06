@@ -325,7 +325,7 @@ class RuleBasedAnalyzer:
 
             # --- Build Result ---
             analysis_summary = self.result_builder.create_analysis_summary(
-                self.field_mapping, auto_handled, self.classifier.special_elements
+                self.field_mapping, auto_handled, self.classifier.special_elements, form_type_info.get('primary_type')
             )
             debug_info = self.result_builder.create_debug_info(self.unmapped_elements)
 

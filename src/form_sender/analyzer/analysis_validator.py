@@ -17,7 +17,7 @@ class AnalysisValidator:
         self.duplicate_prevention.clear_assignments()
         validation_issues = []
 
-        if form_type_info.get('primary_type') in ['search_form', 'feedback_form', 'order_form', 'newsletter_form', 'other_form']:
+        if form_type_info.get('primary_type') in ['search_form', 'feedback_form', 'order_form', 'newsletter_form', 'other_form', 'auth_form']:
             return True, []
 
         essential_fields = ['メールアドレス', 'お問い合わせ本文']
