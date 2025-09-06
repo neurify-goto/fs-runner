@@ -63,6 +63,11 @@ class InputValueAssigner:
             }
             if auto_action:
                 assign['auto_action'] = auto_action
+            # field_infoに自動動作指定がある場合は引き継ぐ（確認用メール等）
+            if field_info.get('auto_action'):
+                assign['auto_action'] = field_info.get('auto_action')
+            if field_info.get('copy_from_field'):
+                assign['copy_from_field'] = field_info.get('copy_from_field')
             assign.update(extra)
 
             input_assignments[field_name] = assign
@@ -78,6 +83,17 @@ class InputValueAssigner:
                 'value': value, 'required': field_info.get('required', False),
                 'auto_action': field_info.get('auto_action', 'default')
             }
+        # フォールバック: 単一フィールドの郵便番号にも7桁を投入
+        try:
+            if '郵便番号1' in input_assignments:
+                v = str(input_assignments['郵便番号1'].get('value', '') or '').strip()
+                if not v:
+                    client = client_data.get('client', {}) if isinstance(client_data, dict) else {}
+                    combined = (client.get('postal_code_1', '') or '') + (client.get('postal_code_2', '') or '')
+                    if combined.strip():
+                        input_assignments['郵便番号1']['value'] = combined
+        except Exception:
+            pass
         # 共通の取り違えを補正（例: sei/mei の入れ違い、sei_kana/mei_kanaの入れ違い）
         try:
             self._fix_name_selector_mismatch(field_mapping, input_assignments)

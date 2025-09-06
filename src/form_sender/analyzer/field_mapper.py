@@ -7,6 +7,7 @@ from .element_scorer import ElementScorer
 from .context_text_extractor import ContextTextExtractor
 from .field_patterns import FieldPatterns
 from .duplicate_prevention import DuplicatePreventionManager
+from src.config.manager import get_prefectures
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,65 @@ class FieldMapper:
                         map_ok = False
                 except Exception:
                     pass
+
+            # 郵便番号の安全ガード（CAPTCHA誤検出/汎用テキストへの誤割当て対策）
+            if map_ok and field_name == '郵便番号':
+                try:
+                    ei = (best_score_details or {}).get('element_info', {})
+                    attrs_blob = ' '.join([
+                        (ei.get('name') or ''), (ei.get('id') or ''), (ei.get('class') or ''), (ei.get('placeholder') or '')
+                    ]).lower()
+                    best_txt = (self.context_text_extractor.get_best_context_text(best_context) or '').lower() if best_context else ''
+                    # 強いポジティブシグナル
+                    pos_attr = any(t in attrs_blob for t in ['zip','postal','postcode','zipcode','郵便','〒'])
+                    pos_ctx = any(t in best_txt for t in ['郵便番号','郵便','〒','postal','zip'])
+                    # 強いネガティブシグナル（認証/確認系・CAPTCHA）
+                    neg = any(t in attrs_blob for t in ['captcha','image_auth','token','otp','verification','confirm','確認'])
+                    if not (pos_attr or pos_ctx) or neg:
+                        map_ok = False
+                except Exception:
+                    map_ok = False
+
+            # 都道府県の安全ガード（select誤検出対策）
+            if map_ok and field_name == '都道府県':
+                try:
+                    ei = (best_score_details or {}).get('element_info', {})
+                    tag = (ei.get('tag_name') or '').lower()
+                    attrs_blob = ' '.join([
+                        (ei.get('name') or ''), (ei.get('id') or ''), (ei.get('class') or ''), (ei.get('placeholder') or '')
+                    ]).lower()
+                    best_txt = (self.context_text_extractor.get_best_context_text(best_context) or '').lower() if best_context else ''
+
+                    # 1) 属性/文脈に prefecture を示す強いシグナル
+                    attr_hit = any(t in attrs_blob for t in ['prefecture', 'pref', 'todofuken', 'todouhuken'])
+                    ctx_hit = any(t in best_txt for t in ['都道府県', 'prefecture'])
+
+                    confident = False
+                    if attr_hit or ctx_hit:
+                        confident = True
+                    elif tag == 'select':
+                        # 2) selectオプションの中に都道府県名が一定数以上含まれる
+                        try:
+                            pref_list = [p.lower() for p in (get_prefectures().get('names') or [])]
+                        except Exception:
+                            pref_list = []
+                        try:
+                            options = await best_element.evaluate("""
+                                el => Array.from(el.querySelectorAll('option')).map(o => (o.textContent||'').trim())
+                            """)
+                        except Exception:
+                            options = []
+                        lowered = [str(o).lower() for o in options]
+                        hits = sum(1 for p in pref_list if any(p in o for o in lowered)) if pref_list else 0
+                        # 47都道府県のうち5件以上一致を閾値とする（CMSの一部サンプル短縮も考慮）
+                        if hits >= 5:
+                            confident = True
+
+                    if not confident:
+                        map_ok = False
+                except Exception:
+                    # 失敗時は安全側（マッピングしない）
+                    map_ok = False
 
             if map_ok:
                 element_info = await self._create_enhanced_element_info(best_element, best_score_details, best_context)
@@ -448,7 +508,8 @@ class FieldMapper:
         - 既に『郵便番号』が確定している場合は何もしない
         """
         target_field = '郵便番号'
-        if target_field in field_mapping:
+        # 既に統合/分割いずれかの郵便番号が確定している場合は重複生成しない
+        if target_field in field_mapping or any(k.startswith('郵便番号') for k in field_mapping.keys()):
             return
         candidates = (classified_elements.get('tel_inputs') or []) + (classified_elements.get('text_inputs') or [])
         if not candidates:
@@ -614,6 +675,13 @@ class FieldMapper:
                             ctx_texts = ' '.join([(getattr(c,'text','') or '') for c in (contexts or [])])
                             if any(t in ctx_texts for t in ['ふりがな','フリガナ','カナ','かな']):
                                 field_name = '統合氏名カナ'
+                            else:
+                                # 確認用メールアドレスを救済（auto_email_confirm_*）
+                                if self._is_confirmation_field(ei, contexts) or any(
+                                    t in (ei.get('name','').lower() + ' ' + ei.get('id','').lower())
+                                    for t in ['mail2','email2','email_check','mail_check','confirm-email','email-confirm']
+                                ):
+                                    field_name = f'auto_email_confirm_{auto_counter}'
                     except Exception:
                         pass
 
@@ -645,6 +713,14 @@ class FieldMapper:
                     except Exception:
                         pass
                     info['required'] = True
+                    # 確認用メールアドレスの場合はコピー動作を指示
+                    if field_name.startswith('auto_email_confirm_'):
+                        info['input_type'] = 'email'
+                        try:
+                            info['auto_action'] = 'copy_from'
+                            info['copy_from_field'] = 'メールアドレス'
+                        except Exception:
+                            pass
 
                     temp_value = self._generate_temp_field_value(field_name)
                     # 重複抑止にも救済スコアを渡しておく（後続の参照整合のため）
