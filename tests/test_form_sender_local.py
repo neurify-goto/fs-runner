@@ -41,6 +41,13 @@ try:
 except ImportError:
     DOTENV_AVAILABLE = False
 
+# Supabase client availability
+try:
+    from supabase import create_client
+    SUPABASE_AVAILABLE = True
+except Exception:
+    SUPABASE_AVAILABLE = False
+
 # プロジェクトルートをパスに追加
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -167,6 +174,32 @@ def load_env_variables():
     
     return env_vars
 
+def _queue_has_pending(targeting_id: int) -> bool:
+    """send_queue に当日・指定targetingの pending があるか確認"""
+    if not SUPABASE_AVAILABLE:
+        return False
+    url = os.getenv('SUPABASE_URL')
+    key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+    if not url or not key:
+        return False
+    from datetime import datetime, timedelta, timezone
+    jst = timezone(timedelta(hours=9))
+    date_jst = datetime.now(jst).date().isoformat()
+    sb = create_client(url, key)
+    try:
+        resp = (
+            sb.table('send_queue')
+              .select('id')
+              .eq('target_date_jst', date_jst)
+              .eq('targeting_id', targeting_id)
+              .eq('status', 'pending')
+              .limit(1)
+              .execute()
+        )
+        return bool(resp.data)
+    except Exception:
+        return False
+
 
 def run_form_sender_test(company_id=None, nolimit: bool = False):
     """
@@ -182,46 +215,63 @@ def run_form_sender_test(company_id=None, nolimit: bool = False):
     # テスト設定ファイル作成
     config_file = create_test_config_file(company_id)
     
-    # 実行コマンド構築
-    form_sender_script = project_root / "src" / "form_sender_worker.py"
-    
+    # 実行コマンド構築（新Runner）
+    form_sender_script = project_root / "src" / "form_sender_runner.py"
+
     if not form_sender_script.exists():
-        print(f"❌ Form Senderスクリプトが見つかりません: {form_sender_script}")
+        print(f"❌ Form Sender Runner が見つかりません: {form_sender_script}")
         sys.exit(1)
-    
+
+    # ヘッドレス切替: 既定=GUI, --nolimit=ヘッドレス
+    headless_flag = "true" if nolimit else "false"
     cmd = [
-        sys.executable,  # 現在のPythonインタープリター
+        sys.executable,
         str(form_sender_script),
         "--targeting-id", "1",
         "--config-file", config_file,
-        "--headless", "false",  # GUI モード強制（ローカル方針）
+        "--headless", headless_flag,
     ]
-    # 件数・ワーカー抑制（--test-batch-size）は既定で1件のみ。
-    # --nolimit 指定時は抑制を外し、src/form_sender_worker.py の既定挙動に委ねる。
+
+    # 既定: 1ワーカー・1送信のみで終了（send_queueからclaim）
     if not nolimit:
-        cmd += ["--test-batch-size", "1"]  # 既定：安全に1件のみ
-    # 既定で quiet。--show-mapping-logs 指定時のみ解除を伝播
+        cmd += ["--num-workers", "1", "--max-processed", "1"]
+        if company_id is None:
+            # send_queue に pending が無い場合は案内して終了
+            if not _queue_has_pending(1):
+                _safe_print("⚠️ send_queue に当日 pending が見つかりませんでした（targeting_id=1）")
+                _safe_print("   GAS で buildSendQueueForAllTargetings() を実行して当日キューを作成してください")
+                _safe_print("   もしくは --company-id で単体企業を指定して実行できます")
+                return
+        else:
+            # 明示指定があればキューを使わず単体処理
+            cmd += ["--company-id", str(company_id)]
+    else:
+        # --nolimit: 4ワーカー・送信数無制限（キュー駆動推奨）
+        cmd += ["--num-workers", "4"]
+        if company_id is not None:
+            cmd += ["--company-id", str(company_id)]
+
+    # 既定で quiet。--show-mapping-logs 指定時のみ解除を伝播（Runnerは参照しないが互換維持）
     if '--show-mapping-logs' in sys.argv:
         cmd.append('--show-mapping-logs')
         env_vars['QUIET_MAPPING_LOGS'] = '0'
     
-    _safe_print(f"ℹ️   instruction_json統合機能テスト:")
-    _safe_print(f"    - RuleBasedAnalyzerで生成されたinstruction_jsonがあれば自動使用")
-    _safe_print(f"    - input_assignmentsによる高度なフィールドマッピング実行")
-    _safe_print(f"    - 分割フィールド（姓名、郵便番号等）の自動結合対応")
+    _safe_print(f"ℹ️   Runnerテスト: send_queueを使用せず --company-id 指定時は直接処理で検証")
     
     if company_id is not None:
         _safe_print(f"🎯 企業指定モード: companies.id = {company_id}")
         _safe_print(f"    - 指定された企業のみを処理対象とします")
     else:
-        _safe_print(f"🎲 ランダム取得モード: targeting_id = 1")
-        _safe_print(f"    - 条件に合致する企業からランダムに1件を処理")
+        _safe_print(f"📥 キューモード: send_queue から pending を1件claim (targeting_id=1)")
     
     _safe_print(f"🚀 Form Sender ローカルテスト実行開始")
     if nolimit:
         _safe_print("🧩 実行モード: 制限なし（件数・ワーカー抑制なし。既定設定に従う）")
     _safe_print(f"📋 実行コマンド: {' '.join(cmd)}")
-    _safe_print(f"🖥️  GUI モード (ブラウザウィンドウが表示されます)")
+    if headless_flag == "false":
+        _safe_print(f"🖥️  GUI モード (ブラウザウィンドウが表示されます)")
+    else:
+        _safe_print(f"🤖 ヘッドレスモード (--nolimit)")
     if nolimit:
         _safe_print("📦 テスト設定: 抑制なし（バッチ・ワーカーは設定/実装に従う）")
     else:
@@ -276,7 +326,7 @@ def main():
   # マッピング関連ログを表示（既定は抑制）
   python tests/test_form_sender_local.py --show-mapping-logs
 
-  # 件数・ワーカー抑制なし（既定挙動に委ねる）
+  # 件数・ワーカー抑制なし（Runner本番相当：4ワーカー・上限なし）
   python tests/test_form_sender_local.py --nolimit
         """
     )
@@ -293,7 +343,7 @@ def main():
     parser.add_argument(
         '--nolimit',
         action='store_true',
-        help='件数・ワーカーの抑制を解除し、src/form_sender_worker.py の既定挙動で実行する'
+        help='件数・ワーカーの抑制を解除し、Runner本番相当（4ワーカー・上限なし）で実行する'
     )
     
     args = parser.parse_args()
@@ -340,8 +390,8 @@ def main():
         _safe_print(f"🎯 企業ID指定: {args.company_id}")
         _safe_print("ℹ️  指定企業のデータをSupabaseから取得してテスト実行します")
     else:
-        _safe_print("🎲 ランダム取得モード")
-        _safe_print("ℹ️  targeting_id=1の条件に基づいてランダムに企業を選択します")
+        _safe_print("📥 キューモード（既定）")
+        _safe_print("ℹ️  send_queue から targeting_id=1 の pending をclaimします")
 
     # ログモード案内（マッピング関連のみ）
     if args.show_mapping_logs:

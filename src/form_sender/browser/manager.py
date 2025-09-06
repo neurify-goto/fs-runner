@@ -4,6 +4,7 @@ Playwrightブラウザのライフサイクル管理
 import asyncio
 import logging
 import os
+import platform
 from typing import Optional, Dict, Any, List
 
 from playwright.async_api import (
@@ -37,9 +38,9 @@ class BrowserManager:
         worker_cfg = self.config.get("worker_config", {})
         browser_cfg = worker_cfg.get("browser", {})
         rb_cfg = browser_cfg.get("resource_blocking", {})
-        # 既定はブロックしない（安定性を優先）。設定で上書き可能。
-        self._rb_block_images = bool(rb_cfg.get("block_images", False))
-        self._rb_block_fonts = bool(rb_cfg.get("block_fonts", False))
+        # 既定は設計方針に合わせてブロックON（画像/フォント）。設定で上書き可能。
+        self._rb_block_images = bool(rb_cfg.get("block_images", True))
+        self._rb_block_fonts = bool(rb_cfg.get("block_fonts", True))
         self._rb_block_stylesheets = bool(rb_cfg.get("block_stylesheets", False))
 
     async def launch(self) -> bool:
@@ -65,12 +66,40 @@ class BrowserManager:
             mode_desc = "headless" if use_headless else "GUI"
             logger.info(f"Worker {self.worker_id}: Using {mode_desc} mode")
 
-            self.browser = await self.playwright.chromium.launch(
-                headless=use_headless,
-                args=browser_args,
-                timeout=launch_timeout,
-                **({"slow_mo": 100} if is_github_actions else {}),
-            )
+            # slow_mo はデフォルト無効。必要時のみ環境変数で指定（ms）
+            slow_env = os.getenv('PLAYWRIGHT_SLOW_MO_MS', '').strip()
+            slow_kw = {}
+            if slow_env.isdigit() and int(slow_env) > 0:
+                slow_kw = {"slow_mo": int(slow_env)}
+
+            # macOS の GUI 実行ではシステムの Chrome を優先利用（安定化）
+            use_chrome_channel = (platform.system().lower() == 'darwin' and not use_headless and not is_github_actions)
+            launch_succeeded = False
+            last_err: Optional[Exception] = None
+
+            if use_chrome_channel:
+                try:
+                    self.browser = await self.playwright.chromium.launch(
+                        headless=False,
+                        channel='chrome',  # システム Chrome 経由
+                        timeout=launch_timeout,
+                        **slow_kw,
+                    )
+                    launch_succeeded = True
+                    logger.info(f"Worker {self.worker_id}: Launched system Chrome via channel")
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"Worker {self.worker_id}: Failed to launch system Chrome, falling back to bundled Chromium: {e}")
+
+            if not launch_succeeded:
+                # 既定: バンドルされた Chromium を利用
+                self.browser = await self.playwright.chromium.launch(
+                    headless=use_headless,
+                    args=browser_args,
+                    timeout=launch_timeout,
+                    **slow_kw,
+                )
+
             # 環境に関わらず、起動直後は短い待機を入れて安定化
             await asyncio.sleep(0.5 if not is_github_actions else 1.0)
 
@@ -83,9 +112,13 @@ class BrowserManager:
 
     def _get_browser_args(self, is_github_actions: bool) -> List[str]:
         """起動時のブラウザ引数を取得する"""
+        # ローカル（macOS等）では安定性を最優先し、ブラウザ引数は極力付けない
+        if not is_github_actions and platform.system().lower() == 'darwin':
+            return []
+
         base_args = [
             "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-            "--disable-software-rasterizer", "--disable-web-security", 
+            "--disable-software-rasterizer", "--disable-web-security",
             "--disable-extensions", "--disable-plugins", "--disable-images", "--no-first-run",
             "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
             "--disable-backgrounding-occluded-windows", "--disable-ipc-flooding-protection",
@@ -115,46 +148,61 @@ class BrowserManager:
             raise ConnectionError(f"Browser connection lost: {e}")
 
         try:
-            # 既存のコンテキストをクリーンアップ
-            if self.context:
-                try:
-                    await self.context.close()
-                except Exception:
-                    pass  # 既に閉じている場合は無視
-                    
-            # 新しいコンテキストを作成して保持（短い再試行付き）
+            # 既存のコンテキストは極力再利用（GUI安定性優先）
             last_err: Optional[Exception] = None
+            page: Optional[Page] = None  # retryスコープ外で初期化して参照安全性を確保
             for i in range(2):
+                page = None
                 try:
-                    self.context = await self.browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                    )
+                    # コンテキストが無い場合のみ作成
+                    if not self.context:
+                        if platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None):
+                            self.context = await self.browser.new_context()
+                        else:
+                            self.context = await self.browser.new_context(
+                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                            )
+                    # 新規ページをオープン
                     page = await self.context.new_page()
+                    # 資源ブロックは常に有効化（計画: 画像ブロックON、フォントON）。
+                    # UAの変更はmacOS GUIでは避けて安定性を優先。
                     await self._setup_resource_blocking_routes(page)
-                    await page.set_extra_http_headers({
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    })
+                    if not (platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None)):
+                        await page.set_extra_http_headers({
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        })
 
                     logger.info(f"Worker {self.worker_id}: Accessing target form page: ***URL_REDACTED***")
-                    # 初期ロードはdomcontentloadedを優先（networkidleは広告/解析で吊ることがある）
+                    # 初期ロードは macOS GUI でも安定性重視で 'domcontentloaded' を既定とする
+                    # （一部サイトで 'load' 待機中に対象が閉じられる事象を回避）
+                    wait_state = 'domcontentloaded'
                     await page.goto(
                         form_url,
                         timeout=int(self.timeout_settings.get("page_load", 30000)),
-                        wait_until="domcontentloaded",
+                        wait_until=wait_state,
                     )
-                    # 追加で短いnetworkidleを試みる（失敗しても続行）
-                    try:
-                        await page.wait_for_load_state('networkidle', timeout=5000)
-                    except Exception:
-                        pass
+                    # 追加の待機はローカルGUIでは行わない（安定優先）
+                    if not (platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None)):
+                        try:
+                            await page.wait_for_load_state('networkidle', timeout=5000)
+                        except Exception:
+                            pass
                     return page
                 except PlaywrightTimeoutError as e:
                     last_err = e
-                    await self._cleanup_context_on_error()
+                    try:
+                        if page:
+                            await page.close()
+                    except Exception:
+                        pass
                     logger.error(f"Worker {self.worker_id}: Page load timeout for ***URL_REDACTED*** (attempt {i+1}/2)")
                 except Exception as e:
                     last_err = e
-                    await self._cleanup_context_on_error()
+                    try:
+                        if page:
+                            await page.close()
+                    except Exception:
+                        pass
                     # ターゲット/接続クローズは一度だけ再試行
                     if any(k in str(e) for k in ["Target page", "Connection closed", "Browser connection lost"]):
                         logger.warning(f"Worker {self.worker_id}: Retrying after transient page error (attempt {i+1}/2): {e}")
@@ -167,12 +215,18 @@ class BrowserManager:
 
         except PlaywrightTimeoutError as e:
             # エラー時のクリーンアップ
-            await self._cleanup_context_on_error()
+            try:
+                await self._cleanup_context_on_error()
+            except Exception:
+                pass
             logger.error(f"Worker {self.worker_id}: Page load timeout for ***URL_REDACTED***")
             raise e
         except Exception as e:
             # エラー時のクリーンアップ
-            await self._cleanup_context_on_error()
+            try:
+                await self._cleanup_context_on_error()
+            except Exception:
+                pass
             logger.error(f"Worker {self.worker_id}: Page access error for ***URL_REDACTED*** {e}")
             raise e
 
@@ -200,14 +254,17 @@ class BrowserManager:
 
     async def _cleanup_context_on_error(self):
         """エラー時のコンテキストクリーンアップ"""
-        if self.context:
-            try:
-                await self.context.close()
-                logger.debug(f"Worker {self.worker_id}: Context cleaned up after error")
-            except Exception:
-                pass  # エラー時のクリーンアップなので例外は無視
-            finally:
-                self.context = None
+        # ページ起因のエラーではページのみを閉じ、コンテキストは維持して安定化
+        try:
+            if self.context:
+                pages = self.context.pages
+                for p in pages:
+                    try:
+                        await p.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     async def close(self):
         """ブラウザとPlaywrightインスタンスを閉じる"""

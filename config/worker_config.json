@@ -39,6 +39,7 @@
       "element_wait": 15000,
       "click_timeout": 5000,
       "input_timeout": 5000,
+      "post_input_delay_ms": 200,
       "pre_processing_max": 30000,
       "dynamic_message_wait": 15000,
       "dom_monitoring": 8000,
@@ -100,7 +101,7 @@
   },
   "browser": {
     "resource_blocking": {
-      "block_images": false,
+      "block_images": true,
       "block_fonts": true,
       "block_stylesheets": false
     }
@@ -139,6 +140,12 @@
     "memory_limit_mb": 1024,
     "cpu_limit_percent": 80,
     "network_timeout_seconds": 30
+  },
+  "runner": {
+    "backoff_initial": 2,
+    "backoff_max": 60,
+    "success_count_cache_seconds": 30,
+    "backoff_jitter_ratio": 0.2
   },
   "_comment_form_finder": "Form-Finder用マルチプロセス設定（軽量フォーム探索処理に最適化）",
   "_comment_form_finder_priority": "設定優先順位: form_finder_multi_process専用設定を使用、フォールバックは旧multi_process設定",
