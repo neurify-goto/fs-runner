@@ -217,6 +217,23 @@ class InputValueAssigner:
             pv = self.field_combination_manager.get_field_value_for_type('郵便番号', 'single', client_data)
             return _format_postal(pv)
 
+        # auto_required_text_* が電話番号相当である場合の救済（必須検出由来の匿名テキスト欄）
+        if field_name.startswith('auto_required_text_'):
+            try:
+                blob = ' '.join([
+                    str(field_info.get('name','') or ''),
+                    str(field_info.get('id','') or ''),
+                    str(field_info.get('class','') or ''),
+                    str(field_info.get('placeholder','') or ''),
+                    str(field_info.get('best_context_text','') or ''),
+                ]).lower()
+                phone_hints = ['tel', 'phone', 'telephone', 'mobile', '携帯', '電話']
+                if any(h in blob for h in phone_hints):
+                    phv = self.field_combination_manager.get_field_value_for_type('電話番号', 'single', client_data)
+                    return _format_phone(phv or value)
+            except Exception:
+                pass
+
         if field_name == '電話番号':
             phv = self.field_combination_manager.get_field_value_for_type('電話番号', 'single', client_data)
             return _format_phone(phv or value)

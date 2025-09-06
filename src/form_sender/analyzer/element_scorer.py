@@ -772,6 +772,29 @@ class ElementScorer:
         total_score = 0
         placeholder_lower = placeholder.lower()
 
+        # 安全ガード: 『会社名』系の曖昧一致抑止
+        # 背景: プレースホルダーが『名』である氏名フィールドが、
+        #       パターン『会社名』に対して逆包含的に誤加点される事例があった。
+        # 対策: 『会社名』フィールドでは、プレースホルダーに企業を示唆する語が
+        #       一切含まれない場合は placeholder マッチを無効化する。
+        if field_name == '会社名':
+            # 多言語対応の企業性ヒント
+            # - 日本語: 会社/企業/法人/団体/組織/社名/御社/貴社 など
+            # - 英語: company/corporation/corporate/corp/organization/organisation/business/enterprise/firm/employer
+            #   及び "company name"/"corporate name"/"business name" 等のフレーズ
+            jp_hints = ['会社', '企業', '法人', '団体', '組織', '社名', '御社', '貴社',
+                        '会社・団体', '店舗', '病院', '施設', '学校', '大学', '園', '館', '事業者', '屋号']
+            import re
+            en_word_boundary = re.compile(r"\b(company|companies|corp|corporation|corporate|organization|organisation|business|enterprise|firm|employer)\b")
+            en_phrase = re.compile(r"\b(company\s+name|corporate\s+name|organization\s+name|organisation\s+name|business\s+name|enterprise\s+name|employer\s+name)\b")
+
+            has_jp = any(h in placeholder_lower for h in jp_hints)
+            has_en = bool(en_word_boundary.search(placeholder_lower) or en_phrase.search(placeholder_lower))
+
+            if not (has_jp or has_en):
+                # 企業性を示すヒントがなければ placeholder による加点はしない
+                pattern_placeholders = []
+
         # 非カナ氏名フィールドは『ふりがな/カナ/ひらがな』を含むplaceholderを無効化
         kana_like_tokens = ['kana', 'katakana', 'hiragana', 'furigana', 'カナ', 'カタカナ', 'フリガナ', 'ふりがな', 'ひらがな']
         if field_name in {'姓', '名', '統合氏名'} and any(tok in placeholder_lower for tok in kana_like_tokens):
@@ -1572,6 +1595,42 @@ class ElementScorer:
 
             # 6) 並列グループ内の必須マーカー検出（新規追加）
             if parallel_groups and await self._detect_required_in_parallel_group(element, parallel_groups):
+                return True
+
+            # 6.5) 追加フォールバック: 親→前方兄弟ブロックの明示『必須』検出
+            # 事例: <div class="contact__title"><p>ふりがな</p><p>必須</p></div>
+            #       <input name="姓ふりがな"> <input name="名ふりがな">
+            # 入力要素の直近親から最大3階層まで遡り、それぞれの直前の兄弟ブロック（最大3つ）に
+            # 『必須/Required/Mandatory/Must』が含まれていれば必須とみなす。
+            try:
+                extended_mark = await element.evaluate("""
+                    el => {
+                      const MARKS = ['必須','required','Required','MANDATORY','Mandatory','Must'];
+                      const hasReq = (node) => {
+                        if (!node) return false;
+                        try {
+                          const txt = (node.innerText || node.textContent || '').trim();
+                          if (!txt) return false;
+                          return MARKS.some(m => txt.includes(m));
+                        } catch { return false; }
+                      };
+                      let p = el.parentElement;
+                      for (let depth = 0; p && depth < 3; depth++) {
+                        let sib = p.previousElementSibling;
+                        let steps = 0;
+                        while (sib && steps < 3) {
+                          if (hasReq(sib)) return true;
+                          sib = sib.previousElementSibling;
+                          steps++;
+                        }
+                        p = p.parentElement;
+                      }
+                      return false;
+                    }
+                """)
+            except Exception:
+                extended_mark = False
+            if extended_mark:
                 return True
 
             return False
