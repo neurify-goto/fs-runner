@@ -69,23 +69,34 @@ jobs:
       run: |
         python src/save_client_config.py
 
-    - name: Determine execution mode
+    - name: Determine execution mode and worker count
       run: |
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           echo "TEST_MODE=${{ github.event.inputs.test_mode }}" >> $GITHUB_ENV
           echo "TARGETING_ID=${{ github.event.inputs.targeting_id }}" >> $GITHUB_ENV
+          # workflow_dispatchではNUM_WORKERSは未指定のため既定値4を使用
+          RAW_NUM_WORKERS="4"
           echo "Running via WORKFLOW DISPATCH: targeting_id=${{ github.event.inputs.targeting_id }}, test_mode=${{ github.event.inputs.test_mode }}"
         elif [ "${{ github.event.action }}" = "form_sender_test" ]; then
           echo "TEST_MODE=true" >> $GITHUB_ENV
           echo "TARGETING_ID=1" >> $GITHUB_ENV
+          RAW_NUM_WORKERS="${{ github.event.client_payload.workers_per_workflow || 4 }}"
           echo "Running in TEST MODE with targeting_id=1"
         else
           echo "TEST_MODE=false" >> $GITHUB_ENV
           echo "TARGETING_ID=${{ github.event.client_payload.targeting_id }}" >> $GITHUB_ENV
+          RAW_NUM_WORKERS="${{ github.event.client_payload.workers_per_workflow || 4 }}"
           echo "Running in PRODUCTION MODE"
         fi
 
-    - name: Run Form Sender Runner (Queue-driven 4 workers)
+        # 1〜4 にクランプ（非数値・範囲外は安全側で4）
+        case "$RAW_NUM_WORKERS" in
+          1|2|3|4) NUM_WORKERS="$RAW_NUM_WORKERS" ;;
+          *) NUM_WORKERS="4" ;;
+        esac
+        echo "NUM_WORKERS=$NUM_WORKERS" >> $GITHUB_ENV
+
+    - name: Run Form Sender Runner (Queue-driven workers)
       id: worker
       run: |
         echo "Starting multi-process form sender worker..."
@@ -96,13 +107,13 @@ jobs:
           python src/form_sender_runner.py \
             --targeting-id "${{ env.TARGETING_ID }}" \
             --config-file "/tmp/client_config_*.json" \
-            --num-workers 4
+            --num-workers "${NUM_WORKERS}"
         else
           echo "Executing in PRODUCTION MODE"
           python src/form_sender_runner.py \
             --targeting-id "${{ env.TARGETING_ID }}" \
             --config-file "/tmp/client_config_*.json" \
-            --num-workers 4
+            --num-workers "${NUM_WORKERS}"
         fi
       env:
         PYTHONPATH: ${{ github.workspace }}/src

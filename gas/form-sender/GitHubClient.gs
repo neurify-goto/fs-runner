@@ -74,6 +74,10 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = 
       payload.client_payload.concurrent_workflow = cw;
       if (runIndex !== null) payload.client_payload.run_index = runIndex;
       if (runTotal !== null) payload.client_payload.run_total = runTotal;
+      // 1ワークフロー内ワーカー数（Code.gsのCONFIG由来、1〜4にクランプ）
+      const rawWorkers = (typeof CONFIG?.WORKERS_PER_WORKFLOW !== 'undefined') ? CONFIG.WORKERS_PER_WORKFLOW : 1;
+      const w = Math.min(4, Math.max(1, parseInt(rawWorkers) || 1));
+      payload.client_payload.workers_per_workflow = w;
     } catch (e) {
       // 解析失敗時は無視（後方互換）
     }
