@@ -43,7 +43,8 @@ class FormInputHandler:
         try:
             input_success = await self._fill_element(element, value, input_type, field_name, field_info)
             if input_success:
-                await self.page.wait_for_timeout(500)  # 短時間待機
+                # 短時間待機（デフォルト500ms→200msに短縮。必要時は検証NGで再入力が走る）
+                await self.page.wait_for_timeout(200)
                 verification_success = await self._verify_field_input(element, field_name, input_type, value)
                 if verification_success:
                     self.logger.info(f"Field operation completed successfully - {field_name}")

@@ -6,7 +6,7 @@ from .element_scorer import ElementScorer
 from .context_text_extractor import ContextTextExtractor
 from .field_combination_manager import FieldCombinationManager
 from .form_structure_analyzer import FormStructure
-from src.config.manager import get_prefectures
+from config.manager import get_prefectures
 
 logger = logging.getLogger(__name__)
 

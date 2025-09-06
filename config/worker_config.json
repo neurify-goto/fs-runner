@@ -100,7 +100,7 @@
   },
   "browser": {
     "resource_blocking": {
-      "block_images": false,
+      "block_images": true,
       "block_fonts": true,
       "block_stylesheets": false
     }
