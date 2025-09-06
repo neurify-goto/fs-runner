@@ -94,22 +94,34 @@ class UnmappedElementHandler:
             return {}
 
         auto_handled = {}
-        mapped_element_ids = {id(info["element"]) for info in field_mapping.values()}
+
+        # 先に『統合氏名/統合氏名カナ』が name1/name2 / kana1/kana2 のような分割ペアに誤割当てされていないかを確認し、
+        # 該当する場合は統合マッピングを降格して分割入力を優先できるようにする（汎用・安全）。
+        try:
+            self._demote_unified_name_for_indexed_pairs(classified_elements, field_mapping)
+            self._demote_unified_kana_for_indexed_pairs(classified_elements, field_mapping)
+        except Exception as e:
+            logger.debug(f"unified demotion skipped: {e}")
+
+        mapped_element_ids = {id(info.get("element")) for info in field_mapping.values() if isinstance(info, dict) and info.get("element")}
 
         checkbox_handled = await self._auto_handle_checkboxes(
             classified_elements.get("checkboxes", []), mapped_element_ids
         )
         auto_handled.update(checkbox_handled)
+        mapped_element_ids.update({id(v.get("element")) for v in checkbox_handled.values() if isinstance(v, dict) and v.get("element")})
 
         radio_handled = await self._auto_handle_radios(
             classified_elements.get("radios", []), mapped_element_ids, client_data
         )
         auto_handled.update(radio_handled)
+        mapped_element_ids.update({id(v.get("element")) for v in radio_handled.values() if isinstance(v, dict) and v.get("element")})
 
         select_handled = await self._auto_handle_selects(
             classified_elements.get("selects", []), mapped_element_ids, client_data
         )
         auto_handled.update(select_handled)
+        mapped_element_ids.update({id(v.get("element")) for v in select_handled.values() if isinstance(v, dict) and v.get("element")})
 
         # 汎用昇格: 都道府県フィールド（select/text）が未マッピングなら field_mapping に昇格
         try:
@@ -140,20 +152,27 @@ class UnmappedElementHandler:
             )
             auto_handled.update(fullname_handled)
 
-        # 統合カナが既にマッピング済み、または分割カナ(姓カナ/名カナ)が両方揃っている場合は
-        # auto_unified_kana_* の生成を抑止して重複入力を防ぐ
+        # カナ処理（順序調整版）: 配列/インデックス処理で '姓カナ'/'名カナ' を先に確定させ、
+        # その後に必要であれば統合カナの救済を行う。
         has_unified_kana = "統合氏名カナ" in field_mapping
         has_split_kana = ("姓カナ" in field_mapping) and ("名カナ" in field_mapping)
         if not (has_unified_kana or has_split_kana):
             text_inputs = classified_elements.get("text_inputs", [])
-            # まず分割カナ（セイ/メイ）候補が2つ以上揃っているかを軽量判定
+            # まず分割カナの自動処理を試みる（セイ/メイ のヒント検索）
             last_like, first_like = None, None
+            indexed_kana_pair_present = False
             for el in text_inputs:
                 try:
+                    if id(el) in mapped_element_ids:
+                        continue
                     info = await self.element_scorer._get_element_info(el)
                     if not info.get("visible", True):
                         continue
                     name_id_cls = " ".join([info.get("name",""), info.get("id",""), info.get("class","")]).lower()
+                    nm = (info.get("name","") or "").lower()
+                    if nm in ("kana1","kana_1","kana2","kana_2"):
+                        # どちらか一方でも見つかれば候補
+                        indexed_kana_pair_present = indexed_kana_pair_present or (nm in ("kana1","kana_1"))
                     contexts = await self.context_text_extractor.extract_context_for_element(el)
                     best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
                     kana_like = ("kana" in name_id_cls) or ("furigana" in name_id_cls) or ("katakana" in name_id_cls) or ("カナ" in best) or ("フリガナ" in best) or ("ふりがな" in best)
@@ -168,7 +187,8 @@ class UnmappedElementHandler:
             if last_like and first_like:
                 kana_split = await self._auto_handle_split_kana(text_inputs, mapped_element_ids, client_data)
                 auto_handled.update(kana_split)
-            else:
+                mapped_element_ids.update({id(v.get("element")) for v in kana_split.values() if isinstance(v, dict) and v.get("element")})
+            elif not indexed_kana_pair_present:
                 kana_handled = await self._auto_handle_unified_kana(
                     text_inputs,
                     mapped_element_ids,
@@ -176,6 +196,8 @@ class UnmappedElementHandler:
                     form_structure,
                 )
                 auto_handled.update(kana_handled)
+                mapped_element_ids.update({id(v.get("element")) for v in kana_handled.values() if isinstance(v, dict) and v.get("element")})
+            # indexed_kana_pair_present の場合は、この後のインデックス処理で安全に分割カナを割当てる
 
         # 任意のFAXフィールドがある場合、電話番号で補完（必須でない場合のみ）
         try:
@@ -192,8 +214,19 @@ class UnmappedElementHandler:
                 classified_elements.get("text_inputs", []) or [], mapped_element_ids
             )
             auto_handled.update(split_name)
+            mapped_element_ids.update({id(v.get("element")) for v in split_name.values() if isinstance(v, dict) and v.get("element")})
         except Exception as e:
             logger.debug(f"Auto handle split name arrays skipped: {e}")
+
+        # name1/name2, kana1/kana2 形式の汎用処理
+        try:
+            indexed_pairs = await self._auto_handle_indexed_name_pairs(
+                classified_elements.get("text_inputs", []) or [], mapped_element_ids
+            )
+            auto_handled.update(indexed_pairs)
+            mapped_element_ids.update({id(v.get("element")) for v in indexed_pairs.values() if isinstance(v, dict) and v.get("element")})
+        except Exception as e:
+            logger.debug(f"Auto handle indexed name pairs skipped: {e}")
 
         # family_name / given_name の汎用処理
         try:
@@ -201,8 +234,19 @@ class UnmappedElementHandler:
                 classified_elements.get("text_inputs", []) or [], mapped_element_ids
             )
             auto_handled.update(fam_given)
+            mapped_element_ids.update({id(v.get("element")) for v in fam_given.values() if isinstance(v, dict) and v.get("element")})
         except Exception as e:
             logger.debug(f"Auto handle family/given skipped: {e}")
+
+        # 電話番号の3分割（tel1/tel2/tel3 等）の汎用処理
+        try:
+            phone_split = await self._auto_handle_split_phone(
+                classified_elements.get("text_inputs", []) or [], mapped_element_ids, field_mapping, client_data
+            )
+            auto_handled.update(phone_split)
+            mapped_element_ids.update({id(v.get("element")) for v in phone_split.values() if isinstance(v, dict) and v.get("element")})
+        except Exception as e:
+            logger.debug(f"Auto handle split phone skipped: {e}")
 
         # 汎用救済: 未マッピングの必須テキスト入力に全角空白を入力
         try:
@@ -210,6 +254,7 @@ class UnmappedElementHandler:
                 classified_elements.get("text_inputs", []) or [], mapped_element_ids, field_mapping
             )
             auto_handled.update(req_texts)
+            mapped_element_ids.update({id(v.get("element")) for v in req_texts.values() if isinstance(v, dict) and v.get("element")})
         except Exception as e:
             logger.debug(f"Auto handle required texts skipped: {e}")
 
@@ -217,6 +262,247 @@ class UnmappedElementHandler:
             f"Auto-handled elements: checkboxes={len(checkbox_handled)}, radios={len(radio_handled)}, selects={len(select_handled)}"
         )
         return auto_handled
+
+    def _demote_unified_name_for_indexed_pairs(
+        self,
+        classified_elements: Dict[str, List[Locator]],
+        field_mapping: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """name1/name2 のような分割姓名が存在する場合、統合氏名の誤割当てを降格（削除）する。
+
+        条件（汎用）:
+        - field_mapping に『統合氏名』が存在
+        - text_inputs に visible な name 属性が name1/name2 もしくは name_1/name_2 の2つが存在
+        - 『統合氏名』がそのどちらかの要素に割り当てられている
+        """
+        try:
+            if "統合氏名" not in field_mapping:
+                return
+            text_inputs = classified_elements.get("text_inputs", []) or []
+            def _name_key(n: str) -> str:
+                return (n or "").strip().lower()
+            pairs = {}
+            for el in text_inputs:
+                info = self.element_scorer._shared_cache.get(str(el)) or {}
+                nm = _name_key(info.get("name", ""))
+                if not nm:
+                    continue
+                if nm in ("name1", "name_1"):
+                    pairs[1] = el
+                elif nm in ("name2", "name_2"):
+                    pairs[2] = el
+            if 1 in pairs and 2 in pairs:
+                mapped_name_attr = (field_mapping.get("統合氏名", {}) or {}).get("name", "")
+                # 片方の name 属性が統合氏名の割当先と一致していれば降格
+                for idx in (1, 2):
+                    info = self.element_scorer._shared_cache.get(str(pairs[idx])) or {}
+                    if mapped_name_attr and mapped_name_attr == (info.get("name", "") or ""):
+                        field_mapping.pop("統合氏名", None)
+                        logger.info("Demoted unified fullname in favor of indexed split name fields")
+                        return
+        except Exception:
+            pass
+
+    def _demote_unified_kana_for_indexed_pairs(
+        self,
+        classified_elements: Dict[str, List[Locator]],
+        field_mapping: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """kana1/kana2 のような分割カナが存在する場合、統合氏名カナの誤割当てを降格（削除）する。"""
+        try:
+            if "統合氏名カナ" not in field_mapping:
+                return
+            text_inputs = classified_elements.get("text_inputs", []) or []
+            def _name_key(n: str) -> str:
+                return (n or "").strip().lower()
+            pairs = {}
+            for el in text_inputs:
+                info = self.element_scorer._shared_cache.get(str(el)) or {}
+                nm = _name_key(info.get("name", ""))
+                if not nm:
+                    continue
+                if nm in ("kana1", "kana_1"):
+                    pairs[1] = el
+                elif nm in ("kana2", "kana_2"):
+                    pairs[2] = el
+            if 1 in pairs and 2 in pairs:
+                mapped_name_attr = (field_mapping.get("統合氏名カナ", {}) or {}).get("name", "")
+                for idx in (1, 2):
+                    info = self.element_scorer._shared_cache.get(str(pairs[idx])) or {}
+                    if mapped_name_attr and mapped_name_attr == (info.get("name", "") or ""):
+                        field_mapping.pop("統合氏名カナ", None)
+                        logger.info("Demoted unified kana in favor of indexed split kana fields")
+                        return
+        except Exception:
+            pass
+
+    async def _auto_handle_indexed_name_pairs(
+        self,
+        text_inputs: List[Locator],
+        mapped_element_ids: set,
+    ) -> Dict[str, Dict[str, Any]]:
+        """name1/name2, kana1/kana2 形式を汎用的に『姓/名』『姓カナ/名カナ』として扱う。"""
+        handled: Dict[str, Dict[str, Any]] = {}
+        try:
+            buckets = {"name": {}, "kana": {}}
+            for el in text_inputs:
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get("visible", True):
+                    continue
+                nm = (info.get("name", "") or "").lower()
+                key = None
+                idx = None
+                if nm in ("name1", "name_1"):
+                    key, idx = "name", 1
+                elif nm in ("name2", "name_2"):
+                    key, idx = "name", 2
+                elif nm in ("kana1", "kana_1"):
+                    key, idx = "kana", 1
+                elif nm in ("kana2", "kana_2"):
+                    key, idx = "kana", 2
+                if key and idx:
+                    buckets[key][idx] = (el, info)
+            # 姓名
+            if 1 in buckets["name"] and 2 in buckets["name"]:
+                for field_name, idx in [("姓", 1), ("名", 2)]:
+                    el, info = buckets["name"][idx]
+                    selector = await self._generate_playwright_selector(el)
+                    required = await self.element_scorer._detect_required_status(el)
+                    handled[field_name] = {
+                        "element": el,
+                        "selector": selector,
+                        "tag_name": info.get("tag_name", "input") or "input",
+                        "type": info.get("type", "text") or "text",
+                        "name": info.get("name", ""),
+                        "id": info.get("id", ""),
+                        "input_type": "text",
+                        "default_value": "",
+                        "required": required,
+                        "visible": info.get("visible", True),
+                        "enabled": info.get("enabled", True),
+                        "auto_handled": True,
+                    }
+            # カナ
+            if 1 in buckets["kana"] and 2 in buckets["kana"]:
+                for field_name, idx in [("姓カナ", 1), ("名カナ", 2)]:
+                    el, info = buckets["kana"][idx]
+                    selector = await self._generate_playwright_selector(el)
+                    required = await self.element_scorer._detect_required_status(el)
+                    handled[field_name] = {
+                        "element": el,
+                        "selector": selector,
+                        "tag_name": info.get("tag_name", "input") or "input",
+                        "type": info.get("type", "text") or "text",
+                        "name": info.get("name", ""),
+                        "id": info.get("id", ""),
+                        "input_type": "text",
+                        "default_value": "",
+                        "required": required,
+                        "visible": info.get("visible", True),
+                        "enabled": info.get("enabled", True),
+                        "auto_handled": True,
+                    }
+        except Exception as e:
+            logger.debug(f"indexed name pairs handler error: {e}")
+        return handled
+
+    async def _auto_handle_split_phone(
+        self,
+        text_inputs: List[Locator],
+        mapped_element_ids: set,
+        field_mapping: Dict[str, Dict[str, Any]],
+        client_data: Optional[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """電話番号の分割入力欄（tel1/tel2/tel3等）に対する汎用自動入力。
+
+        - name/id/class に tel/phone を含み、末尾に 1/2/3 を含む3要素を検出
+        - 既にマッピング済みの要素は対象外
+        - 統合『電話番号』がこれらの要素のいずれかに割当てられている場合は降格（削除）
+        - client_data の phone_1/2/3 から値を投入
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        try:
+            # 1) 候補抽出
+            triples: Dict[int, Tuple[Locator, Dict[str, Any]]] = {}
+            for el in text_inputs:
+                if id(el) in mapped_element_ids:
+                    continue
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get("visible", True):
+                    continue
+                nm = (info.get("name","") or "").lower()
+                ide= (info.get("id","") or "").lower()
+                cls= (info.get("class","") or "").lower()
+                blob = nm + " " + ide + " " + cls
+                if ("tel" not in blob) and ("phone" not in blob):
+                    continue
+                # 末尾の数字を抽出
+                import re
+                # 要素名/ID/クラスの中で tel/phone に続く末尾数字を抽出（末尾でなくても許容）
+                m = None
+                for s in (nm, ide, cls):
+                    if not s:
+                        continue
+                    m = re.search(r"(?:tel|phone)[^\d]*([123])(?!.*\d)", s)
+                    if m:
+                        break
+                # フォールバック: 単純に末尾の数字を使用
+                if not m:
+                    m = re.search(r"(\d)(?!.*\d)$", (nm or ide or cls))
+                if not m:
+                    continue
+                idx = int(m.group(1))
+                if idx in (1,2,3):
+                    triples[idx] = (el, info)
+            if not all(k in triples for k in (1,2,3)):
+                return handled
+
+            # 2) 統合『電話番号』がこのグループのいずれかに割当てられているなら降格
+            try:
+                if "電話番号" in field_mapping:
+                    sel_unified = field_mapping.get("電話番号", {}).get("selector", "")
+                    if sel_unified:
+                        group_selectors = set()
+                        for idx in (1,2,3):
+                            try:
+                                group_selectors.add(await self._generate_playwright_selector(triples[idx][0]))
+                            except Exception:
+                                pass
+                        if sel_unified in group_selectors:
+                            field_mapping.pop("電話番号", None)
+                            logger.info("Demoted unified phone in favor of split phone fields")
+            except Exception:
+                pass
+
+            # 3) 値を割当（client_data から）
+            client = client_data.get('client', {}) if isinstance(client_data, dict) else {}
+            parts = [
+                (client.get('phone_1', '') or '').strip(),
+                (client.get('phone_2', '') or '').strip(),
+                (client.get('phone_3', '') or '').strip(),
+            ]
+            labels = {1: '市外局番', 2: '市内局番', 3: '加入者番号'}
+            for idx in (1,2,3):
+                el, info = triples[idx]
+                selector = await self._generate_playwright_selector(el)
+                required = await self.element_scorer._detect_required_status(el)
+                handled[f'auto_phone_part_{idx}'] = {
+                    'element': el,
+                    'selector': selector,
+                    'tag_name': info.get('tag_name','input') or 'input',
+                    'type': info.get('type','text') or 'text',
+                    'name': info.get('name',''),
+                    'id': info.get('id',''),
+                    'input_type': 'text',
+                    'auto_action': 'fill',
+                    'default_value': parts[idx-1],
+                    'required': required,
+                    'auto_handled': True,
+                    'part_label': labels[idx],
+                }
+        except Exception as e:
+            logger.debug(f"split phone handler error: {e}")
+        return handled
 
     async def _auto_handle_required_texts(
         self,
@@ -284,6 +570,30 @@ class UnmappedElementHandler:
                     continue
                 selector = await self._generate_playwright_selector(el)
                 field_name = f"auto_required_text_{idx}"
+                # 電話番号の分割欄（tel2/tel3）にはクライアントの該当パーツを投入（汎用・安全）
+                def _phone_part_value(name_id_cls: str) -> str:
+                    try:
+                        client = {}
+                        # client_data は handle_unmapped_elements から渡っていないため、ここでは空のまま
+                        # 本関数の既存仕様では default_value による単純入力のみを行う
+                        # ただし、後段の InputValueAssigner で上書きされうるため、ここではプレースホルダのまま
+                        return ''
+                    except Exception:
+                        return ''
+                # ここでは、電話番号2/3のケースは後段の split_phone 処理が入らない環境でも
+                # 空白ではなく空文字にしてバリデーション衝突を避ける（全角空白より安全）
+                auto_value = '　'
+                try:
+                    nic = (info.get('name','') + ' ' + info.get('id','') + ' ' + info.get('class','')).lower()
+                    import re
+                    if ('tel' in nic or 'phone' in nic):
+                        m = re.search(r'(?:tel|phone)[^\d]*([123])(?!.*\d)', nic)
+                        if m:
+                            idxnum = int(m.group(1))
+                            if idxnum in (2,3):
+                                auto_value = ''  # 後段の割当（auto_phone_part_*）やassignerで埋まる前提で空文字
+                except Exception:
+                    pass
                 handled[field_name] = {
                     'element': el,
                     'selector': selector,
@@ -293,7 +603,7 @@ class UnmappedElementHandler:
                     'id': info.get('id',''),
                     'input_type': 'text',
                     'auto_action': 'fill',
-                    'default_value': '　',
+                    'default_value': auto_value,
                     'required': True,
                     'auto_handled': True,
                 }

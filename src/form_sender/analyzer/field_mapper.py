@@ -246,11 +246,62 @@ class FieldMapper:
         except Exception as e:
             logger.debug(f"Ensure required mappings failed: {e}")
 
+        # 電話番号の3分割が検出できる場合は統合より分割を優先
+        try:
+            await self._promote_phone_triplets(classified_elements, field_mapping)
+        except Exception as e:
+            logger.debug(f"promote phone triplets skipped: {e}")
+
         # フォールバック: 重要コア項目の取りこぼし救済
         await self._fallback_map_message_field(classified_elements, field_mapping, used_elements)
         await self._fallback_map_email_field(classified_elements, field_mapping, used_elements)
         await self._fallback_map_postal_field(classified_elements, field_mapping, used_elements)
         return field_mapping
+
+    async def _promote_phone_triplets(self, classified_elements, field_mapping):
+        """tel1/tel2/tel3 形式の3分割電話欄を検出し、
+        統合『電話番号』よりも分割（電話番号1/2/3）のマッピングを優先する（汎用）。
+        """
+        tel_inputs = (classified_elements.get('tel_inputs') or []) + (classified_elements.get('text_inputs') or [])
+        if len(tel_inputs) < 2:
+            return
+        import re
+        candidates = {}
+        for el in tel_inputs:
+            try:
+                info = await self.element_scorer._get_element_info(el)
+                nm = (info.get('name','') or '').lower()
+                ide= (info.get('id','') or '').lower()
+                cls= (info.get('class','') or '').lower()
+                blob = nm + ' ' + ide + ' ' + cls
+                if ('tel' not in blob and 'phone' not in blob):
+                    continue
+                m = re.search(r'(?:tel|phone)[^\d]*([123])(?!.*\d)', blob)
+                if not m:
+                    continue
+                idx = int(m.group(1))
+                if idx in (1,2,3):
+                    candidates[idx] = el
+            except Exception:
+                continue
+        if not all(k in candidates for k in (1,2,3)):
+            return
+        # 統合『電話番号』が候補のいずれかを指していれば降格
+        # 統合『電話番号』は分割が確定した時点で削除（重複入力防止）
+        field_mapping.pop('電話番号', None)
+        # 分割マッピング登録
+        # スコア詳細を生成して一貫した構造を保つ
+        patterns = self.field_patterns.get_pattern('電話番号') or {}
+        names = {1: '電話番号1', 2: '電話番号2', 3: '電話番号3'}
+        for idx, fname in names.items():
+            el = candidates[idx]
+            score, details = await self.element_scorer.calculate_element_score(el, patterns, '電話番号')
+            info = await self._create_enhanced_element_info(el, details, [])
+            try:
+                info['source'] = 'promote_split'
+            except Exception:
+                pass
+            field_mapping[fname] = info
 
     async def _find_best_element(self, field_name, field_patterns, classified_elements, target_element_types, used_elements, essential_fields_completed, required_elements_set:set) -> Tuple[Optional[Locator], float, Dict, List]:
         best_element, best_score, best_score_details, best_context = None, 0.0, {}, []

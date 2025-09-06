@@ -152,7 +152,7 @@ class FieldPatterns:
             },
             
             # 4. 姓 (last_name) - GAS/スプレッドシート必須
-            "姓": {
+        "姓": {
                 "names": ["lastname", "last_name", "last-name", "family_name", "family-name", "姓", "苗字", "sei", "myoji",
                          "surname", "user_name", "member_name", "client_name", "contact_name", "person_name", "last-name-kanji", "last_name_kanji", "family-name-kanji", "family_name_kanji"],
                 "ids": ["lastname", "family-name", "last_name", "last-name", "sei", "surname", 
@@ -160,32 +160,37 @@ class FieldPatterns:
                 # class名の実態に合わせて 'last-name' / 'last_name' も許容
                 "classes": ["lastname", "last-name", "last_name", "input-last-name", "family-name", "surname", "sei",
                            "personal", "user", "member", "contact"],
+                # 一般的なダミー例（山田）を追加して分割姓名の検出力を向上
                 "placeholders": ["姓", "Last Name", "苗字", "Family Name", "お名前（姓）", 
-                               "ファミリーネーム", "姓名の姓", "Personal Name"],
+                               "ファミリーネーム", "姓名の姓", "Personal Name", "山田"],
                 "types": [],
                 "tags": ["input"],
                 "weight": 24,  # 会社名(25)に次ぐ高い優先度
                 "strict_patterns": ["姓", "苗字", "lastname", "family_name", "surname"],
-                "exclude_patterns": ["company", "会社", "社名", "corp", "corporation", "firm", "organization", "business", "LOGIN_ID", "PASSWORD", "OTP", "TOTP", "MFAOTP", "captcha", "login_id", "password", "signin", "auth", "verification", "mfa", "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", "email", "mail", "メール", "subject", "件名", "message", "本文", "unified_name_field", "your-name", "your_name", "name", "お名前", "氏名", "fullname",
+                # 統合氏名専用のワードは除外するが、'name1'/'name2' 等の分割属性名への過剰除外を避けるため
+                # 汎用的な 'name' 系の除外は外す（誤検出はスコアしきい値で制御）
+                "exclude_patterns": ["company", "会社", "社名", "corp", "corporation", "firm", "organization", "business", "LOGIN_ID", "PASSWORD", "OTP", "TOTP", "MFAOTP", "captcha", "login_id", "password", "signin", "auth", "verification", "mfa", "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", "email", "mail", "メール", "subject", "件名", "message", "本文", "unified_name_field",
                                    # 〇〇名系（個人名ではない）
                                    "法人名", "団体名", "組織名", "部署名", "学校名", "店舗名", "病院名", "施設名", "会社名・団体名", "団体・組織名"]  # 統合氏名パターンを除外に追加
             },
             
             # 5. 名 (first_name) - GAS/スプレッドシート必須
-            "名": {
+        "名": {
                 "names": ["firstname", "first_name", "first-name", "given_name", "given-name", "名", "mei", 
                          "forename", "user_name", "member_name", "client_name", "contact_name", "person_name", "first-name-kanji", "first_name_kanji", "given-name-kanji", "given_name_kanji"],
                 "ids": ["firstname", "first-name", "first_name", "given_name", "given-name", "mei", 
                        "personal_name", "user_name", "member_name", "first-name-kanji", "first_name_kanji", "given-name-kanji", "given_name_kanji"],
                 "classes": ["firstname", "first-name", "input-first-name", "given", "mei",
                            "personal", "user", "member", "contact"],
+                # 一般的なダミー例（太郎）を追加して分割姓名の検出力を向上
                 "placeholders": ["名", "First Name", "Given Name", "お名前（名）", 
-                               "ファーストネーム", "姓名の名", "Personal Name"],
+                               "ファーストネーム", "姓名の名", "Personal Name", "太郎"],
                 "types": [],
                 "tags": ["input"],
                 "weight": 23,  # 会社名(25)、姓(24)に次ぐ高い優先度
                 "strict_patterns": ["名", "firstname", "first_name", "given_name"],
-                "exclude_patterns": ["company", "会社", "社名", "corp", "corporation", "firm", "organization", "business", "LOGIN_ID", "PASSWORD", "OTP", "TOTP", "MFAOTP", "captcha", "login_id", "password", "signin", "auth", "verification", "mfa", "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", "email", "mail", "メール", "subject", "件名", "message", "本文", "unified_name_field", "your-name", "your_name", "name", "お名前", "氏名", "fullname",
+                # 'name' 系の過剰除外は外す（分割フィールド name1/name2 を許容）
+                "exclude_patterns": ["company", "会社", "社名", "corp", "corporation", "firm", "organization", "business", "LOGIN_ID", "PASSWORD", "OTP", "TOTP", "MFAOTP", "captcha", "login_id", "password", "signin", "auth", "verification", "mfa", "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", "email", "mail", "メール", "subject", "件名", "message", "本文", "unified_name_field",
                                    # 〇〇名系（個人名ではない）
                                    "法人名", "団体名", "組織名", "部署名", "学校名", "店舗名", "病院名", "施設名", "会社名・団体名", "団体・組織名"]  # 統合氏名パターンを除外に追加
             },
@@ -211,7 +216,7 @@ class FieldPatterns:
             },
             
             # 6. 名カナ (first_name_kana) - GAS/スプレッドシート必須
-            "名カナ": {
+        "名カナ": {
                 "names": ["first_name_kana", "firstname_kana", "first-name-kana", "kana_first", "katakana_mei", 
                          "メイ", "カナ名", "mei_kana", "given_kana", "firstname_katakana", "kana"],
                 "ids": ["firstname_kana", "first_name_kana", "first-name-kana", "kana-first", "katakana-mei", "mei", "firstname_katakana"],
@@ -223,7 +228,8 @@ class FieldPatterns:
                 "weight": 12,
                 "strict_patterns": ["メイ", "名カナ", "mei_kana", "firstname_kana", "katakana_mei", "kana"],
                 "kana_indicator": ["kana", "カナ", "katakana"],
-                "exclude_patterns": ["company", "会社", "corp", "corporation", "firm", "organization", "business", "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", "email", "mail", "メール", "subject", "件名", "message", "本文", "漢字", "氏名", "市町村", "都道府県", "prefecture", "city", "town", "your-furigana", "your_furigana", "furigana", "unified_name_field"]  # セマンティック除外強化: 漢字名・住所フィールド・ふりがなフィールドとの競合防止（"name", "your_name", "fullname", "personal_name", "your-name", "お名前"を除外から削除）、カナフィールド名は除外しない
+                # ふりがな系の属性名（furigana）は分割カナで一般的に使われるため除外しない
+                "exclude_patterns": ["company", "会社", "corp", "corporation", "firm", "organization", "business", "phone", "tel", "電話", "zip", "postal", "郵便", "address", "住所", "email", "mail", "メール", "subject", "件名", "message", "本文", "漢字", "氏名", "市町村", "都道府県", "prefecture", "city", "town", "unified_name_field"]
             },
             
             # 7. 姓ひらがな (last_name_hiragana) - GAS必須

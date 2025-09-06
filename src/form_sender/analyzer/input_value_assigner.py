@@ -83,6 +83,55 @@ class InputValueAssigner:
                 'value': value, 'required': field_info.get('required', False),
                 'auto_action': field_info.get('auto_action', 'default')
             }
+
+        # 追加救済: 必須フィールド情報から電話番号の分割欄（tel2/tel3等）を検出して、
+        # クライアントの phone_2/phone_3 を直接割当（フィールド名に依存しない汎用処理）。
+        try:
+            req = self.required_analysis or {}
+            required_elems = req.get('required_elements') or []
+            client = client_data.get('client', {}) if isinstance(client_data, dict) else {}
+            p2 = (client.get('phone_2', '') or '').strip()
+            p3 = (client.get('phone_3', '') or '').strip()
+            for elem in required_elems:
+                nm = str(elem.get('name','') or '').lower()
+                ide= str(elem.get('id','') or '').lower()
+                selector = ''
+                # id優先
+                if ide:
+                    selector = f"[id=\"{ide}\"]"
+                elif nm:
+                    # name セレクタはクォート付きで指定
+                    selector = f"input[name=\"{nm}\"]"
+                else:
+                    continue
+                # 既に割当済みのセレクタには追加しない
+                if any(v.get('selector') == selector for v in input_assignments.values() if isinstance(v, dict)):
+                    continue
+                blob = (nm + ' ' + ide)
+                if ('tel' in blob or 'phone' in blob):
+                    import re
+                    m = re.search(r'(?:tel|phone)[^\d]*([123])(?!.*\d)', blob)
+                    if not m:
+                        continue
+                    idx = int(m.group(1))
+                    if idx == 2 and p2:
+                        input_assignments[f'auto_phone_part_{idx}'] = {
+                            'selector': selector,
+                            'input_type': 'text',
+                            'value': p2,
+                            'required': True,
+                            'auto_action': 'fill',
+                        }
+                    if idx == 3 and p3:
+                        input_assignments[f'auto_phone_part_{idx}'] = {
+                            'selector': selector,
+                            'input_type': 'text',
+                            'value': p3,
+                            'required': True,
+                            'auto_action': 'fill',
+                        }
+        except Exception as e:
+            logger.debug(f"phone split assignment fallback skipped: {e}")
         # フォールバック: 単一フィールドの郵便番号にも7桁を投入
         try:
             if '郵便番号1' in input_assignments:
