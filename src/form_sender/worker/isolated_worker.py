@@ -366,7 +366,7 @@ class IsolatedFormWorker:
             if "error" in expanded_instruction:
                 return expanded_instruction
 
-            # Step 2: ブラウザページ初期化とアクセス（リトライ付き）
+            # Step 2: ブラウザページ初期化とアクセス（リトライ付き・GUI優先）
             max_retries = 2
             for attempt in range(max_retries + 1):
                 try:
@@ -375,14 +375,14 @@ class IsolatedFormWorker:
                     break
                 except Exception as e:
                     error_msg = f"Page access error: {str(e)}"
-                    
-                    # ブラウザ接続が失われている場合は再初期化を試行
-                    if attempt < max_retries and ("Target closed" in error_msg or "Connection closed" in error_msg or "Browser connection lost" in error_msg):
-                        logger.warning(f"Worker {self.worker_id}: Browser connection issue on attempt {attempt + 1}, reinitializing browser...")
+                    # 接続系の一時障害（GUIで起きやすい）は、同一モードでの再起動で対処
+                    conn_issue = any(k in error_msg for k in ["Target closed", "Connection closed", "Browser connection lost"]) or \
+                                 any(k in error_msg.lower() for k in ["target page", "connection closed", "browser connection lost"])
+                    if attempt < max_retries and conn_issue:
                         try:
-                            # ブラウザを再初期化
+                            logger.warning(f"Worker {self.worker_id}: Browser connection issue on attempt {attempt + 1}, reinitializing browser (same mode)...")
                             await self.browser_manager.close()
-                            await asyncio.sleep(1.0)  # 短い待機
+                            await asyncio.sleep(1.0)
                             if await self.browser_manager.launch():
                                 logger.info(f"Worker {self.worker_id}: Browser reinitialized successfully")
                                 continue
@@ -675,9 +675,9 @@ class IsolatedFormWorker:
             if filled_fields == 0:
                 return {"error": True, "record_id": record_id, "status": "failed", "error_type": "NO_FIELDS_FILLED", "error_message": "No fields were successfully filled"}
 
-            # 送信ボタンの有効化が遅延するケースに備えて、わずかに待機
+            # 送信ボタンの有効化が遅延するケースに備えて、わずかに待機（計画: 200ms）
             try:
-                await self.page.wait_for_timeout(500)
+                await self.page.wait_for_timeout(200)
             except Exception:
                 pass
 

@@ -239,6 +239,110 @@ function processTargeting(targetingId) {
   }
 }
 
+/**
+ * 06:25 JST: 当日用キューの完全リセットを実行
+ */
+function resetSendQueueAllDaily() {
+  try {
+    const res = resetSendQueueAll();
+    console.log('send_queue truncated');
+    return { success: true, result: res };
+  } catch (e) {
+    console.error('resetSendQueueAll error:', e);
+    return { success: false, error: String(e) };
+  }
+}
+
+/**
+ * 06:35–06:50 JST: targeting毎に当日キューを生成
+ */
+function buildSendQueueForTargeting(targetingId) {
+  try {
+    const cfg = getTargetingConfig(targetingId); // 既存ロジックを流用
+    if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
+    const t = cfg.targeting;
+    const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    // キュー上限は一律5000件（max_daily_sendsは送信成功数の上限としてRunner側で使用）
+    const inserted = createQueueForTargeting(
+      targetingId,
+      dateJst,
+      t.targeting_sql || '',
+      t.ng_companies || '',
+      5000,
+      8
+    );
+    console.log(`Queue created for targeting ${targetingId}: ${inserted}`);
+    return { success: true, inserted };
+  } catch (e) {
+    console.error('buildSendQueueForTargeting error:', e);
+    return { success: false, error: String(e) };
+  }
+}
+
+/**
+ * 06:35–06:50 JST: アクティブな全targetingについて当日キューを一括生成
+ * - startFormSenderFromTrigger と同様、スプレッドシートのアクティブ行を走査
+ * - 企業名などの機密情報はログ出力しない
+ */
+function buildSendQueueForAllTargetings() {
+  console.log('=== 当日キュー一括生成開始 ===');
+  try {
+    const activeTargetings = getActiveTargetingIdsFromSheet();
+    if (!activeTargetings || activeTargetings.length === 0) {
+      console.log('アクティブなターゲティング設定が見つかりません');
+      return { success: false, message: 'アクティブtargetingなし', processed: 0 };
+    }
+
+    const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    let processed = 0;
+    let failed = 0;
+    let totalInserted = 0;
+    const details = [];
+
+    for (const t of activeTargetings) {
+      const targetingId = t.targeting_id || t.id || t;
+      try {
+        // 2シート構造を確認
+        const cfg = getTargetingConfig(targetingId);
+        if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
+
+        const targeting = cfg.targeting;
+        const inserted = createQueueForTargeting(
+          targetingId,
+          dateJst,
+          targeting.targeting_sql || '',
+          targeting.ng_companies || '',
+          targeting.max_daily_sends || 0,
+          8
+        );
+        const n = Number(inserted) || 0;
+        totalInserted += n;
+        processed += 1;
+        details.push({ targeting_id: targetingId, inserted: n, success: true });
+        console.log(`targeting_id=${targetingId}: inserted=${n}`);
+      } catch (e) {
+        failed += 1;
+        details.push({ targeting_id: targetingId, success: false, error: String(e) });
+        console.error(`targeting_id=${targetingId}: キュー作成エラー: ${e}`);
+      }
+    }
+
+    console.log(`=== 当日キュー一括生成完了: 成功=${processed - failed} / 失敗=${failed} / 合計投入=${totalInserted}件 ===`);
+    return {
+      success: failed === 0,
+      date_jst: dateJst,
+      processed,
+      failed,
+      total_inserted: totalInserted,
+      details
+    };
+  } catch (e) {
+    console.error('当日キュー一括生成エラー:', e);
+    return { success: false, error: String(e) };
+  }
+}
+
+
 
 /**
  * 営業時間内かどうかをチェック
