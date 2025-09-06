@@ -7,7 +7,9 @@
       "個人情報の取り扱い", "個人情報の取扱い", "privacy", "privacy policy",
       "利用規約", "terms", "terms of service"
     ],
-    "agree_tokens": ["同意", "承諾", "agree", "同意する", "確認の上", "に同意"]
+    "agree_tokens": ["同意", "承諾", "agree", "同意する", "確認の上", "に同意"],
+    "select_all_when_group_required": true,
+    "max_group_select": 8
   },
   "radio": {
     "primary_keywords": ["営業", "提案", "メール"],
@@ -19,4 +21,3 @@
     }
   }
 }
-

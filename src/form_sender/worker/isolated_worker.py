@@ -26,6 +26,7 @@ from config.manager import (
     get_worker_config,
     get_choice_priority_config,
 )
+from config.manager import get_privacy_consent_config
 from ..detection.bot_detector import BotDetectionSystem
 from ..detection.pattern_matcher import FormDetectionPatternMatcher
 from ..template.company_processor import CompanyPlaceholderAnalyzer
@@ -1047,6 +1048,13 @@ class IsolatedFormWorker:
                         pri1 = choice_cfg.get('checkbox', {}).get('primary_keywords', [])
                         pri2 = choice_cfg.get('checkbox', {}).get('secondary_keywords', [])
 
+                        # privacy negative tokens (skip selecting marketing/newsletter)
+                        try:
+                            consent_cfg = get_privacy_consent_config()
+                            negative_tokens = [str(x).lower() for x in (consent_cfg.get('keywords', {}).get('negative', []) or [])]
+                        except Exception:
+                            negative_tokens = [s.lower() for s in ["メルマガ","newsletter","配信","案内","広告","キャンペーン"]]
+
                         for _, ents in groups.items():
                             # hint優先、無ければ name/id/class を評価対象に
                             texts = []
@@ -1058,32 +1066,47 @@ class IsolatedFormWorker:
                                 texts.append(base)
 
                             is_privacy_group = any(_is_privacy_like(t) for t in texts)
-                            if is_privacy_group:
-                                chosen_idx = None
+                            # 複数必須（同一グループで複数が未入力）の場合の処理方針
+                            select_all = bool(choice_cfg.get('checkbox', {}).get('select_all_when_group_required', True))
+                            max_sel = int(choice_cfg.get('checkbox', {}).get('max_group_select', 8) or 8)
+                            target_indices = []
+
+                            if select_all and len(ents) > 1:
+                                # 全要素を選択（ただしprivacyのnegativeトークンは除外）
                                 for i, t in enumerate(texts):
-                                    if _has_agree_token(t):
-                                        chosen_idx = i
-                                        break
-                                if chosen_idx is None:
-                                    chosen_idx = _choose_priority_index(texts, pri1, pri2)
+                                    tl = (t or '').lower()
+                                    if is_privacy_group and any(neg in tl for neg in negative_tokens):
+                                        continue
+                                    target_indices.append(i)
                             else:
-                                chosen_idx = _choose_priority_index(texts, pri1, pri2)
+                                # 単一選択（従来ルール）
+                                if is_privacy_group:
+                                    agree_hits = [i for i, t in enumerate(texts) if _has_agree_token(t) and not any(neg in (t or '').lower() for neg in negative_tokens)]
+                                    if agree_hits:
+                                        target_indices = [agree_hits[0]]
+                                    else:
+                                        target_indices = [_choose_priority_index(texts, pri1, pri2)]
+                                else:
+                                    target_indices = [_choose_priority_index(texts, pri1, pri2)]
 
-                            try:
-                                ent = ents[chosen_idx]
-                            except Exception:
-                                ent = ents[-1]
+                            # 上限と重複排除
+                            target_indices = list(dict.fromkeys(target_indices))[:max(1, max_sel)]
 
-                            sel = ent.get('selector')
-                            if not sel:
-                                continue
-                            field_info = {'selector': sel, 'input_type': 'checkbox', 'type': 'checkbox'}
-                            ok = await input_handler.fill_rule_based_field('retry', field_info, True)
-                            if ok:
-                                filled_ok += 1
-                                filled_categories.append('checkbox')
-                                if show_retry_logs:
-                                    logger.debug("retry-filled checkbox via priority rule")
+                            for idx in target_indices:
+                                try:
+                                    ent = ents[idx]
+                                except Exception:
+                                    ent = ents[-1]
+                                sel = ent.get('selector')
+                                if not sel:
+                                    continue
+                                field_info = {'selector': sel, 'input_type': 'checkbox', 'type': 'checkbox'}
+                                ok = await input_handler.fill_rule_based_field('retry', field_info, True)
+                                if ok:
+                                    filled_ok += 1
+                                    filled_categories.append('checkbox')
+                                    if show_retry_logs:
+                                        logger.debug("retry-filled checkbox via priority rule")
 
                         # その他（radio/select/text/textareaなど）は既存フォールバック
                         for ent in other_invalids:
@@ -1113,9 +1136,9 @@ class IsolatedFormWorker:
                                 if show_retry_logs:
                                     logger.debug(f"retry-fill error: {e}")
                                 continue
-                    except Exception as e:
+                    except Exception:
                         if show_retry_logs:
-                            logger.debug(f"priority checkbox retry flow error: {e}")
+                            logger.debug("priority checkbox retry flow error")
                         # フォールバック: 旧ロジック
                         for ent in invalids:
                             try:
