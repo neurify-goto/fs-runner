@@ -1132,8 +1132,9 @@ class UnmappedElementHandler:
                     except Exception as e:
                         logger.debug(f"Unexpected error in DT/DD required detection for select: {e}")
                         required = False
-                if not required:
-                    continue
+
+                # 追加の汎用フォールバック: デフォルトがダミーの場合は実質必須とみなして選択する
+                # 例: 「--- 選択してください ---」や空値がデフォルトのままの場合
                 opt_data = await select.evaluate(
                     "el => Array.from(el.options).map(o => ({text: (o.textContent || '').trim(), value: o.value || ''}))"
                 )
@@ -1147,6 +1148,18 @@ class UnmappedElementHandler:
                     pre_idx = -1
                 texts = [d.get("text", "") for d in opt_data]
                 values = [d.get("value", "") for d in opt_data]
+                if not required:
+                    try:
+                        pre_text = (texts[pre_idx] or '').strip() if isinstance(pre_idx, int) and pre_idx >= 0 else ''
+                        pre_val = (values[pre_idx] or '').strip() if isinstance(pre_idx, int) and pre_idx >= 0 else ''
+                        dummy_tokens = ['選択', 'お選び', '選んで', 'choose', 'select', '---', '未選択']
+                        is_dummy_default = (not pre_text and not pre_val) or any(tok.lower() in pre_text.lower() for tok in dummy_tokens) or pre_val == ''
+                        if is_dummy_default:
+                            required = True  # 実質必須として自動選択を適用
+                    except Exception:
+                        pass
+                if not required:
+                    continue
                 is_pref_select = any("東京都" in tx for tx in texts) and any(
                     "大阪府" in tx for tx in texts
                 )
