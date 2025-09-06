@@ -4,6 +4,7 @@ import json
 import os
 from typing import Dict, Any, Optional
 from pathlib import Path
+import logging
 
 
 class ConfigManager:
@@ -83,6 +84,42 @@ class ConfigManager:
     def get_prefectures(self) -> Dict[str, Any]:
         """都道府県名リストを取得"""
         return self._load_config("prefectures.json")
+    
+    def get_choice_priority_config(self) -> Dict[str, Any]:
+        """選択肢優先度（checkbox/radio用）設定を取得（検証・フォールバック付き）"""
+        try:
+            cfg = self._load_config("choice_priority.json")
+            # 最低限の構造検証
+            if not isinstance(cfg, dict):
+                raise ValueError("choice_priority must be a dict")
+            for sec in ("checkbox", "radio"):
+                if sec not in cfg:
+                    raise ValueError(f"missing section: {sec}")
+            return cfg
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"Choice priority config error, using defaults: {e}"
+            )
+            return self._get_default_choice_priority_config()
+
+    def _get_default_choice_priority_config(self) -> Dict[str, Any]:
+        """デフォルトの選択肢優先度設定"""
+        return {
+            "checkbox": {
+                "primary_keywords": ["営業", "提案", "メール"],
+                "secondary_keywords": ["その他", "other", "該当なし"],
+                "privacy_keywords": [
+                    "プライバシー", "個人情報", "privacy", "利用規約", "terms"
+                ],
+                "agree_tokens": ["同意", "agree", "承諾"],
+                "select_all_when_group_required": True,
+                "max_group_select": 8,
+            },
+            "radio": {
+                "primary_keywords": ["営業", "提案", "メール"],
+                "secondary_keywords": ["その他", "other", "該当なし"],
+            },
+        }
     
     def get_form_explorer_config(self) -> Dict[str, Any]:
         """フォーム探索設定を取得"""
@@ -165,6 +202,10 @@ def get_cookie_consent_config() -> Dict[str, Any]:
 def get_privacy_consent_config() -> Dict[str, Any]:
     """プライバシー同意チェック処理設定を取得する便利関数"""
     return config_manager.get_privacy_consent_config()
+
+def get_choice_priority_config() -> Dict[str, Any]:
+    """選択肢優先度（checkbox/radio用）設定を取得する便利関数"""
+    return config_manager.get_choice_priority_config()
 
 def get_prefectures() -> Dict[str, Any]:
     """都道府県名リストを取得する便利関数"""

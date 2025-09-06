@@ -1,78 +1,96 @@
-Based on the diff analysis, I can now provide a comprehensive code review:
-
 ## Summary
 
-This implementation enhances form field mapping accuracy for Japanese address forms with comprehensive improvements to boundary detection, required field handling, prefecture mapping, and split field logic. The changes focus on improving detection of Japanese address components (都道府県, 住所) and handling complex form scenarios with multiple required fields.
+The working directory contains unstaged changes to configuration management code and worker isolation logic, along with cleared documentation files. The changes focus on adding a new choice priority configuration system for form field interaction logic.
 
 ## Key Findings
 
-#### High | src/form_sender/analyzer/element_scorer.py:1219 | Inline function redefinition and performance concern
-- Evidence: `_has_cjk` helper function is defined multiple times inline within loops (lines 1224, 1302) 
-- Impact: Code duplication, potential performance degradation from repeated regex compilation
-- Recommendation: Extract to class method with compiled regex pattern cached at initialization
+#### Medium | src/config/manager.py:83-85 | New configuration method without validation
+- Evidence: `get_choice_priority_config()` method added to ConfigManager without input validation or error handling
+- Impact: Runtime errors if choice_priority.json is malformed or missing; inconsistent error handling pattern
+- Recommendation: Add validation and consistent error handling
 
 ```python
-def __init__(self):
-    self._cjk_pattern = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]")
-
-def _has_cjk(self, s: str) -> bool:
-    return self._cjk_pattern.search(s) is not None
+def get_choice_priority_config(self) -> Dict[str, Any]:
+    """選択肢優先度設定を取得（バリデーション付き）"""
+    try:
+        config = self._load_config("choice_priority.json")
+        # 基本構造の検証
+        if not isinstance(config.get("checkbox"), dict) or not isinstance(config.get("radio"), dict):
+            raise ValueError("Invalid choice_priority.json structure")
+        return config
+    except Exception as e:
+        logger.warning(f"Choice priority config error, using defaults: {e}")
+        return self._get_default_choice_priority_config()
 ```
 
-#### Medium | src/form_sender/analyzer/field_mapper.py:247 | Inconsistent required field scoring
-- Evidence: Hard-coded boost values (40, 200) applied directly to scores without clear rationale
-- Impact: Scoring logic becomes opaque and difficult to maintain; magic numbers reduce readability
-- Recommendation: Define scoring constants with documentation
+#### Medium | src/form_sender/worker/isolated_worker.py:992-1006 | Configuration fallback logic duplication  
+- Evidence: Default choice configuration hardcoded in exception handler (lines 995-1006)
+- Impact: Configuration drift between default values and actual config file; maintenance burden
+- Recommendation: Extract defaults to shared constants or method
 
 ```python
-class ScoringConstants:
-    REQUIRED_BOOST = 40
-    REQUIRED_PHONE_BOOST = 200  # 必須電話番号を最優先
+# In config/manager.py
+def _get_default_choice_priority_config(self) -> Dict[str, Any]:
+    return {
+        'checkbox': {
+            'primary_keywords': ['営業','提案','メール'],
+            'secondary_keywords': ['その他','other','該当なし'],
+            'privacy_keywords': ['プライバシー','privacy','個人情報'],
+            'agree_tokens': ['同意','agree','承諾']
+        },
+        'radio': {
+            'primary_keywords': ['営業','提案','メール'],
+            'secondary_keywords': ['その他','other','該当なし']
+        }
+    }
 ```
 
-#### Medium | src/form_sender/analyzer/field_patterns.py:579 | New field pattern lacks validation
-- Evidence: Added "都道府県" pattern without comprehensive exclude patterns
-- Impact: May cause field conflicts with other address-related fields
-- Recommendation: Add more specific exclude patterns and test edge cases
+#### Low | config/choice_priority.json:1-21 | New configuration file structure
+- Evidence: Well-structured JSON configuration for checkbox/radio priority handling
+- Impact: Positive - centralizes form interaction logic; enables runtime configuration changes
+- Recommendation: Add JSON schema validation and documentation
 
-#### Medium | src/form_sender/analyzer/input_value_assigner.py:89 | Complex nested conditional logic
-- Evidence: Deeply nested conditions for address/prefecture handling with multiple try-catch blocks
-- Impact: Reduced maintainability and testability; error handling masks potential issues
-- Recommendation: Extract address handling into separate methods with explicit error handling
+#### Medium | src/form_sender/worker/isolated_worker.py:1039-1070 | Complex checkbox grouping logic
+- Evidence: Nested logic for checkbox grouping, priority selection, and privacy handling without clear separation of concerns
+- Impact: Difficult to test and maintain; mixing business logic with data processing
+- Recommendation: Extract to dedicated service class
 
 ```python
-def _handle_prefecture_assignment(self, input_assignments, client_data):
-    # Dedicated method for prefecture handling
+class FormChoiceHandler:
+    def __init__(self, choice_config: Dict[str, Any]):
+        self.choice_config = choice_config
     
-def _handle_address_assignment(self, field_name, field_info, client_data):
-    # Dedicated method for address field assignment
+    def group_checkboxes_by_name(self, checkbox_invalids: List[Dict]) -> Dict[str, List[Dict]]:
+        # Extract grouping logic
+        
+    def select_priority_checkbox(self, group_entries: List[Dict]) -> Dict:
+        # Extract priority selection logic
 ```
-
-#### Low | src/form_sender/analyzer/split_field_detector.py:1074 | Special case handling duplication
-- Evidence: Similar single-field handling logic repeated for phone, postal_code, and address
-- Impact: Code duplication increases maintenance burden
-- Recommendation: Extract common single-field handling logic into shared method
 
 ## Performance and Security Highlights
 
-- **Performance**: Multiple inline regex compilations in hot paths (CJK detection), repeated string operations in loops
-- **Security**: Proper data masking continues to be used (`***REDACTED***`) for sensitive information logging
+- **Configuration caching**: ConfigManager uses instance variables for caching but lacks cache invalidation
+- **Security**: Proper use of `***REDACTED***` patterns for sensitive data in logs maintained throughout worker code
+- **Memory efficiency**: Large exception handling blocks (lines 1036-1118) could benefit from early returns to reduce nesting
 
-## Tests and Documentation
+## Tests and Documentation  
 
-- **Tests to add**: 
-  - Prefecture field detection accuracy tests
-  - Required field boost scoring validation
-  - Address field splitting edge cases
-  - CJK boundary detection unit tests
-- **Documentation**: Update field pattern documentation to reflect new prefecture handling logic
+- **Tests to add**:
+  - Choice priority configuration loading and fallback scenarios
+  - Checkbox grouping and priority selection edge cases  
+  - Configuration validation with malformed JSON files
+  - Worker shutdown behavior with configuration loading failures
+
+- **Documentation**: 
+  - Schema documentation for choice_priority.json
+  - Worker configuration management patterns
+  - Recovery of cleared review documentation
 
 ## Prioritized Action List
 
-1. [High] Extract and optimize CJK detection helper function (Cost: S)
-2. [High] Define scoring constants for required field boosts (Cost: S) 
-3. [Medium] Refactor address assignment logic into dedicated methods (Cost: M)
-4. [Medium] Add comprehensive test coverage for prefecture detection (Cost: M)
-5. [Medium] Extract single-field handling logic in split detector (Cost: S)
-6. [Low] Add validation for new field patterns (Cost: S)
-7. [Low] Document new prefecture and address handling behavior (Cost: S)
+2. [High] Add validation to get_choice_priority_config method (Cost: S) 
+3. [Medium] Extract default configuration constants to prevent duplication (Cost: S)
+4. [Medium] Extract checkbox priority logic to dedicated service class (Cost: M)
+5. [Medium] Add JSON schema validation for choice_priority.json (Cost: S)
+6. [Low] Add configuration caching invalidation mechanism (Cost: S)
+7. [Low] Document choice priority configuration format and usage (Cost: S)
