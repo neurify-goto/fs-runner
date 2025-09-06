@@ -192,6 +192,12 @@ class RuleBasedAnalyzer:
             except Exception as e:
                 logger.debug(f"name mapping prune skipped: {e}")
 
+            # 汎用ポストプロセス: カナ/ひらがなの整合性を正規化
+            try:
+                await self._normalize_kana_hiragana_fields()
+            except Exception as e:
+                logger.debug(f"kana/hiragana normalization skipped: {e}")
+
             # 汎用改善: zip系2連続の自動昇格（郵便番号1/2）
             try:
                 await self._auto_promote_postal_split()
@@ -296,6 +302,79 @@ class RuleBasedAnalyzer:
                 info = self.field_mapping.get(k)
                 if info and int(info.get('score', 0)) < th:
                     self.field_mapping.pop(k, None)
+        except Exception:
+            pass
+
+    async def _normalize_kana_hiragana_fields(self) -> None:
+        """『姓/名カナ』と『姓/名ひらがな』のマッピングを要素属性に基づいて正規化する。
+
+        目的:
+        - ふりがな/ひらがな欄が『姓カナ/名カナ』に誤って割り当てられるのを汎用的に修正
+        - 逆にカタカナ欄が『ひらがな』に割り当てられた場合も修正
+        - 分割ひらがなが揃っている場合は『統合氏名カナ』を抑制
+        """
+        def _is_hiragana_like(info: dict) -> bool:
+            blob = ' '.join([
+                str(info.get('name','')), str(info.get('id','')), str(info.get('class','')), str(info.get('placeholder',''))
+            ])
+            return any(k in blob for k in ['ひらがな', 'ふりがな']) and not any(k in blob for k in ['カナ', 'カタカナ', 'フリガナ'])
+
+        def _is_katakana_like(info: dict) -> bool:
+            blob = ' '.join([
+                str(info.get('name','')), str(info.get('id','')), str(info.get('class','')), str(info.get('placeholder',''))
+            ])
+            return any(k in blob for k in ['カナ', 'カタカナ', 'フリガナ'])
+
+        for kana_field, hira_field in [('姓カナ','姓ひらがな'), ('名カナ','名ひらがな')]:
+            kinfo = self.field_mapping.get(kana_field)
+            hinfo = self.field_mapping.get(hira_field)
+            # 『姓カナ/名カナ』があるが、実体がひらがな欄 → リネーム
+            if kinfo and _is_hiragana_like(kinfo) and not hinfo:
+                self.field_mapping[hira_field] = kinfo
+                self.field_mapping.pop(kana_field, None)
+            # 『姓ひらがな/名ひらがな』があるが、実体がカタカナ欄 → リネーム
+            if hinfo and _is_katakana_like(hinfo) and not kinfo:
+                self.field_mapping[kana_field] = hinfo
+                self.field_mapping.pop(hira_field, None)
+
+        # 統合カナの降格: 分割ひらがなが揃っていれば統合カナは不要
+        if ('姓ひらがな' in self.field_mapping) and ('名ひらがな' in self.field_mapping):
+            if '統合氏名カナ' in self.field_mapping:
+                self.field_mapping.pop('統合氏名カナ', None)
+
+        # 統合カナがひらがな欄に割り当てられている場合、名ひらがなへ補正
+        uinfo = self.field_mapping.get('統合氏名カナ')
+        if uinfo and _is_hiragana_like(uinfo) and ('名ひらがな' not in self.field_mapping):
+            self.field_mapping['名ひらがな'] = uinfo
+            self.field_mapping.pop('統合氏名カナ', None)
+
+        # 欠落補完: ひらがな分割欄が存在するのにマッピング漏れしている場合、DOMから直接補完
+        try:
+            if self.form_structure and getattr(self.form_structure, 'elements', None):
+                used_selectors = { (v or {}).get('selector','') for v in self.field_mapping.values() if isinstance(v, dict) }
+                for need, token in [('姓ひらがな','姓'), ('名ひらがな','名')]:
+                    if need in self.field_mapping:
+                        continue
+                    for fe in self.form_structure.elements:
+                        try:
+                            if (fe.tag_name or '').lower() != 'input':
+                                continue
+                            if (fe.element_type or '').lower() not in ('text',''):
+                                continue
+                            if not fe.is_visible:
+                                continue
+                            blob = ' '.join([
+                                (fe.name or ''), (fe.id or ''), (fe.class_name or ''), (fe.placeholder or ''),
+                                (fe.label_text or ''), (fe.associated_text or '')
+                            ])
+                            if ('ふりがな' in blob or 'ひらがな' in blob) and (token in blob):
+                                info = await self._get_element_details(fe.locator)
+                                if info.get('selector','') not in used_selectors:
+                                    self.field_mapping[need] = info
+                                    used_selectors.add(info.get('selector',''))
+                                    break
+                        except Exception:
+                            continue
         except Exception:
             pass
 

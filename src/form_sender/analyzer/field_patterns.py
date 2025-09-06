@@ -235,10 +235,10 @@ class FieldPatterns:
             # 7. 姓ひらがな (last_name_hiragana) - GAS必須
             "姓ひらがな": {
                 "names": ["last_name_hiragana", "lastname_hiragana", "hiragana_last", 
-                         "hiragana_sei", "ひらがな姓", "sei_hiragana", "furigana"],
+                         "hiragana_sei", "ひらがな姓", "sei_hiragana", "furigana", "姓ふりがな"],
                 "ids": ["lastname_hiragana", "last_name_hiragana", "hiragana-last", "hiragana-sei"],
                 "classes": ["hiragana", "sei", "hiragana-lastname", "lastname_hiragana"],
-                "placeholders": ["せい", "やまだ", "ひらがな", "姓（ひらがな）", 
+                "placeholders": ["せい", "やまだ", "ひらがな", "ふりがな", "姓ふりがな", "姓（ひらがな）", 
                                "ふりがな（姓）", "せい（ひらがな）"],
                 "types": [],
                 "tags": ["input"],
@@ -249,10 +249,10 @@ class FieldPatterns:
             # 8. 名ひらがな (first_name_hiragana) - GAS必須
             "名ひらがな": {
                 "names": ["first_name_hiragana", "firstname_hiragana", "hiragana_first", 
-                         "hiragana_mei", "ひらがな名", "mei_hiragana", "furigana"],
+                         "hiragana_mei", "ひらがな名", "mei_hiragana", "furigana", "名ふりがな"],
                 "ids": ["firstname_hiragana", "first_name_hiragana", "hiragana-first", "hiragana-mei"],
                 "classes": ["hiragana", "mei", "hiragana-firstname", "firstname_hiragana"],
-                "placeholders": ["めい", "たろう", "ひらがな", "名（ひらがな）", 
+                "placeholders": ["めい", "たろう", "ひらがな", "ふりがな", "名ふりがな", "名（ひらがな）", 
                                "ふりがな（名）", "めい（ひらがな）"],
                 "types": [],
                 "tags": ["input"],
