@@ -140,6 +140,10 @@
     "cpu_limit_percent": 80,
     "network_timeout_seconds": 30
   },
+  "runner": {
+    "backoff_initial": 2,
+    "backoff_max": 60
+  },
   "_comment_form_finder": "Form-Finder用マルチプロセス設定（軽量フォーム探索処理に最適化）",
   "_comment_form_finder_priority": "設定優先順位: form_finder_multi_process専用設定を使用、フォールバックは旧multi_process設定",
   "form_finder_multi_process": {

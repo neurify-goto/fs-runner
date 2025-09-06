@@ -31,6 +31,7 @@ from form_sender.security.log_sanitizer import setup_sanitized_logging
 
 # 既存のクライアントデータローダーを再利用
 from form_sender_worker import _load_client_data_simple  # type: ignore
+from config.manager import get_worker_config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = setup_sanitized_logging(__name__)
@@ -262,7 +263,14 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                 return
             client_data = _load_client_data_simple(config_file, targeting_id)
             max_daily = _extract_max_daily_sends(client_data)
-            backoff = 2
+            # バックオフ設定（config/worker_config.json → runner）
+            try:
+                runner_cfg = get_worker_config().get('runner', {})
+                backoff_initial = int(runner_cfg.get('backoff_initial', 2))
+                backoff_max = int(runner_cfg.get('backoff_max', 60))
+            except Exception:
+                backoff_initial, backoff_max = 2, 60
+            backoff = backoff_initial
             processed = 0
             while True:
                 if not _within_business_hours(client_data):
@@ -282,9 +290,9 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                 had_work = await _process_one(supabase, worker, targeting_id, client_data, target_date, run_id, shard_id, fixed_company_id)
                 if not had_work:
                     await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
+                    backoff = min(backoff * 2, backoff_max)
                 else:
-                    backoff = 2
+                    backoff = backoff_initial
                     processed += 1
                     # テスト用: 規定数に達したら終了
                     if max_processed is not None and processed >= max_processed:

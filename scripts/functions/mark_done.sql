@@ -12,6 +12,8 @@ create or replace function public.mark_done(
 returns void
 language plpgsql
 as $$
+declare
+  v_updated integer := 0;
 begin
   -- submissions へ記録（JST時刻は呼び出し側から受け取る）
   insert into public.submissions(
@@ -30,6 +32,11 @@ begin
     set status = case when p_success then 'done' else 'failed' end,
         attempts = attempts + 1
   where target_date_jst = p_target_date and targeting_id = p_targeting_id and company_id = p_company_id;
+
+  -- 更新行数を取得し、0件の場合はNOTICE（例外化はしない：キュー非経由実行を許容）
+  get diagnostics v_updated = row_count;
+  if v_updated = 0 then
+    raise notice 'mark_done: send_queue row not found for date=%, targeting_id=%, company_id=%', p_target_date, p_targeting_id, p_company_id;
+  end if;
 end;
 $$;
-
