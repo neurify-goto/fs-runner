@@ -2,14 +2,15 @@
 
 このドキュメントでは、**RuleBasedAnalyzer による動的フォーム解析**に基づいて、Webサイトのお問い合わせフォームに対し、指定されたデータを入力送信するための、**GAS トリガー + GitHub Actions ワークフロー**による自動化システムの網羅的なアルゴリズムを自然言語で記述します。
 
-**実行アーキテクチャ**: Google Apps Script (GAS) がスプレッドシート連携によりアクティブなターゲティング設定を確認し、定期的に GitHub Actions ワークフローを `repository_dispatch` でトリガーする。ワークフロー内で処理対象企業を10件ずつ抽出・処理し、GitHub Actions側で営業時間・送信数制限を判定して連続ループ実行する分散処理システム。
+**実行アーキテクチャ（最新版）**: Google Apps Script (GAS) が毎朝 Supabase に当日分の送信キュー（`send_queue`）を直接生成し、その後 `repository_dispatch` で GitHub Actions を起動します。GitHub Actions はエントリ `src/form_sender_runner.py` を実行し、Runner 内の各ワーカーが Supabase RPC（`claim_next_batch`）でキューを原子的に専有→フォーム送信→結果を `mark_done` で確定・保存します。営業時間・日次成功上限制御は Runner 側で継続的に判定します。設計の詳細は `docs/form_sender_plan.md` を一次参照としてください。
 
 あくまで処理フローを自然言語で定義する文書であるため、システム要件や実装計画、運用方針等については基本的に記述しません。
 
-## 関連ファイル
+## 関連ファイル（最新版）
 - **ワークフロー**: `.github/workflows/form-sender.yml`
-- **実行ファイル**: `src/form_sender_worker.py`
+- **実行ファイル**: `src/form_sender_runner.py`
 - **GAS制御システム**: `gas/form-sender/Code.gs`, `gas/form-sender/SpreadsheetClient.gs`, `gas/form-sender/GitHubClient.gs`
+  - （Supabase直呼び出し）`gas/form-sender/SupabaseClient.gs`
 
 ## 1. システム概要と実行仕様
 
@@ -28,11 +29,11 @@ GAS トリガー + GitHub Actions ワークフローによるフォーム送信�
 4. **連続ループ実行**: 営業時間等の制限を判定した上で、実行可能かどうかを判定した上で、ワークフロー内で処理対象を10件ずつ抽出・処理
 5. **結果記録**: GitHub Actions内で各処理ループごとに Supabase に結果を直接保存
 
-#### **1.1.2. GitHub Actions ワークフロー仕様**
+#### **1.1.2. GitHub Actions ワークフロー仕様（更新）**
 
 - **ワークフローファイル**: `.github/workflows/form-sender.yml`
 - **トリガータイプ**: `repository_dispatch` (イベントタイプ: `form_sender_task`)
-- **実行ファイル**: `src/form_sender_worker.py`
+- **実行ファイル**: `src/form_sender_runner.py`
 
 **処理単位**: 1つのワークフロー実行につき1つのターゲティング設定を処理（複数のターゲティングがアクティブな場合は、それぞれ独立したワークフローが並行実行される）
 
@@ -46,15 +47,20 @@ GAS トリガー + GitHub Actions ワークフローによるフォーム送信�
 - **処理時間制御**: 開始から5時間経過で新規処理停止
 - **ブラウザ**: Playwright Chromium
 
-**連続処理仕様**:
-- **処理単位**: 10件ずつの企業を抽出・処理
-- **ループ制御**: 営業時間・1日送信数制限内で連続実行
-- **時間制限**: 開始から5時間経過時点で新規処理対象取得ループに進まない
-- **終了条件**: 処理対象企業がない場合、または5時間制限到達時
+**連続処理仕様（更新）**:
+- **処理単位**: `send_queue` から RPC `claim_next_batch(..., limit=1)` で1件ずつ原子的専有
+- **ループ制御**: 営業時間（`send_days_of_week`, `send_start_time`, `send_end_time`）と日次成功上限（`max_daily_sends`）を Runner がJST基準で判定
+- **バックオフ**: キュー枯渇時は指数バックオフ（最大60秒、ジッターあり）
+- **終了条件**: キュー枯渇の継続／日次成功上限到達／ワークフロータイムアウト（`timeout-minutes`）
 
-### 1.2. データベース構成仕様
+### 1.2. データベース構成仕様（更新）
 
-**アーキテクチャ**: GAS（スプレッドシート専用）+ GitHub Actions（Supabase専用）の完全分離構成
+本システムは「当日用ワークキュー」として `send_queue` を中心に運用します（毎朝リセット）。詳細は `docs/form_sender_plan.md` の「3. Supabase 設計」を参照してください。
+
+主要要素:
+- `send_queue` テーブル（当日分のみ、毎朝リセット）
+- RPC: `reset_send_queue_all`, `create_queue_for_targeting`, `claim_next_batch`, `mark_done`, `requeue_stale_assigned`
+- `submissions` テーブル（送信結果; `submitted_at` はJSTで保存）
 
 #### **1.2.1. スプレッドシート `client`シート（GAS担当）**
 
@@ -163,78 +169,15 @@ RuleBasedAnalyzerが動的マッピング時に参照するクライアントデ
 - message: メッセージ内容
 
 
-### 1.4. 処理対象企業抽出アルゴリズム
+### 1.4. 送信キュー（send_queue）運用（新方式）
 
-#### **1.4.1. 大量取得 + 一時ファイル管理方式**
+処理対象企業の抽出・整列は GAS → Supabase の RPC で実施し、当日用の `send_queue` に投入します。
 
-処理対象企業の抽出は、パフォーマンス向上のため大量取得して一時ファイルに保存し、そこから順次処理する方式を採用します。
+- `reset_send_queue_all()`（06:25 JST）で当日用キューを完全リセット
+- `create_queue_for_targeting(targeting_id, targeting_sql, ng_companies, ...)`（06:35–06:50 JST）で各ターゲティングの候補を抽出・整列・分割投入（上限5,000件/targeting）
+- Runner は `claim_next_batch(..., limit=1)` で1件ずつ原子的に専有し、処理結果を `mark_done(...)` で記録
 
-**最適化されたSQL構築パターン**:
-```sql
-SELECT c.id, c.name, c.form_url
-FROM companies c
-LEFT JOIN submissions s ON (s.company_id = c.id AND s.status = 'success' AND s.targeting_id = :targeting_id)
-WHERE c.form_url IS NOT NULL
-  AND [client_config['targeting_sql']の条件]
-  AND c.name !~ :ng_companies_pattern
-  AND (c.prohibition_detected IS NULL OR c.prohibition_detected = false)
-  AND s.company_id IS NULL
-LIMIT 1000
-```
-
-**処理フロー**:
-1. **初回大量取得**: ワークフロー開始時に最大1000件の処理対象企業を取得
-2. **一時ファイル保存**: 取得した企業情報をJSON形式で一時ファイルに保存
-3. **順次処理**: ファイルから10件ずつ読み込んで処理実行
-4. **残件管理**: 一時ファイルの残件数が0件になったら再クエリ実行
-5. **再取得**: 新しい処理対象がある場合は追加取得して一時ファイルに追記
-
-#### **1.4.2. ng_companies除外処理**
-
-スプレッドシートの `ng_companies` カラムに送信回避すべき企業名がカンマ区切りで格納されています。
-
-**除外処理アルゴリズム**:
-1. **データ取得**: client_configの `ng_companies` 値を取得（例: `株式会社A,合同会社B,○○商事`）
-2. **null/空文字チェック**: nullまたは空文字の場合は除外処理をスキップ
-3. **区切り文字変換**: カンマ（`,`）をパイプ（`|`）に置換して正規表現パターンを作成
-4. **SQL組み込み**: `companies.name !~ 'パターン'`としてWHERE句に追加（PostgreSQL正規表現演算子を使用）
-
-**処理例**:
-```sql
--- client_config['ng_companies'] = "株式会社A,合同会社B"の場合  
-WHERE companies.name !~ '株式会社A|合同会社B'
-```
-
-**エラーハンドリング**:
-- **無効な正規表現**: SQLエラー発生時はプロセス全体を終了。誤って送信しないようにする。
-- **空文字・null**: 除外処理をスキップして正常処理を継続
-
-#### **1.4.3. 営業禁止による除外処理**
-
-営業目的の送信を禁止する企業の適切な除外のため、以下の条件の企業を処理対象から除外します。
-
-**営業禁止による除外対象**:`companies.prohibition_detected = true`
-- 過去の送信で営業禁止文言が検出された企業
-- お問い合わせフォームページで営業目的の送信を明確に禁止している企業
-
-**NULL値の取り扱い**:
-- `prohibition_detected = NULL`: 未検証状態として処理対象に含める
-- 明示的に`true`が設定された場合のみ除外対象とする
-
-**除外による効果**:
-- 営業禁止企業への不適切な送信回避
-- システムの適切な運用維持
-- 無駄な処理時間の削減
-
-#### **1.4.4. 送信済み企業重複回避システム**
-
-同一ターゲティング設定での重複送信を防ぐため、大量取得時に送信成功済み企業を一括除外します。
-
-**LEFT JOIN による高速除外**:
-```sql
-LEFT JOIN submissions s ON (s.company_id = c.id AND s.status = 'success' AND s.targeting_id = :targeting_id)
-WHERE s.company_id IS NULL  -- 送信済みでない企業のみ取得
-```
+`targeting_sql` は WHERE 断片として扱い、GAS 側・サーバ側（関数内）で最低限の危険句を拒否します。送信済み成功分は `submissions.success=true` を参照して自動除外されます。
 
 ### 1.5. GAS側制御システム
 

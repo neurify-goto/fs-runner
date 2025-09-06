@@ -118,6 +118,9 @@ Each GAS module follows the same pattern:
 * **Test Environment:** Ensure test files do not expose real company data in logs
 * **LogSanitizer Usage:** Utilize the existing LogSanitizer class to automatically mask sensitive information in logs
 
+#### GAS Projects (Private Environments)
+- GAS projects for this system are operated in private, internal environments. Therefore, masking of company names and URLs is NOT required in GAS logs. Keep masking and redaction strictly enforced in CI/CD (GitHub Actions) logs.
+
 ### **File Organization Standards**
 
 #### **Documentation Management**
