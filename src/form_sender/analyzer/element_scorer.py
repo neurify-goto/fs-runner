@@ -88,6 +88,8 @@ class ElementScorer:
             'メールアドレス': ['メール', 'メールアドレス', 'mail', 'email', 'e-mail', 'アドレス'],
             '姓': ['姓', '苗字', '名字', 'せい', 'みょうじ'],
             '名': ['名', '名前', 'めい'],
+            '姓ひらがな': ['ひらがな', 'ふりがな', 'せい', '姓'],
+            '名ひらがな': ['ひらがな', 'ふりがな', 'めい', '名'],
             # 『携帯』はモバイル番号専用ラベルに引っ張られやすいため除外
             '電話番号': ['電話', '電話番号', 'tel', 'phone', '連絡先'],
             '住所': ['住所', '所在地', 'じゅうしょ', '都道府県', '市区町村'],
@@ -205,21 +207,96 @@ class ElementScorer:
             element_info = await self._get_element_info(element)
             score_details['element_info'] = element_info
             
-            # カナフィールドの特別処理
+            # カナ/ふりがな系の特別処理（誤マッピング抑止を強化）
             element_name = (element_info.get('name', '') or '').lower()
             element_id = (element_info.get('id', '') or '').lower()
             element_class = (element_info.get('class', '') or '').lower()
-            has_kana_in_element = 'kana' in element_name or 'kana' in element_id or 'kana' in element_class
-            
+            element_placeholder = (element_info.get('placeholder', '') or '').lower()
+
+            def _is_kana_like_text(t: str) -> bool:
+                if not t:
+                    return False
+                t = t.lower()
+                kana_tokens = [
+                    'kana', 'katakana', 'hiragana', 'furigana',
+                    'ｶﾅ', 'ｶﾀｶﾅ', 'ﾌﾘｶﾞﾅ',
+                    'カナ', 'カタカナ', 'フリガナ', 'ふりがな', 'ひらがな',
+                    '読み', 'よみ'
+                ]
+                return any(tok in t for tok in kana_tokens)
+
+            def _is_hiragana_like_text(t: str) -> bool:
+                if not t:
+                    return False
+                t = t.lower()
+                hiragana_tokens = ['hiragana', 'ひらがな', 'ふりがな']  # 『ふりがな』は概ねひらがな指定
+                return any(tok in t for tok in hiragana_tokens)
+
+            def _is_katakana_like_text(t: str) -> bool:
+                if not t:
+                    return False
+                t = t.lower()
+                katakana_tokens = ['katakana', 'カタカナ', 'ｶﾀｶﾅ', 'カナ', 'ｶﾅ', 'フリガナ']  # 『フリガナ』は多くがカタカナ指定
+                return any(tok.lower() in t for tok in katakana_tokens)
+
+            def _field_is_kana_like(name: str, patterns: Dict[str, Any]) -> bool:
+                try:
+                    if any(k in name for k in ['カナ', 'ひらがな', 'ふりがな']):
+                        return True
+                    for lst_key in ('names', 'placeholders', 'ids', 'classes'):
+                        for v in patterns.get(lst_key, []) or []:
+                            if _is_kana_like_text(str(v)):
+                                return True
+                except Exception:
+                    pass
+                return False
+
+            has_kana_in_element = (
+                _is_kana_like_text(element_name)
+                or _is_kana_like_text(element_id)
+                or _is_kana_like_text(element_class)
+                or _is_kana_like_text(element_placeholder)
+            )
+
+            # ひらがな/カタカナを区別した属性
+            is_hira_in_element = (
+                _is_hiragana_like_text(element_name)
+                or _is_hiragana_like_text(element_id)
+                or _is_hiragana_like_text(element_class)
+                or _is_hiragana_like_text(element_placeholder)
+            )
+            is_kata_in_element = (
+                _is_katakana_like_text(element_name)
+                or _is_katakana_like_text(element_id)
+                or _is_katakana_like_text(element_class)
+                or _is_katakana_like_text(element_placeholder)
+            )
+
             kana_indicators = field_patterns.get('kana_indicator', [])
-            is_kana_field = bool(kana_indicators)
-            
-            # ケース1: 要素がカナを含み、フィールドが非カナ → 除外
+            is_kana_field = bool(kana_indicators) or _field_is_kana_like(field_name, field_patterns)
+
+            # ケース1: 要素がカナ/ふりがな系で、フィールドが非カナ系 → 強制除外
             if has_kana_in_element and not is_kana_field:
-                logger.debug(f"Element with 'kana' excluded for non-kana field {field_name}: name='{element_name}'")
+                logger.debug(
+                    f"Element excluded for non-kana field '{field_name}': name='{element_name}', ph='{element_placeholder}'"
+                )
                 score_details['total_score'] = -999
                 score_details['excluded'] = True
-                score_details['exclusion_reason'] = 'kana_element_non_kana_field'
+                score_details['exclusion_reason'] = 'kana_like_element_for_non_kana_field'
+                return -999, score_details
+
+            # ケース2: フィールドが『カナ』指定なのに要素がひらがな寄り → 除外（誤マッチ防止）
+            if 'カナ' in field_name and is_hira_in_element and not is_kata_in_element:
+                score_details['total_score'] = -999
+                score_details['excluded'] = True
+                score_details['exclusion_reason'] = 'hiragana_like_element_for_kana_field'
+                return -999, score_details
+
+            # ケース3: フィールドが『ひらがな』指定なのに要素がカタカナ寄り → 除外
+            if 'ひらがな' in field_name and is_kata_in_element:
+                score_details['total_score'] = -999
+                score_details['excluded'] = True
+                score_details['exclusion_reason'] = 'katakana_like_element_for_hiragana_field'
                 return -999, score_details
             
             # ケース2: フィールドがカナで、要素がカナを含まない → 除外
@@ -680,31 +757,55 @@ class ElementScorer:
     
     def _calculate_placeholder_score(self, placeholder: str, field_patterns: Dict[str, Any], 
                                    field_name: str) -> Tuple[int, List[str]]:
-        """placeholder属性によるスコア計算（30点＋日本語形態素解析25点）"""
+        """placeholder属性によるスコア計算（40点相当）
+
+        汎用精度改善:
+        - 逆包含（placeholder ⊂ pattern）の禁止
+        - 日本語の語境界（CJK）を考慮した短トークンの厳格一致
+        - 非カナ氏名フィールドに対する『ふりがな/カナ/ひらがな』含有の無効化
+        """
         if not placeholder:
             return 0, []
-        
+
         pattern_placeholders = field_patterns.get('placeholders', [])
         matches = []
         total_score = 0
         placeholder_lower = placeholder.lower()
-        
-        # 通常のplaceholderマッチ
+
+        # 非カナ氏名フィールドは『ふりがな/カナ/ひらがな』を含むplaceholderを無効化
+        kana_like_tokens = ['kana', 'katakana', 'hiragana', 'furigana', 'カナ', 'カタカナ', 'フリガナ', 'ふりがな', 'ひらがな']
+        if field_name in {'姓', '名', '統合氏名'} and any(tok in placeholder_lower for tok in kana_like_tokens):
+            # スコア付与なし（強い誤マッチ抑止）
+            return 0, []
+
         for pattern_placeholder in pattern_placeholders:
             pattern_lower = pattern_placeholder.lower()
-            if (pattern_lower in placeholder_lower or 
-                placeholder_lower in pattern_lower):
-                matches.append(f"placeholder:{pattern_placeholder}")
-                total_score += self.SCORE_WEIGHTS['placeholder']
-                logger.debug(f"Placeholder match found: {pattern_placeholder} in {placeholder}")
-                break
-        
-        # 日本語形態素解析ボーナス
-        japanese_score = self._calculate_japanese_morphology_score(placeholder, field_name)
-        if japanese_score > 0:
-            total_score += japanese_score
-            matches.append(f"japanese_morphology:{field_name}")
-        
+            # 逆包含は誤検出の温床となるため排除
+            # 短い/曖昧トークンは語境界必須で判定
+            if len(pattern_lower) <= 2 or pattern_lower in self.AMBIGUOUS_TOKENS:
+                if self._contains_token_with_boundary(placeholder_lower, pattern_lower):
+                    matches.append(f"placeholder:{pattern_placeholder}")
+                    total_score += self.SCORE_WEIGHTS['placeholder']
+                    logger.debug(f"Placeholder token-boundary match: {pattern_placeholder} in {placeholder}")
+                    break
+            else:
+                if pattern_lower in placeholder_lower:
+                    matches.append(f"placeholder:{pattern_placeholder}")
+                    total_score += self.SCORE_WEIGHTS['placeholder']
+                    logger.debug(f"Placeholder match found: {pattern_placeholder} in {placeholder}")
+                    break
+
+        # 日本語形態素解析ボーナス（ただし非カナ氏名×ふりがな/カナ/ひらがなは除外）
+        jp_score_allowed = True
+        if field_name in {'姓', '名', '統合氏名'} and any(tok in placeholder_lower for tok in kana_like_tokens):
+            jp_score_allowed = False
+
+        if jp_score_allowed:
+            japanese_score = self._calculate_japanese_morphology_score(placeholder, field_name)
+            if japanese_score > 0:
+                total_score += japanese_score
+                matches.append(f"japanese_morphology:{field_name}")
+
         return total_score, matches
     
     def _calculate_class_score(self, element_class: str, field_patterns: Dict[str, Any]) -> Tuple[int, List[str]]:
@@ -1047,18 +1148,27 @@ class ElementScorer:
         return 0
     
     def _calculate_japanese_morphology_score(self, text: str, field_name: str) -> int:
-        """日本語形態素解析による追加スコア（25点）"""
+        """日本語形態素解析による追加スコア（25点）
+
+        ガード:
+        - 非カナ氏名（姓/名/統合氏名）に対し、『ふりがな/カナ/ひらがな』を含むテキストでは加点しない
+        """
         if not text:
             return 0
-        
+
+        text_lower = str(text).lower()
+        if field_name in {'姓', '名', '統合氏名'}:
+            if any(tok in text_lower for tok in ['kana', 'katakana', 'hiragana', 'furigana', 'カナ', 'カタカナ', 'フリガナ', 'ふりがな', 'ひらがな']):
+                return 0
+
         # 簡略版形態素解析（完全な形態素解析は重いため）
         field_keywords = self.japanese_patterns.get(field_name, [])
-        
+
         for keyword in field_keywords:
             if keyword in text:
                 logger.debug(f"Japanese morphology match: {keyword} in {text}")
                 return self.SCORE_WEIGHTS['japanese_morphology']
-        
+
         return 0
     
 # 削除: 複雑なボーナス計算は不要（単純化のため）
@@ -1431,14 +1541,16 @@ class ElementScorer:
                                txt === '*' || txt === '＊' || txt.includes('必須');
                       };
                       let p = el.parentElement; let depth = 0;
-                      while (p && depth < 4) {
-                        // 兄弟方向にスキャン
-                        let sib = p.previousElementSibling; let s = 0;
-                        while (sib && s < 3) {
-                          if (hasMark(sib)) return true;
-                          const spans = sib.querySelectorAll('span,i,em,b,strong');
-                          for (const sp of spans) { if (hasMark(sp)) return true; }
-                          sib = sib.previousElementSibling; s++;
+                      while (p && depth < 2) { // 直近の親までに限定（セクション跨ぎの誤検出防止）
+                        if (depth === 0) {
+                          // 兄弟方向にスキャン（直近の親の兄弟のみ）
+                          let sib = p.previousElementSibling; let s = 0;
+                          while (sib && s < 3) {
+                            if (hasMark(sib)) return true;
+                            const spans = sib.querySelectorAll('span,i,em,b,strong');
+                            for (const sp of spans) { if (hasMark(sp)) return true; }
+                            sib = sib.previousElementSibling; s++;
+                          }
                         }
                         // 親内の強調要素を走査
                         const spans = p.querySelectorAll('span.require, span.required, i, em, b, strong');
@@ -1584,24 +1696,44 @@ class ElementScorer:
             required_markers = ['*', '＊', '必須', 'Required', 'Mandatory', 'Must', '(必須)', '（必須）', '[必須]', '［必須］']
             optional_markers = ['任意', 'optional', 'お分かりの場合', '分かる場合', 'お持ちの場合', 'あれば', '可能な範囲']
 
-            found_required = False
+            def _is_strict_required_text(s: str) -> bool:
+                if not s:
+                    return False
+                t = s.strip()
+                # 純粋な必須表示のみ許可（誤検出抑止）
+                return t in {'必須', '*', '＊', '※必須', '※ 必須', '(必須)', '（必須）', '[必須]', '［必須］'}
+
+            strong_sources = {'dt_label', 'dt_label_index', 'th_label', 'th_label_index', 'label_for', 'aria_labelledby', 'ul_li_label'}
+            near_sources_prefix = ('prev_sibling_', 'label_parent')
+
+            # 1) 強いコンテキストのみでの判定（推奨）
             for context in contexts:
                 text = context.text or ''
-                # オプション指示があれば必須扱いしない
                 if any(tok in text for tok in optional_markers):
                     return False
-                if any(marker in text for marker in required_markers):
-                    # 強いコンテキスト（dt_label、th_label、th_label_index 等）は信頼度高
-                    if context.source_type in {'dt_label', 'th_label', 'th_label_index', 'label_for', 'aria_labelledby'}:
-                        found_required = True
-                        break
-                    # 位置ベースのコンテキストも一定の信頼度があれば採用
-                    elif context.confidence >= 0.7:
-                        found_required = True
-                        break
-            if found_required:
-                return True
-                        
+                if context.source_type in strong_sources and any(marker in text for marker in required_markers):
+                    return True
+
+            # 2) 次善: 近傍の兄弟/親ラベル系
+            for context in contexts:
+                text = context.text or ''
+                st = getattr(context, 'source_type', '') or ''
+                if any(tok in text for tok in optional_markers):
+                    return False
+                if st.startswith(near_sources_prefix) or st in {'parent_element'}:
+                    if any(marker in text for marker in required_markers):
+                        return True
+
+            # 3) 位置ベース: 厳格条件（テキストが『必須』系のみ、近距離、上/左位置）
+            for context in contexts:
+                text = context.text or ''
+                st = getattr(context, 'source_type', '') or ''
+                pos = getattr(context, 'position_relative', '') or ''
+                dist = float(getattr(context, 'distance', 9999) or 9999)
+                if st in {'nearby', 'position', ''} or st not in strong_sources:
+                    if _is_strict_required_text(text) and pos in {'above', 'left'} and dist <= 50:
+                        return True
+
             return False
             
         except Exception as e:

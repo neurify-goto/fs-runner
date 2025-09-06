@@ -22,6 +22,7 @@ class SplitPattern(Enum):
     PHONE_3_SPLIT = "phone_3_split"      # 電話3分割: [1][2][3]
     PHONE_2_SPLIT = "phone_2_split"      # 電話2分割: [1,2][3]
     NAME_2_SPLIT = "name_2_split"        # 姓名2分割: [姓][名]
+    # 既存の NAME_2_SPLIT を、ひらがな/カナの2分割にも共用する
     EMAIL_2_SPLIT = "email_2_split"      # メール2分割: [user][domain]
     POSTAL_2_SPLIT = "postal_2_split"    # 郵便番号2分割: [前3桁][後4桁]
 
@@ -70,6 +71,22 @@ class SplitFieldDetector:
                 # 会社名（「会社名」「企業名」等）に含まれる『名』にヒットしてしまうのを避ける
                 'keywords': ['姓', '苗字', 'last', 'first', 'family', 'given', 'lastname', 'firstname', 'family_name', 'given_name'],
                 'split_patterns': {  # 厳格化: 2分割のみ対象
+                    2: SplitPattern.NAME_2_SPLIT
+                },
+                'max_fields': 2
+            },
+            'name_hiragana': {
+                # ひらがな/ふりがな（ひらがな指定）
+                'keywords': ['姓ひらがな', '名ひらがな', 'ひらがな', 'ふりがな', 'hiragana'],
+                'split_patterns': {
+                    2: SplitPattern.NAME_2_SPLIT
+                },
+                'max_fields': 2
+            },
+            'name_kana': {
+                # カタカナ/フリガナ（カタカナ指定）
+                'keywords': ['姓カナ', '名カナ', 'カナ', 'カタカナ', 'フリガナ', 'katakana', 'kana'],
+                'split_patterns': {
                     2: SplitPattern.NAME_2_SPLIT
                 },
                 'max_fields': 2
@@ -233,6 +250,12 @@ class SplitFieldDetector:
         if field_name in canonical_name_keys:
             return 'name'
 
+        # ひらがな/カナの正規名に対応
+        if field_name in {'姓ひらがな', '名ひらがな'}:
+            return 'name_hiragana'
+        if field_name in {'姓カナ', '名カナ'}:
+            return 'name_kana'
+
         # 2) 誤検出ガード: 会社名/組織名/施設名など『〇〇名』は姓名ではない
         company_tokens = [
             '社名', '会社名', '企業名', '法人名', '団体名', '組織名',
@@ -257,6 +280,11 @@ class SplitFieldDetector:
                 for keyword in rules['keywords']:
                     if keyword.lower() in combined_text:
                         return 'name'
+            elif field_type in {'name_hiragana', 'name_kana'}:
+                # ふりがな/カタカナ/ひらがな手がかりを含む場合に限定
+                for keyword in rules['keywords']:
+                    if keyword.lower() in combined_text:
+                        return field_type
             else:
                 for keyword in rules['keywords']:
                     if keyword.lower() in combined_text:
@@ -583,7 +611,7 @@ class SplitFieldDetector:
     
     def _validate_type_specific_sequence(self, field_type: str, sorted_fields: List[Dict[str, Any]]) -> bool:
         """フィールドタイプ固有の順序検証"""
-        if field_type == 'name':
+        if field_type in {'name', 'name_hiragana', 'name_kana'}:
             # 姓名の順序：姓 → 名（厳格化）
             # 連続性チェックは別途 _validate_input_order_contiguity() で実施済み
             # ここではラベル/フィールド名の語彙検証を双方に適用する
@@ -610,6 +638,17 @@ class SplitFieldDetector:
 
             surname_keywords = ['姓', '苗字', 'せい', 'last', 'lastname', 'family', 'family_name', 'surname']
             given_keywords   = ['名', 'めい', 'first', 'firstname', 'given', 'given_name', 'forename']
+
+            # ひらがな/カナの追加手がかり（セイ/メイ、かな種別）
+            if field_type in {'name_hiragana', 'name_kana'}:
+                surname_keywords += ['セイ', 'sei']
+                given_keywords += ['メイ', 'mei']
+                if field_type == 'name_hiragana':
+                    surname_keywords += ['ひらがな', 'ふりがな', 'hiragana']
+                    given_keywords += ['ひらがな', 'ふりがな', 'hiragana']
+                if field_type == 'name_kana':
+                    surname_keywords += ['カナ', 'カタカナ', 'フリガナ', 'katakana']
+                    given_keywords += ['カナ', 'カタカナ', 'フリガナ', 'katakana']
 
             # 最初が姓系、次が名系のいずれかに一致していること
             first_ok = any(k in first_text for k in surname_keywords)
@@ -709,6 +748,8 @@ class SplitFieldDetector:
             'address': ['住所', '都道府県', '市区町村', '番地', '建物', 'address'],
             'phone': ['電話', '電話番号', 'tel', 'phone', '市外局番', '局番'],
             'name': ['名前', '姓', '名', 'name', 'last', 'first', '苗字'],
+            'name_hiragana': ['ひらがな', 'ふりがな', 'せい', 'めい', 'hiragana'],
+            'name_kana': ['カナ', 'カタカナ', 'フリガナ', 'セイ', 'メイ', 'katakana', 'kana'],
             'email': ['メール', 'email', 'mail', 'e-mail'],
             'postal_code': ['郵便番号', 'postal', 'zip', '〒']
         }
@@ -1185,6 +1226,12 @@ class SplitFieldDetector:
             else:
                 assignments.update(self._generate_postal_assignments(group, client_info))
         
+        # 姓名かな/ひらがな（同じ NAME_2_SPLIT を使用）
+        if group.pattern == SplitPattern.NAME_2_SPLIT and group.field_type == 'name_hiragana':
+            assignments.update(self._generate_name_hiragana_assignments(group, client_info))
+        if group.pattern == SplitPattern.NAME_2_SPLIT and group.field_type == 'name_kana':
+            assignments.update(self._generate_name_kana_assignments(group, client_info))
+        
         return assignments
     
     def _generate_split_phone_assignments(self, group: SplitFieldGroup, 
@@ -1248,6 +1295,26 @@ class SplitFieldDetector:
                 assignments[field_name] = name_parts[i]
         
         logger.debug(f"Split name assignments: {assignments}")
+        return assignments
+
+    def _generate_name_hiragana_assignments(self, group: SplitFieldGroup, client_info: Dict[str, Any]) -> Dict[str, str]:
+        """姓名ひらがなの分割入力用割り当て"""
+        assignments = {}
+        last = client_info.get('last_name_hiragana', '').strip()
+        first = client_info.get('first_name_hiragana', '').strip()
+        if len(group.fields) >= 2:
+            assignments[group.fields[0].get('field_name', '')] = last
+            assignments[group.fields[1].get('field_name', '')] = first
+        return assignments
+
+    def _generate_name_kana_assignments(self, group: SplitFieldGroup, client_info: Dict[str, Any]) -> Dict[str, str]:
+        """姓名カナ（カタカナ）の分割入力用割り当て"""
+        assignments = {}
+        last = client_info.get('last_name_kana', '').strip()
+        first = client_info.get('first_name_kana', '').strip()
+        if len(group.fields) >= 2:
+            assignments[group.fields[0].get('field_name', '')] = last
+            assignments[group.fields[1].get('field_name', '')] = first
         return assignments
     
     def _generate_split_email_assignments(self, group: SplitFieldGroup, 
