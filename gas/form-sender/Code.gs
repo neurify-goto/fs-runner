@@ -202,7 +202,8 @@ function processTargeting(targetingId) {
       return { success: false, message: 'ターゲティング設定が見つからない' };
     }
     
-    console.log(`ターゲティング設定取得完了（2シート結合）: ${targetingConfig.client?.company_name} (client_id: ${targetingConfig.client_id})`);
+    // 機微情報は出さない
+    console.log(`ターゲティング設定取得完了（2シート結合）: ***COMPANY_REDACTED*** (client_id: ${targetingConfig.client_id})`);
     
     // 営業時間チェックはGitHub Actions側で実施（重複を避けるため、ここでは基本チェックのみ）
     console.log('営業時間制御は GitHub Actions 側で実施');
@@ -244,6 +245,13 @@ function processTargeting(targetingId) {
  */
 function resetSendQueueAllDaily() {
   try {
+    // 07:00 JST 以降は安全のため実行禁止
+    const nowJstStr = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm');
+    const [hh, mm] = nowJstStr.split(':').map(Number);
+    if (hh >= 7) { // 07:00 以降
+      console.warn('resetSendQueueAllDaily: 07:00以降のためスキップしました');
+      return { success: false, skipped: true, reason: 'after 07:00 JST' };
+    }
     const res = resetSendQueueAll();
     console.log('send_queue truncated');
     return { success: true, result: res };
@@ -312,7 +320,7 @@ function buildSendQueueForAllTargetings() {
           dateJst,
           targeting.targeting_sql || '',
           targeting.ng_companies || '',
-          targeting.max_daily_sends || 0,
+          5000,
           8
         );
         const n = Number(inserted) || 0;
@@ -500,7 +508,8 @@ function triggerFormSenderWorkflow(targetingId) {
       return { success: false, message: 'ターゲティング設定が見つからない' };
     }
     
-    console.log(`クライアント設定取得完了: ${clientConfig.client?.company_name} (client_id: ${clientConfig.client_id})`);
+    // 機微情報は出さない
+    console.log(`クライアント設定取得完了: ***COMPANY_REDACTED*** (client_id: ${clientConfig.client_id})`);
     
     // スプレッドシート設定付きでワークフローをトリガー
     const result = sendRepositoryDispatch('form_sender_task', targetingId, clientConfig);
@@ -510,7 +519,7 @@ function triggerFormSenderWorkflow(targetingId) {
       return {
         success: true,
         targetingId: targetingId,
-        company_name: clientConfig.client?.company_name
+        company_name: '***COMPANY_REDACTED***'
       };
     } else {
       console.error('GitHub Actions ワークフロートリガー失敗');

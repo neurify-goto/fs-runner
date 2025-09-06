@@ -51,12 +51,6 @@ jobs:
         pip install -r requirements.txt
         pip install setproctitle  # マルチプロセス名設定用
         
-    - name: Install Playwright browsers
-      run: |
-        playwright install chromium
-        sudo apt-get update || true
-        sudo apt-get install -y --no-install-recommends libglib2.0-0 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libasound2t64 || true
-
     - name: Cache Playwright browsers
       uses: actions/cache@v4
       with:
@@ -64,6 +58,12 @@ jobs:
         key: ${{ runner.os }}-ms-playwright-${{ hashFiles('**/requirements.txt') }}
         restore-keys: |
           ${{ runner.os }}-ms-playwright-
+
+    - name: Install Playwright browsers
+      run: |
+        playwright install chromium
+        sudo apt-get update || true
+        sudo apt-get install -y --no-install-recommends libglib2.0-0 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libasound2t64 || true
 
     - name: Save client config to temporary file
       run: |
