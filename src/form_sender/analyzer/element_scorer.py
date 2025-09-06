@@ -772,6 +772,18 @@ class ElementScorer:
         total_score = 0
         placeholder_lower = placeholder.lower()
 
+        # 安全ガード: 『会社名』系の曖昧一致抑止
+        # 背景: プレースホルダーが『名』である氏名フィールドが、
+        #       パターン『会社名』に対して逆包含的に誤加点される事例があった。
+        # 対策: 『会社名』フィールドでは、プレースホルダーに企業を示唆する語が
+        #       一切含まれない場合は placeholder マッチを無効化する。
+        if field_name == '会社名':
+            corp_hints = ['会社', '企業', '法人', '団体', '組織', '社名', '御社', '貴社',
+                          '会社・団体', '店舗', '病院', '施設', '学校', '大学', '園', '館', '事業者', '屋号']
+            if not any(h in placeholder_lower for h in corp_hints):
+                # 企業性を示すヒントがなければ placeholder による加点はしない
+                pattern_placeholders = []
+
         # 非カナ氏名フィールドは『ふりがな/カナ/ひらがな』を含むplaceholderを無効化
         kana_like_tokens = ['kana', 'katakana', 'hiragana', 'furigana', 'カナ', 'カタカナ', 'フリガナ', 'ふりがな', 'ひらがな']
         if field_name in {'姓', '名', '統合氏名'} and any(tok in placeholder_lower for tok in kana_like_tokens):
