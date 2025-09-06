@@ -10,9 +10,10 @@ from playwright.async_api import Page, ElementHandle, TimeoutError as Playwright
 class FormInputHandler:
     """ページ上のフォーム要素への具体的な入力操作をカプセル化する"""
 
-    def __init__(self, page: Page, worker_id: int):
+    def __init__(self, page: Page, worker_id: int, post_input_delay_ms: int = 200):
         self.page = page
         self.worker_id = worker_id
+        self._post_input_delay_ms = int(post_input_delay_ms) if post_input_delay_ms is not None else 200
         self.logger = logging.getLogger(f"{__name__}.w{worker_id}")
 
     async def fill_rule_based_field(self, field_name: str, field_info: Dict[str, Any], value: str) -> bool:
@@ -43,8 +44,11 @@ class FormInputHandler:
         try:
             input_success = await self._fill_element(element, value, input_type, field_name, field_info)
             if input_success:
-                # 短時間待機（デフォルト500ms→200msに短縮。必要時は検証NGで再入力が走る）
-                await self.page.wait_for_timeout(200)
+                # 短時間待機（設定優先。必要時は検証NGで再入力が走る）
+                try:
+                    await self.page.wait_for_timeout(self._post_input_delay_ms)
+                except Exception:
+                    pass
                 verification_success = await self._verify_field_input(element, field_name, input_type, value)
                 if verification_success:
                     self.logger.info(f"Field operation completed successfully - {field_name}")

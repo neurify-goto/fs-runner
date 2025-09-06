@@ -609,7 +609,12 @@ class IsolatedFormWorker:
 
             await self._perform_dynamic_content_loading()
 
-            input_handler = FormInputHandler(self._dom_context, self.worker_id)
+            post_delay = 200
+            try:
+                post_delay = int(self.config.get('timeout_settings', {}).get('post_input_delay_ms', 200))
+            except Exception:
+                post_delay = 200
+            input_handler = FormInputHandler(self._dom_context, self.worker_id, post_delay)
             filled_fields = 0
 
             if input_assignments:
@@ -677,7 +682,12 @@ class IsolatedFormWorker:
 
             # 送信ボタンの有効化が遅延するケースに備えて、わずかに待機（計画: 200ms）
             try:
-                await self.page.wait_for_timeout(200)
+                post_delay = 200
+                try:
+                    post_delay = int(self.config.get('timeout_settings', {}).get('post_input_delay_ms', 200))
+                except Exception:
+                    post_delay = 200
+                await self.page.wait_for_timeout(post_delay)
             except Exception:
                 pass
 

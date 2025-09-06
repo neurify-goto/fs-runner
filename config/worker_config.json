@@ -39,6 +39,7 @@
       "element_wait": 15000,
       "click_timeout": 5000,
       "input_timeout": 5000,
+      "post_input_delay_ms": 200,
       "pre_processing_max": 30000,
       "dynamic_message_wait": 15000,
       "dom_monitoring": 8000,

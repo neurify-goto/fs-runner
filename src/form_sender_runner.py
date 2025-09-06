@@ -152,7 +152,13 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             rows = resp.data or []
         except Exception as e:
             logger.error(f"claim_next_batch RPC error: {e}")
-            await asyncio.sleep(2)
+            # バックオフの初期値（設定化）
+            try:
+                runner_cfg = get_worker_config().get('runner', {})
+                sleep_s = int(runner_cfg.get('backoff_initial', 2))
+            except Exception:
+                sleep_s = 2
+            await asyncio.sleep(sleep_s)
             return False
 
         if not rows:
