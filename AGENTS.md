@@ -124,6 +124,7 @@ Each GAS module follows the same pattern:
 * **Documentation Placement:** All documentation files (*.md) must be placed in the `docs/` directory.
 * **Documentation Structure:** Organize documentation by feature or module to maintain clarity and findability.
 * **Documentation Naming:** Use descriptive names that clearly indicate the content and purpose of each document.
+* **Documentation Creation Policy:** NEVER proactively create documentation files (*.md) or README files unless explicitly requested by the user. Always prefer editing existing files over creating new ones.
 
 #### **SQL Scripts Management**
 * **SQL File Placement:** All SQL scripts, including table definitions, migrations, and stored procedures, must be placed in the `scripts/` directory.
