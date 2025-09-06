@@ -26,7 +26,7 @@ function getGitHubConfig() {
  * @param {Object} clientConfig スプレッドシートから取得したクライアント設定
  * @returns {Object} 送信結果
  */
-function sendRepositoryDispatch(taskType, targetingId, clientConfig) {
+function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = null, runTotal = null) {
   try {
     const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
     if (!githubToken) {
@@ -64,9 +64,19 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig) {
         client_config: clientConfig, // 検証済み2シート構造
         task_type: taskType,
         triggered_at: new Date().toISOString(),
-        gas_version: '2.0.1-2sheet-validated' // バージョン更新で構造確認済みを表示
+        gas_version: '2.1.0-2sheet-validated-cw' // 並列実行対応
       }
     };
+
+    // 追加情報: 並列起動数とインデックス（任意）
+    try {
+      const cw = Math.max(1, parseInt(clientConfig?.targeting?.concurrent_workflow || 1) || 1);
+      payload.client_payload.concurrent_workflow = cw;
+      if (runIndex !== null) payload.client_payload.run_index = runIndex;
+      if (runTotal !== null) payload.client_payload.run_total = runTotal;
+    } catch (e) {
+      // 解析失敗時は無視（後方互換）
+    }
     
     // Repository Dispatch API呼び出し
     const githubConfig = getGitHubConfig();

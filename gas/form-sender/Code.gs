@@ -511,19 +511,36 @@ function triggerFormSenderWorkflow(targetingId) {
     // 機微情報は出さない
     console.log(`クライアント設定取得完了: ***COMPANY_REDACTED*** (client_id: ${clientConfig.client_id})`);
     
-    // スプレッドシート設定付きでワークフローをトリガー
-    const result = sendRepositoryDispatch('form_sender_task', targetingId, clientConfig);
-    
-    if (result && result.success) {
-      console.log('GitHub Actions 連続処理ワークフロートリガー成功');
+    // 並列起動数（targetingシート M列: concurrent_workflow）。空/未定義は1。
+    const cw = Math.max(1, parseInt(clientConfig?.targeting?.concurrent_workflow || 1) || 1);
+    console.log(`並列起動数(concurrent_workflow): ${cw}`);
+
+    let ok = 0;
+    let fail = 0;
+    for (let i = 1; i <= cw; i++) {
+      const result = sendRepositoryDispatch('form_sender_task', targetingId, clientConfig, i, cw);
+      if (result && result.success) {
+        ok++;
+      } else {
+        fail++;
+      }
+      // 連打を避けるための微小ウェイト（API保護）。必要に応じて調整可。
+      if (cw > 1 && i < cw) Utilities.sleep(150);
+    }
+
+    if (ok > 0 && fail === 0) {
+      console.log(`GitHub Actions 連続処理ワークフロートリガー成功（${ok}/${cw}）`);
       return {
         success: true,
         targetingId: targetingId,
-        company_name: '***COMPANY_REDACTED***'
+        started_runs: ok
       };
+    } else if (ok > 0 && fail > 0) {
+      console.warn(`GitHub Actions ワークフロートリガー一部成功（成功:${ok} 失敗:${fail} 合計:${cw}）`);
+      return { success: true, partial: true, targetingId: targetingId, started_runs: ok, failed_runs: fail };
     } else {
       console.error('GitHub Actions ワークフロートリガー失敗');
-      return { success: false, message: 'ワークフロートリガー失敗' };
+      return { success: false, message: 'ワークフロートリガー失敗', started_runs: 0 };
     }
     
   } catch (error) {
