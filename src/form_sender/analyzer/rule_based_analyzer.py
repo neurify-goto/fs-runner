@@ -448,7 +448,8 @@ class RuleBasedAnalyzer:
         for i in range(len(candidates) - 1):
             idx1, fe1 = candidates[i]
             idx2, fe2 = candidates[i + 1]
-            if idx2 - idx1 == 1:  # 連続
+            # 厳密な連続(=1)に限定せず、至近(<=2)も許容（実務でラベル/説明が間に挟まるケース対策）
+            if idx2 - idx1 <= 2:  # 連続/準連続
                 pair = (fe1, fe2)
                 break
 

@@ -139,6 +139,7 @@ class UnmappedElementHandler:
             classified_elements.get("email_inputs", [])
             + classified_elements.get("text_inputs", []),
             mapped_element_ids,
+            field_mapping,
         )
         auto_handled.update(email_conf)
 
@@ -241,12 +242,27 @@ class UnmappedElementHandler:
         # 電話番号の3分割（tel1/tel2/tel3 等）の汎用処理
         try:
             phone_split = await self._auto_handle_split_phone(
-                classified_elements.get("text_inputs", []) or [], mapped_element_ids, field_mapping, client_data
+                (classified_elements.get("tel_inputs", []) or []) + (classified_elements.get("text_inputs", []) or []),
+                mapped_element_ids,
+                field_mapping,
+                client_data,
             )
             auto_handled.update(phone_split)
             mapped_element_ids.update({id(v.get("element")) for v in phone_split.values() if isinstance(v, dict) and v.get("element")})
         except Exception as e:
             logger.debug(f"Auto handle split phone skipped: {e}")
+
+        # 確認用メールアドレスの汎用処理（強シグナルがある場合にコピー入力）
+        try:
+            email_conf = await self._auto_handle_email_confirmation(
+                (classified_elements.get("email_inputs", []) or []) + (classified_elements.get("text_inputs", []) or []),
+                mapped_element_ids,
+                field_mapping,
+            )
+            auto_handled.update(email_conf)
+            mapped_element_ids.update({id(v.get("element")) for v in email_conf.values() if isinstance(v, dict) and v.get("element")})
+        except Exception as e:
+            logger.debug(f"Auto handle email confirmation skipped: {e}")
 
         # 汎用救済: 未マッピングの必須テキスト入力に全角空白を入力
         try:
@@ -262,6 +278,8 @@ class UnmappedElementHandler:
             f"Auto-handled elements: checkboxes={len(checkbox_handled)}, radios={len(radio_handled)}, selects={len(select_handled)}"
         )
         return auto_handled
+
+    
 
     def _demote_unified_name_for_indexed_pairs(
         self,
@@ -422,11 +440,9 @@ class UnmappedElementHandler:
         """
         handled: Dict[str, Dict[str, Any]] = {}
         try:
-            # 1) 候補抽出
-            triples: Dict[int, Tuple[Locator, Dict[str, Any]]] = {}
+            # 1) 候補抽出（既存マッピングの有無に関わらず検出）
+            triples_all: Dict[int, Tuple[Locator, Dict[str, Any]]] = {}
             for el in text_inputs:
-                if id(el) in mapped_element_ids:
-                    continue
                 info = await self.element_scorer._get_element_info(el)
                 if not info.get("visible", True):
                     continue
@@ -449,12 +465,17 @@ class UnmappedElementHandler:
                 # フォールバック: 単純に末尾の数字を使用
                 if not m:
                     m = re.search(r"(\d)(?!.*\d)$", (nm or ide or cls))
-                if not m:
-                    continue
-                idx = int(m.group(1))
+                if m:
+                    idx = int(m.group(1))
+                else:
+                    # さらにフォールバック: 'tel' / 'phone' を含むが数字なし → 1 とみなす
+                    if 'tel' in blob or 'phone' in blob:
+                        idx = 1
+                    else:
+                        continue
                 if idx in (1,2,3):
-                    triples[idx] = (el, info)
-            if not all(k in triples for k in (1,2,3)):
+                    triples_all[idx] = (el, info)
+            if not all(k in triples_all for k in (1,2,3)):
                 return handled
 
             # 2) 統合『電話番号』がこのグループのいずれかに割当てられているなら降格
@@ -465,7 +486,7 @@ class UnmappedElementHandler:
                         group_selectors = set()
                         for idx in (1,2,3):
                             try:
-                                group_selectors.add(await self._generate_playwright_selector(triples[idx][0]))
+                                group_selectors.add(await self._generate_playwright_selector(triples_all[idx][0]))
                             except Exception:
                                 pass
                         if sel_unified in group_selectors:
@@ -483,7 +504,7 @@ class UnmappedElementHandler:
             ]
             labels = {1: '市外局番', 2: '市内局番', 3: '加入者番号'}
             for idx in (1,2,3):
-                el, info = triples[idx]
+                el, info = triples_all[idx]
                 selector = await self._generate_playwright_selector(el)
                 required = await self.element_scorer._detect_required_status(el)
                 handled[f'auto_phone_part_{idx}'] = {
@@ -1224,23 +1245,22 @@ class UnmappedElementHandler:
         return 0
 
     async def _auto_handle_email_confirmation(
-        self, candidates: List[Locator], mapped_element_ids: set
+        self, candidates: List[Locator], mapped_element_ids: set, field_mapping: Dict[str, Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
-        handled = {}
-        confirmation_patterns = [
+        handled: Dict[str, Dict[str, Any]] = {}
+        if 'メールアドレス' not in field_mapping:
+            return handled
+        confirmation_attr_patterns = [
             "email_confirm",
             "mail_confirm",
             "email_confirmation",
             "confirm_email",
             "confirm_mail",
-            "mail2", "mail_2", "email2", "email_2", "confirm-mail", "email-confirm",
-            "メール確認",
-            "確認用メール",
-            "email_check",
-            "mail_check",
-            "re_email",
-            "re_mail",
+            "mail2", "mail_2", "email2", "email_2", "confirm-mail", "email-confirm", "from2",
+            "email_check", "mail_check", "re_email", "re_mail",
         ]
+        confirmation_ctx_tokens = ["確認", "確認用", "再入力", "再度", "もう一度"]
+        blacklist = ["captcha", "image_auth", "spam-block", "token", "otp", "verification"]
         for i, el in enumerate(candidates):
             if id(el) in mapped_element_ids:
                 continue
@@ -1248,26 +1268,39 @@ class UnmappedElementHandler:
             if not info.get("visible", True):
                 continue
             name_id_class = " ".join(
-                [info.get("name", ""), info.get("id", ""), info.get("class", "")]
+                [info.get("name", ""), info.get("id", ""), info.get("class", ""), info.get("placeholder", "")]
             ).lower()
-            if any(p in name_id_class for p in confirmation_patterns):
-                selector = await self._generate_playwright_selector(el)
-                required = await self.element_scorer._detect_required_status(el)
-                field_name = f"auto_email_confirm_{i+1}"
-                handled[field_name] = {
-                    "element": el,
-                    "selector": selector,
-                    "tag_name": info.get("tag_name", "input"),
-                    "type": info.get("type", "email") or "email",
-                    "name": info.get("name", ""),
-                    "id": info.get("id", ""),
-                    "input_type": "email",
-                    "auto_action": "copy_from",
-                    "copy_from_field": "メールアドレス",
-                    "default_value": "",
-                    "required": required,
-                    "auto_handled": True,
-                }
+            if any(b in name_id_class for b in blacklist):
+                continue
+            attr_hit = any(p in name_id_class for p in confirmation_attr_patterns)
+            ctx_hit = False
+            if not attr_hit:
+                try:
+                    contexts = await self.context_text_extractor.extract_context_for_element(el)
+                    best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
+                    ctx_hit = any(tok in best for tok in [t.lower() for t in confirmation_ctx_tokens])
+                except Exception:
+                    ctx_hit = False
+            if not (attr_hit or ctx_hit):
+                continue
+            selector = await self._generate_playwright_selector(el)
+            required = await self.element_scorer._detect_required_status(el)
+            required = bool(required or ctx_hit)
+            field_name = f"auto_email_confirm_{i+1}"
+            handled[field_name] = {
+                "element": el,
+                "selector": selector,
+                "tag_name": info.get("tag_name", "input") or "input",
+                "type": info.get("type", "email") or "email",
+                "name": info.get("name", ""),
+                "id": info.get("id", ""),
+                "input_type": "email",
+                "auto_action": "copy_from",
+                "copy_from_field": "メールアドレス",
+                "default_value": "",
+                "required": required,
+                "auto_handled": True,
+            }
         return handled
 
     async def _auto_handle_split_name_arrays(self, text_inputs: List[Locator], mapped_element_ids: set) -> Dict[str, Dict[str, Any]]:
@@ -1507,6 +1540,15 @@ class UnmappedElementHandler:
 
                 selector = await self._generate_playwright_selector(el)
                 required = await self.element_scorer._detect_required_status(el)
+                if not required:
+                    # コンテキスト内の必須マーカー（* や 必須）が近傍に存在する場合は必須扱い
+                    try:
+                        texts = [c.text for c in (contexts or []) if getattr(c, 'text', None)]
+                        blob_txt = " ".join(texts).strip()
+                        if any(m in blob_txt for m in self.REQUIRED_MARKERS) or ('*' in blob_txt):
+                            required = True
+                    except Exception:
+                        pass
                 field_name = f"auto_unified_kana_{i+1}"
                 handled[field_name] = {
                     "element": el,
