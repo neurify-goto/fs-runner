@@ -69,7 +69,10 @@ const CONFIG = {
   RETRY_DELAY: 2000,
   GITHUB_API_BASE: 'https://api.github.com',
   DEFAULT_TARGETING_ID: 1, // デフォルトのターゲティングID
-  JST_OFFSET: 9 * 60 * 60 * 1000 // JST のオフセット（ミリ秒）
+  JST_OFFSET: 9 * 60 * 60 * 1000, // JST のオフセット（ミリ秒）
+  // 1ワークフロー内で起動するPythonワーカー数（1〜4）
+  // GitHub Actions で --num-workers に反映されます
+  WORKERS_PER_WORKFLOW: 4
 };
 
 /**

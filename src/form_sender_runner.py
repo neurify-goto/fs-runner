@@ -380,7 +380,8 @@ def main():
 
     procs: List[mp.Process] = []
     # company_id 指定時は重複処理を避けるためワーカーは1に制限
-    worker_count = 1 if args.company_id is not None else max(1, args.num_workers)
+    # 1〜4にクランプ（外部からの過大指定を抑止）
+    worker_count = 1 if args.company_id is not None else min(4, max(1, args.num_workers))
     for wid in range(worker_count):
         pr = mp.Process(
             target=_worker_entry,
