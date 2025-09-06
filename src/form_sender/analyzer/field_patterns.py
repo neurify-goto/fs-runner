@@ -275,7 +275,12 @@ class FieldPatterns:
                 "tags": ["input", "select"],
                 "weight": 11,
                 "strict_patterns": ["役職", "職位", "position", "job_title", "yakushoku"],  # 厳密一致用
-                "exclude_patterns": ["your-name", "your_name", "name", "お名前", "fullname", "personal_name", "姓", "名", "lastname", "firstname", "company", "会社", "email", "mail", "メール", "zip", "postal", "郵便", "address", "住所", "tel", "phone", "電話", "fax", "ファックス"]  # 個人名・会社名・連絡先・住所・電話・FAX・郵便番号除外
+                "exclude_patterns": [
+                    "your-name", "your_name", "name", "お名前", "fullname", "personal_name", "姓", "名", "lastname", "firstname",
+                    "company", "会社", "email", "mail", "メール", "zip", "postal", "郵便", "address", "住所", "tel", "phone", "電話", "fax", "ファックス",
+                    # 汎用除外: 『お問い合わせジャンル/種別/カテゴリ』系は役職ではない
+                    "お問い合わせ", "お問合せ", "ジャンル", "種別", "カテゴリー", "カテゴリ", "category"
+                ]  # 個人名・会社名・連絡先・住所・電話・FAX・郵便番号・問い合わせ分類系を除外
             },
             
             # 11. 性別 (gender) - GAS必須

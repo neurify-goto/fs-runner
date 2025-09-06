@@ -1,6 +1,7 @@
 """
 ルールベースフォーム解析エンジン（オーケストレーター）
 """
+
 import time
 import logging
 from typing import Dict, List, Any, Optional
@@ -26,6 +27,7 @@ from .analysis_result_builder import AnalysisResultBuilder
 
 logger = logging.getLogger(__name__)
 
+
 class RuleBasedAnalyzer:
     """ルールベースフォーム解析の全体を統括するメインクラス"""
 
@@ -38,7 +40,9 @@ class RuleBasedAnalyzer:
         self.context_text_extractor = ContextTextExtractor(page_or_frame)
         # 共有属性キャッシュ（Locator文字列 -> 属性辞書）。後段で構造解析結果から埋める。
         self._element_attr_cache: Dict[str, Dict[str, Any]] = {}
-        self.element_scorer = ElementScorer(self.context_text_extractor, shared_cache=self._element_attr_cache)
+        self.element_scorer = ElementScorer(
+            self.context_text_extractor, shared_cache=self._element_attr_cache
+        )
         self.duplicate_prevention = DuplicatePreventionManager()
         self.field_combination_manager = FieldCombinationManager()
         self.form_structure_analyzer = FormStructureAnalyzer(page_or_frame)
@@ -47,29 +51,44 @@ class RuleBasedAnalyzer:
 
         # Worker classes for each phase
         self.pre_processor = FormPreProcessor(
-            page_or_frame, self.element_scorer, self.split_field_detector, self.field_patterns
+            page_or_frame,
+            self.element_scorer,
+            self.split_field_detector,
+            self.field_patterns,
         )
         self.classifier = ElementClassifier(page_or_frame, self.settings)
         self.mapper = FieldMapper(
-            page_or_frame, self.element_scorer, self.context_text_extractor, 
-            self.field_patterns, self.duplicate_prevention, self.settings,
-            self._create_enhanced_element_info, self._generate_temp_field_value,
-            self.field_combination_manager
+            page_or_frame,
+            self.element_scorer,
+            self.context_text_extractor,
+            self.field_patterns,
+            self.duplicate_prevention,
+            self.settings,
+            self._create_enhanced_element_info,
+            self._generate_temp_field_value,
+            self.field_combination_manager,
         )
         self.unmapped_handler = UnmappedElementHandler(
-            page_or_frame, self.element_scorer, self.context_text_extractor,
-            self.field_combination_manager, self.settings, self._generate_playwright_selector,
-            self._get_element_details, self.field_patterns
+            page_or_frame,
+            self.element_scorer,
+            self.context_text_extractor,
+            self.field_combination_manager,
+            self.settings,
+            self._generate_playwright_selector,
+            self._get_element_details,
+            self.field_patterns,
         )
         self.assigner = InputValueAssigner(
             self.field_combination_manager, self.split_field_detector
         )
-        self.submit_detector = SubmitButtonDetector(page_or_frame, self._generate_playwright_selector)
+        self.submit_detector = SubmitButtonDetector(
+            page_or_frame, self._generate_playwright_selector
+        )
         self.validator = AnalysisValidator(self.duplicate_prevention)
         self.result_builder = AnalysisResultBuilder(
             self.field_patterns, self.element_scorer, self.settings
         )
-        
+
         # Analysis results
         self.field_mapping: Dict[str, Any] = {}
         self.form_structure: Optional[FormStructure] = None
@@ -79,108 +98,156 @@ class RuleBasedAnalyzer:
 
     def _load_settings(self) -> Dict[str, Any]:
         return {
-            'max_elements_per_type': 50,
-            'min_score_threshold': 70,
+            "max_elements_per_type": 50,
+            "min_score_threshold": 70,
             # フィールド別の最低スコアしきい値（汎用の誤検出抑止）
-            'min_score_threshold_per_field': {
+            "min_score_threshold_per_field": {
                 # 一部サイトでは class に first-name/last-name が付与され、
                 # ラベルが『ご担当者名』のみのケースが多いため、
                 # クラス+タグ（=80点）で妥当に採用できるよう安全側に調整
-                '姓': 80,
-                '名': 80,
+                "姓": 80,
+                "名": 80,
                 # 汎用で安全な下限値の追加（誤検出抑止の微調整）
-                '会社名': 78,
-                'メールアドレス': 75,
-                '都道府県': 75,
+                "会社名": 78,
+                "メールアドレス": 75,
+                "都道府県": 75,
             },
-            'analysis_timeout': 30,
-            'enable_fallback': True,
-            'enable_auto_handling': True,
-            'debug_scoring': True,
-            'quality_first_mode': True,
-            'essential_fields': ['メールアドレス', 'お問い合わせ本文'],
-            'quality_threshold_boost': 15,
-            'max_quality_threshold': 90,
-            'quick_ranking_enabled': True,
-            'quick_top_k': 15,
-            'quick_top_k_essential': 25,
-            'early_stop_enabled': True,
-            'early_stop_score': 95,
+            "analysis_timeout": 30,
+            "enable_fallback": True,
+            "enable_auto_handling": True,
+            "debug_scoring": True,
+            "quality_first_mode": True,
+            # コア項目（必須が検出できないサイトでも優先的に確保する）
+            # 既存の基本2項目に加え、氏名・カナ系をコアに昇格（汎用精度向上）
+            "essential_fields": [
+                "メールアドレス",
+                "お問い合わせ本文",
+                "統合氏名",
+                "統合氏名カナ",
+            ],
+            "quality_threshold_boost": 15,
+            "max_quality_threshold": 90,
+            "quick_ranking_enabled": True,
+            "quick_top_k": 15,
+            "quick_top_k_essential": 25,
+            "early_stop_enabled": True,
+            "early_stop_score": 95,
             # 必須判定時のボーナス（安全側）
-            'required_boost': 40,
-            'required_phone_boost': 200,
+            "required_boost": 40,
+            "required_phone_boost": 200,
             # 追加: 設定化されたしきい値/トークン
-            'email_fallback_min_score': 60,
-            'confirm_tokens': ['confirm', 'confirmation', '確認', '確認用', '再入力', 'もう一度', '再度'],
+            "email_fallback_min_score": 60,
+            "confirm_tokens": [
+                "confirm",
+                "confirmation",
+                "確認",
+                "確認用",
+                "再入力",
+                "もう一度",
+                "再度",
+            ],
             # ラジオ必須検出の探索深さ（JS側で利用）
-            'radio_required_max_container_depth': 6,
-            'radio_required_max_sibling_depth': 2
+            "radio_required_max_container_depth": 6,
+            "radio_required_max_sibling_depth": 2,
         }
 
-    async def analyze_form(self, client_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def analyze_form(
+        self, client_data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         analysis_start = time.time()
         logger.info("Starting comprehensive form analysis...")
-        
+
         try:
             # --- Pre-processing ---
             if await self.pre_processor.check_if_scroll_needed():
                 await self.pre_processor.perform_progressive_scroll()
-            
-            self.form_structure = await self.form_structure_analyzer.analyze_form_structure()
-            logger.info(f"Form structure analyzed: {self.form_structure_analyzer.get_structure_summary(self.form_structure)}")
-            
+
+            self.form_structure = (
+                await self.form_structure_analyzer.analyze_form_structure()
+            )
+            logger.info(
+                f"Form structure analyzed: {self.form_structure_analyzer.get_structure_summary(self.form_structure)}"
+            )
+
             # 高速化: bounding_box辞書を作成（再利用のため）
             self._element_bounds_cache = {}
-            if self.form_structure and hasattr(self.form_structure, 'elements'):
+            if self.form_structure and hasattr(self.form_structure, "elements"):
                 for element_info in self.form_structure.elements:
                     if element_info.locator and element_info.bounding_box:
                         element_key = str(element_info.locator)
-                        self._element_bounds_cache[element_key] = element_info.bounding_box
-                logger.debug(f"Cached bounding boxes for {len(self._element_bounds_cache)} elements")
+                        self._element_bounds_cache[element_key] = (
+                            element_info.bounding_box
+                        )
+                logger.debug(
+                    f"Cached bounding boxes for {len(self._element_bounds_cache)} elements"
+                )
 
             # 高速化: 属性キャッシュ（quick採点用）を構築
-            if self.form_structure and hasattr(self.form_structure, 'elements'):
+            if self.form_structure and hasattr(self.form_structure, "elements"):
                 for fe in self.form_structure.elements:
                     try:
                         key = str(fe.locator)
                         self._element_attr_cache[key] = {
-                            'tagName': fe.tag_name or '',
-                            'type': fe.element_type or '',
-                            'name': fe.name or '',
-                            'id': fe.id or '',
-                            'className': fe.class_name or '',
-                            'placeholder': fe.placeholder or '',
-                            'value': '',
-                            'visibleLite': bool(fe.is_visible),
-                            'enabledLite': bool(fe.is_enabled),
+                            "tagName": fe.tag_name or "",
+                            "type": fe.element_type or "",
+                            "name": fe.name or "",
+                            "id": fe.id or "",
+                            "className": fe.class_name or "",
+                            "placeholder": fe.placeholder or "",
+                            "value": "",
+                            "visibleLite": bool(fe.is_visible),
+                            "enabledLite": bool(fe.is_enabled),
                         }
                     except Exception:
                         continue
-            
+
             await self._prepare_context_extraction()
             structured_elements = self.form_structure.elements
-            
-            # --- Analysis Phases ---
-            classified_elements = await self.classifier.classify_structured_elements(structured_elements)
-            logger.info(f"Classified elements: {self.classifier.get_classification_summary(classified_elements)}")
 
-            unified_field_info = self.pre_processor.detect_unified_fields(structured_elements)
-            form_type_info = await self.pre_processor.detect_form_type(structured_elements, self.form_structure)
-            required_analysis = await self.pre_processor.analyze_required_fields(structured_elements)
-            
+            # --- Analysis Phases ---
+            classified_elements = await self.classifier.classify_structured_elements(
+                structured_elements
+            )
+            logger.info(
+                f"Classified elements: {self.classifier.get_classification_summary(classified_elements)}"
+            )
+
+            unified_field_info = self.pre_processor.detect_unified_fields(
+                structured_elements
+            )
+            form_type_info = await self.pre_processor.detect_form_type(
+                structured_elements, self.form_structure
+            )
+            required_analysis = await self.pre_processor.analyze_required_fields(
+                structured_elements
+            )
+
             # --- Field Mapping ---
             self.field_mapping = await self.mapper.execute_enhanced_field_mapping(
-                classified_elements, unified_field_info, form_type_info, self._element_bounds_cache,
-                required_analysis
+                classified_elements,
+                unified_field_info,
+                form_type_info,
+                self._element_bounds_cache,
+                required_analysis,
             )
-            logger.info(f"Mapped {len(self.field_mapping)} fields with context enhancement")
+            logger.info(
+                f"Mapped {len(self.field_mapping)} fields with context enhancement"
+            )
 
             # ポストプロセス: 分割姓名が揃っている場合は統合氏名を抑制（重複入力防止・精度向上）
             try:
-                if '姓' in self.field_mapping and '名' in self.field_mapping and '統合氏名' in self.field_mapping:
-                    self.field_mapping.pop('統合氏名', None)
-                if '姓カナ' in self.field_mapping and '名カナ' in self.field_mapping and '統合氏名カナ' in self.field_mapping:
-                    self.field_mapping.pop('統合氏名カナ', None)
+                if (
+                    "姓" in self.field_mapping
+                    and "名" in self.field_mapping
+                    and "統合氏名" in self.field_mapping
+                ):
+                    self.field_mapping.pop("統合氏名", None)
+                if (
+                    "姓カナ" in self.field_mapping
+                    and "名カナ" in self.field_mapping
+                    and "統合氏名カナ" in self.field_mapping
+                ):
+                    self.field_mapping.pop("統合氏名カナ", None)
             except Exception:
                 pass
 
@@ -206,17 +273,26 @@ class RuleBasedAnalyzer:
 
             # --- Handle Unmapped and Special Fields ---
             split_groups = self._detect_split_field_patterns(self.field_mapping)
-            
+
             auto_handled = await self.unmapped_handler.handle_unmapped_elements(
-                classified_elements, self.field_mapping, client_data, self.form_structure
+                classified_elements,
+                self.field_mapping,
+                client_data,
+                self.form_structure,
             )
-            
-            promoted = await self.unmapped_handler.promote_required_fullname_to_mapping(auto_handled, self.field_mapping)
+
+            promoted = await self.unmapped_handler.promote_required_fullname_to_mapping(
+                auto_handled, self.field_mapping
+            )
             if promoted:
                 for k in promoted:
                     auto_handled.pop(k, None)
             # 追加: 必須カナの昇格（auto_unified_kana_* → 統合氏名カナ）
-            promoted_kana = await self.unmapped_handler.promote_required_kana_to_mapping(auto_handled, self.field_mapping)
+            promoted_kana = (
+                await self.unmapped_handler.promote_required_kana_to_mapping(
+                    auto_handled, self.field_mapping
+                )
+            )
             if promoted_kana:
                 for k in promoted_kana:
                     auto_handled.pop(k, None)
@@ -227,9 +303,11 @@ class RuleBasedAnalyzer:
             input_assignment = await self.assigner.assign_enhanced_input_values(
                 self.field_mapping, auto_handled, split_groups, client_data
             )
-            
-            is_valid, validation_issues = await self.validator.validate_final_assignments(
-                input_assignment, self.field_mapping, form_type_info
+
+            is_valid, validation_issues = (
+                await self.validator.validate_final_assignments(
+                    input_assignment, self.field_mapping, form_type_info
+                )
             )
             if not is_valid:
                 logger.warning(f"Validation issues detected: {validation_issues}")
@@ -239,10 +317,12 @@ class RuleBasedAnalyzer:
             submit_buttons = await self.submit_detector.detect_submit_buttons(
                 self.form_structure.form_locator if self.form_structure else None
             )
-            prohibition_result = await self.sales_prohibition_detector.detect_prohibition_text()
-            
+            prohibition_result = (
+                await self.sales_prohibition_detector.detect_prohibition_text()
+            )
+
             analysis_time = time.time() - analysis_start
-            
+
             # --- Build Result ---
             analysis_summary = self.result_builder.create_analysis_summary(
                 self.field_mapping, auto_handled, self.classifier.special_elements
@@ -250,57 +330,84 @@ class RuleBasedAnalyzer:
             debug_info = self.result_builder.create_debug_info(self.unmapped_elements)
 
             return {
-                'success': True,
-                'analysis_time': analysis_time,
-                'total_elements': len(structured_elements),
-                'field_mapping': self.field_mapping,
-                'auto_handled_elements': auto_handled,
-                'input_assignments': input_assignment,
-                'submit_buttons': submit_buttons,
-                'special_elements': self.classifier.special_elements,
-                'unmapped_elements': len(self.unmapped_elements),
-                'analysis_summary': analysis_summary,
-                'duplicate_prevention': self.duplicate_prevention.get_assignment_summary(),
-                'split_field_patterns': self.split_field_detector.get_detector_summary(split_groups),
-                'field_combination_summary': self.field_combination_manager.get_summary(),
-                'validation_result': {'is_valid': is_valid, 'issues': validation_issues},
-                'sales_prohibition': prohibition_result,
-                'debug_info': debug_info if self.settings.get('debug_scoring') else {}
+                "success": True,
+                "analysis_time": analysis_time,
+                "total_elements": len(structured_elements),
+                "field_mapping": self.field_mapping,
+                "auto_handled_elements": auto_handled,
+                "input_assignments": input_assignment,
+                "submit_buttons": submit_buttons,
+                "special_elements": self.classifier.special_elements,
+                "unmapped_elements": len(self.unmapped_elements),
+                "analysis_summary": analysis_summary,
+                "duplicate_prevention": self.duplicate_prevention.get_assignment_summary(),
+                "split_field_patterns": self.split_field_detector.get_detector_summary(
+                    split_groups
+                ),
+                "field_combination_summary": self.field_combination_manager.get_summary(),
+                "validation_result": {
+                    "is_valid": is_valid,
+                    "issues": validation_issues,
+                },
+                "sales_prohibition": prohibition_result,
+                "debug_info": debug_info if self.settings.get("debug_scoring") else {},
             }
-            
+
         except Exception as e:
             logger.error(f"Form analysis failed: {e}", exc_info=True)
-            return {'success': False, 'error': str(e)}
+            return {"success": False, "error": str(e)}
 
     def _prune_suspect_name_mappings(self) -> None:
         try:
-            if '統合氏名' not in self.field_mapping:
+            if "統合氏名" not in self.field_mapping:
                 return
             # 文脈上、個人名ではない可能性が高い語を追加（汎用）
             negative_ctx_tokens = [
-                '住所', 'マンション名', '建物名', 'ふりがな', 'フリガナ', 'カナ', 'かな', 'ひらがな',
-                '郵便', '郵便番号', '商品名', '部署', '部署名'
+                "住所",
+                "マンション名",
+                "建物名",
+                "ふりがな",
+                "フリガナ",
+                "カナ",
+                "かな",
+                "ひらがな",
+                "郵便",
+                "郵便番号",
+                "商品名",
+                "部署",
+                "部署名",
             ]
-            negative_attr_tokens = ['kana', 'furigana', 'katakana', 'hiragana']
-            for k in ['姓', '名']:
+            negative_attr_tokens = ["kana", "furigana", "katakana", "hiragana"]
+            for k in ["姓", "名"]:
                 info = self.field_mapping.get(k)
                 if not info:
                     continue
-                ctx = (info.get('best_context_text') or '').lower()
-                blob = ' '.join([str(info.get('name','')).lower(), str(info.get('id','')).lower(), str(info.get('class','')).lower(), str(info.get('placeholder','')).lower()])
-                if any(t.lower() in ctx for t in negative_ctx_tokens) or any(t in blob for t in negative_attr_tokens):
+                ctx = (info.get("best_context_text") or "").lower()
+                blob = " ".join(
+                    [
+                        str(info.get("name", "")).lower(),
+                        str(info.get("id", "")).lower(),
+                        str(info.get("class", "")).lower(),
+                        str(info.get("placeholder", "")).lower(),
+                    ]
+                )
+                if any(t.lower() in ctx for t in negative_ctx_tokens) or any(
+                    t in blob for t in negative_attr_tokens
+                ):
                     self.field_mapping.pop(k, None)
             # さらに安全弁: 『統合氏名』が確定しているのに、姓/名のスコアが低い場合は除去
             try:
-                per_field = (self.mapper.settings.get('min_score_threshold_per_field', {}) or {})
-                min_name_score = int(per_field.get('名', 85))
-                min_last_score = int(per_field.get('姓', 85))
+                per_field = (
+                    self.mapper.settings.get("min_score_threshold_per_field", {}) or {}
+                )
+                min_name_score = int(per_field.get("名", 85))
+                min_last_score = int(per_field.get("姓", 85))
             except Exception:
                 min_name_score = 85
                 min_last_score = 85
-            for k, th in [('姓', min_last_score), ('名', min_name_score)]:
+            for k, th in [("姓", min_last_score), ("名", min_name_score)]:
                 info = self.field_mapping.get(k)
-                if info and int(info.get('score', 0)) < th:
+                if info and int(info.get("score", 0)) < th:
                     self.field_mapping.pop(k, None)
         except Exception:
             pass
@@ -313,19 +420,35 @@ class RuleBasedAnalyzer:
         - 逆にカタカナ欄が『ひらがな』に割り当てられた場合も修正
         - 分割ひらがなが揃っている場合は『統合氏名カナ』を抑制
         """
+
         def _is_hiragana_like(info: dict) -> bool:
-            blob = ' '.join([
-                str(info.get('name','')), str(info.get('id','')), str(info.get('class','')), str(info.get('placeholder',''))
-            ])
-            return any(k in blob for k in ['ひらがな', 'ふりがな']) and not any(k in blob for k in ['カナ', 'カタカナ', 'フリガナ'])
+            blob = " ".join(
+                [
+                    str(info.get("name", "")),
+                    str(info.get("id", "")),
+                    str(info.get("class", "")),
+                    str(info.get("placeholder", "")),
+                ]
+            )
+            return any(k in blob for k in ["ひらがな", "ふりがな"]) and not any(
+                k in blob for k in ["カナ", "カタカナ", "フリガナ"]
+            )
 
         def _is_katakana_like(info: dict) -> bool:
-            blob = ' '.join([
-                str(info.get('name','')), str(info.get('id','')), str(info.get('class','')), str(info.get('placeholder',''))
-            ])
-            return any(k in blob for k in ['カナ', 'カタカナ', 'フリガナ'])
+            blob = " ".join(
+                [
+                    str(info.get("name", "")),
+                    str(info.get("id", "")),
+                    str(info.get("class", "")),
+                    str(info.get("placeholder", "")),
+                ]
+            )
+            return any(k in blob for k in ["カナ", "カタカナ", "フリガナ"])
 
-        for kana_field, hira_field in [('姓カナ','姓ひらがな'), ('名カナ','名ひらがな')]:
+        for kana_field, hira_field in [
+            ("姓カナ", "姓ひらがな"),
+            ("名カナ", "名ひらがな"),
+        ]:
             kinfo = self.field_mapping.get(kana_field)
             hinfo = self.field_mapping.get(hira_field)
             # 『姓カナ/名カナ』があるが、実体がひらがな欄 → リネーム
@@ -338,40 +461,58 @@ class RuleBasedAnalyzer:
                 self.field_mapping.pop(hira_field, None)
 
         # 統合カナの降格: 分割ひらがなが揃っていれば統合カナは不要
-        if ('姓ひらがな' in self.field_mapping) and ('名ひらがな' in self.field_mapping):
-            if '統合氏名カナ' in self.field_mapping:
-                self.field_mapping.pop('統合氏名カナ', None)
+        if ("姓ひらがな" in self.field_mapping) and (
+            "名ひらがな" in self.field_mapping
+        ):
+            if "統合氏名カナ" in self.field_mapping:
+                self.field_mapping.pop("統合氏名カナ", None)
 
         # 統合カナがひらがな欄に割り当てられている場合、名ひらがなへ補正
-        uinfo = self.field_mapping.get('統合氏名カナ')
-        if uinfo and _is_hiragana_like(uinfo) and ('名ひらがな' not in self.field_mapping):
-            self.field_mapping['名ひらがな'] = uinfo
-            self.field_mapping.pop('統合氏名カナ', None)
+        uinfo = self.field_mapping.get("統合氏名カナ")
+        if (
+            uinfo
+            and _is_hiragana_like(uinfo)
+            and ("名ひらがな" not in self.field_mapping)
+        ):
+            self.field_mapping["名ひらがな"] = uinfo
+            self.field_mapping.pop("統合氏名カナ", None)
 
         # 欠落補完: ひらがな分割欄が存在するのにマッピング漏れしている場合、DOMから直接補完
         try:
-            if self.form_structure and getattr(self.form_structure, 'elements', None):
-                used_selectors = { (v or {}).get('selector','') for v in self.field_mapping.values() if isinstance(v, dict) }
-                for need, token in [('姓ひらがな','姓'), ('名ひらがな','名')]:
+            if self.form_structure and getattr(self.form_structure, "elements", None):
+                used_selectors = {
+                    (v or {}).get("selector", "")
+                    for v in self.field_mapping.values()
+                    if isinstance(v, dict)
+                }
+                for need, token in [("姓ひらがな", "姓"), ("名ひらがな", "名")]:
                     if need in self.field_mapping:
                         continue
                     for fe in self.form_structure.elements:
                         try:
-                            if (fe.tag_name or '').lower() != 'input':
+                            if (fe.tag_name or "").lower() != "input":
                                 continue
-                            if (fe.element_type or '').lower() not in ('text',''):
+                            if (fe.element_type or "").lower() not in ("text", ""):
                                 continue
                             if not fe.is_visible:
                                 continue
-                            blob = ' '.join([
-                                (fe.name or ''), (fe.id or ''), (fe.class_name or ''), (fe.placeholder or ''),
-                                (fe.label_text or ''), (fe.associated_text or '')
-                            ])
-                            if ('ふりがな' in blob or 'ひらがな' in blob) and (token in blob):
+                            blob = " ".join(
+                                [
+                                    (fe.name or ""),
+                                    (fe.id or ""),
+                                    (fe.class_name or ""),
+                                    (fe.placeholder or ""),
+                                    (fe.label_text or ""),
+                                    (fe.associated_text or ""),
+                                ]
+                            )
+                            if ("ふりがな" in blob or "ひらがな" in blob) and (
+                                token in blob
+                            ):
                                 info = await self._get_element_details(fe.locator)
-                                if info.get('selector','') not in used_selectors:
+                                if info.get("selector", "") not in used_selectors:
                                     self.field_mapping[need] = info
-                                    used_selectors.add(info.get('selector',''))
+                                    used_selectors.add(info.get("selector", ""))
                                     break
                         except Exception:
                             continue
@@ -379,19 +520,27 @@ class RuleBasedAnalyzer:
             pass
 
     async def _prepare_context_extraction(self):
-        if getattr(self.form_structure, 'form_bounds', None):
+        if getattr(self.form_structure, "form_bounds", None):
             self.context_text_extractor.set_form_bounds(self.form_structure.form_bounds)
             await self.context_text_extractor.build_form_context_index()
 
     def _detect_split_field_patterns(self, field_mapping: Dict[str, Any]):
-        field_mappings_list = [{'field_name': fn, **fi} for fn, fi in field_mapping.items()]
+        field_mappings_list = [
+            {"field_name": fn, **fi} for fn, fi in field_mapping.items()
+        ]
         input_order = []
         if self.form_structure and self.form_structure.elements:
             for fe in self.form_structure.elements:
-                if fe.tag_name in ['input', 'textarea', 'select'] and fe.element_type not in ['hidden', 'submit', 'image', 'button']:
+                if fe.tag_name in [
+                    "input",
+                    "textarea",
+                    "select",
+                ] and fe.element_type not in ["hidden", "submit", "image", "button"]:
                     if fe.selector:
                         input_order.append(fe.selector)
-        return self.split_field_detector.detect_split_patterns(field_mappings_list, input_order)
+        return self.split_field_detector.detect_split_patterns(
+            field_mappings_list, input_order
+        )
 
     async def _auto_promote_postal_split(self) -> None:
         """zip/postal 系フィールドが論理順で連続して2つ並ぶ場合に、
@@ -405,7 +554,11 @@ class RuleBasedAnalyzer:
         # 1) 入力欄の論理順（input_order）と selector->index のマップを構築
         input_order: list[str] = []
         for fe in self.form_structure.elements:
-            if fe.tag_name in ['input', 'textarea', 'select'] and fe.element_type not in ['hidden', 'submit', 'image', 'button']:
+            if fe.tag_name in [
+                "input",
+                "textarea",
+                "select",
+            ] and fe.element_type not in ["hidden", "submit", "image", "button"]:
                 if fe.selector:
                     input_order.append(fe.selector)
         order_index = {sel: i for i, sel in enumerate(input_order)}
@@ -413,27 +566,56 @@ class RuleBasedAnalyzer:
         # 2) zip/postal 系候補を抽出（name/id/class/placeholder/ラベルテキスト/周辺テキスト）
         # 汎用トークン（過検出を避けるため、曖昧すぎる語は含めない。例: 'post' 単独など）
         postal_tokens = [
-            'zip', 'zipcode', 'zip_code', 'zip-code', 'zip1', 'zip2', 'zip_first', 'zip_last',
-            'postal', 'postalcode', 'postal_code', 'post_code', 'post-code',
-            'postcode', 'postcode1', 'postcode2',
-            '郵便', '郵便番号', '〒', '上3桁', '下4桁', '前3桁', '後4桁',
+            "zip",
+            "zipcode",
+            "zip_code",
+            "zip-code",
+            "zip1",
+            "zip2",
+            "zip_first",
+            "zip_last",
+            "postal",
+            "postalcode",
+            "postal_code",
+            "post_code",
+            "post-code",
+            "postcode",
+            "postcode1",
+            "postcode2",
+            "郵便",
+            "郵便番号",
+            "〒",
+            "上3桁",
+            "下4桁",
+            "前3桁",
+            "後4桁",
             # ローマ字表記の揺れ
-            'yubin', 'yuubin', 'yubinbango', 'yuubinbango'
+            "yubin",
+            "yuubin",
+            "yubinbango",
+            "yuubinbango",
         ]
         candidates = []  # (index, FormElement)
         for fe in self.form_structure.elements:
             try:
-                if fe.tag_name != 'input':
+                if fe.tag_name != "input":
                     continue
-                if fe.element_type not in ['', 'text', 'tel']:
+                if fe.element_type not in ["", "text", "tel"]:
                     continue
-                sel = fe.selector or ''
+                sel = fe.selector or ""
                 if sel not in order_index:
                     continue
-                text_blob = ' '.join([
-                    (fe.name or ''), (fe.id or ''), (fe.class_name or ''), (fe.placeholder or ''),
-                    (fe.label_text or ''), (fe.associated_text or ''), ' '.join(fe.nearby_text or [])
-                ]).lower()
+                text_blob = " ".join(
+                    [
+                        (fe.name or ""),
+                        (fe.id or ""),
+                        (fe.class_name or ""),
+                        (fe.placeholder or ""),
+                        (fe.label_text or ""),
+                        (fe.associated_text or ""),
+                        " ".join(fe.nearby_text or []),
+                    ]
+                ).lower()
                 if any(tok in text_blob for tok in postal_tokens):
                     candidates.append((order_index[sel], fe))
             except Exception:
@@ -457,18 +639,18 @@ class RuleBasedAnalyzer:
             return
 
         # 4) 既に郵便番号1/2が確定していれば何もしない
-        if '郵便番号1' in self.field_mapping and '郵便番号2' in self.field_mapping:
+        if "郵便番号1" in self.field_mapping and "郵便番号2" in self.field_mapping:
             return
 
         fe1, fe2 = pair
 
         # 5) 既存の統合『郵便番号』が fe1/fe2 を指している場合は除去し、分割へ置換
         try:
-            unified = self.field_mapping.get('郵便番号')
+            unified = self.field_mapping.get("郵便番号")
             if unified:
-                u_sel = unified.get('selector', '')
+                u_sel = unified.get("selector", "")
                 if u_sel in {fe1.selector, fe2.selector}:
-                    self.field_mapping.pop('郵便番号', None)
+                    self.field_mapping.pop("郵便番号", None)
         except Exception:
             pass
 
@@ -493,12 +675,18 @@ class RuleBasedAnalyzer:
             info2 = await self._get_element_details(fe2.locator)
 
             # 重複防止レジストリ更新（スコア0、temp値でOK）
-            self.duplicate_prevention.register_field_assignment('郵便番号1', self._generate_temp_field_value('郵便番号1'), 0, info1)
-            self.duplicate_prevention.register_field_assignment('郵便番号2', self._generate_temp_field_value('郵便番号2'), 0, info2)
+            self.duplicate_prevention.register_field_assignment(
+                "郵便番号1", self._generate_temp_field_value("郵便番号1"), 0, info1
+            )
+            self.duplicate_prevention.register_field_assignment(
+                "郵便番号2", self._generate_temp_field_value("郵便番号2"), 0, info2
+            )
 
-            self.field_mapping['郵便番号1'] = info1
-            self.field_mapping['郵便番号2'] = info2
-            logger.info("Promoted zip consecutive inputs to split postal mapping (郵便番号1/2) [required]")
+            self.field_mapping["郵便番号1"] = info1
+            self.field_mapping["郵便番号2"] = info2
+            logger.info(
+                "Promoted zip consecutive inputs to split postal mapping (郵便番号1/2) [required]"
+            )
         except Exception as e:
             logger.debug(f"Failed to promote postal split: {e}")
 
@@ -508,34 +696,63 @@ class RuleBasedAnalyzer:
         element_info = await self.element_scorer._get_element_info(element)
         selector = await self._generate_playwright_selector(element)
         return {
-            'element': element, 'selector': selector,
-            'tag_name': element_info.get('tag_name', ''), 'type': element_info.get('type', ''),
-            'name': element_info.get('name', ''), 'id': element_info.get('id', ''),
-            'class': element_info.get('class', ''), 'placeholder': element_info.get('placeholder', ''),
-            'required': element_info.get('required', False), 'visible': element_info.get('visible', True),
-            'enabled': element_info.get('enabled', True), 'score': 0, 'score_details': {},
-            'input_type': self._determine_input_type(element_info), 'default_value': ''
+            "element": element,
+            "selector": selector,
+            "tag_name": element_info.get("tag_name", ""),
+            "type": element_info.get("type", ""),
+            "name": element_info.get("name", ""),
+            "id": element_info.get("id", ""),
+            "class": element_info.get("class", ""),
+            "placeholder": element_info.get("placeholder", ""),
+            "required": element_info.get("required", False),
+            "visible": element_info.get("visible", True),
+            "enabled": element_info.get("enabled", True),
+            "score": 0,
+            "score_details": {},
+            "input_type": self._determine_input_type(element_info),
+            "default_value": "",
         }
 
-    async def _create_enhanced_element_info(self, element: Locator, score_details: Dict[str, Any], contexts) -> Dict[str, Any]:
+    async def _create_enhanced_element_info(
+        self, element: Locator, score_details: Dict[str, Any], contexts
+    ) -> Dict[str, Any]:
         element_info = await self._create_element_info(element, score_details)
-        element_info['context'] = [{'text': ctx.text, 'source_type': ctx.source_type, 'confidence': ctx.confidence, 'position': ctx.position_relative} for ctx in contexts]
+        element_info["context"] = [
+            {
+                "text": ctx.text,
+                "source_type": ctx.source_type,
+                "confidence": ctx.confidence,
+                "position": ctx.position_relative,
+            }
+            for ctx in contexts
+        ]
         if contexts:
-            element_info['best_context_text'] = self.context_text_extractor.get_best_context_text(contexts)
+            element_info["best_context_text"] = (
+                self.context_text_extractor.get_best_context_text(contexts)
+            )
         return element_info
 
-    async def _create_element_info(self, element: Locator, score_details: Dict[str, Any]) -> Dict[str, Any]:
-        element_info = score_details.get('element_info', {})
+    async def _create_element_info(
+        self, element: Locator, score_details: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        element_info = score_details.get("element_info", {})
         selector = await self._generate_playwright_selector(element)
         return {
-            'element': element, 'selector': selector,
-            'tag_name': element_info.get('tag_name', ''), 'type': element_info.get('type', ''),
-            'name': element_info.get('name', ''), 'id': element_info.get('id', ''),
-            'class': element_info.get('class', ''), 'placeholder': element_info.get('placeholder', ''),
-            'required': element_info.get('required', False), 'visible': element_info.get('visible', True),
-            'enabled': element_info.get('enabled', True), 'score': score_details.get('total_score', 0),
-            'score_details': score_details, 'input_type': self._determine_input_type(element_info),
-            'default_value': ''
+            "element": element,
+            "selector": selector,
+            "tag_name": element_info.get("tag_name", ""),
+            "type": element_info.get("type", ""),
+            "name": element_info.get("name", ""),
+            "id": element_info.get("id", ""),
+            "class": element_info.get("class", ""),
+            "placeholder": element_info.get("placeholder", ""),
+            "required": element_info.get("required", False),
+            "visible": element_info.get("visible", True),
+            "enabled": element_info.get("enabled", True),
+            "score": score_details.get("total_score", 0),
+            "score_details": score_details,
+            "input_type": self._determine_input_type(element_info),
+            "default_value": "",
         }
 
     async def _generate_playwright_selector(self, element: Locator) -> str:
@@ -563,42 +780,44 @@ class RuleBasedAnalyzer:
                 """
             )
             # ID優先（CSSのattribute selectorを使用してエスケープ不要にする）
-            el_id = info.get('id')
+            el_id = info.get("id")
             if el_id:
                 # 引用符とバックスラッシュを最小限エスケープ
-                esc = str(el_id).replace('\\', r'\\').replace('"', r'\"')
-                return f"[id=\"{esc}\"]"
+                esc = str(el_id).replace("\\", r"\\").replace('"', r"\"")
+                return f'[id="{esc}"]'
 
-            name = info.get('name')
-            tag = info.get('tagName', 'input')
-            type_attr = info.get('typeAttr') if tag == 'input' else ''
+            name = info.get("name")
+            tag = info.get("tagName", "input")
+            type_attr = info.get("typeAttr") if tag == "input" else ""
 
             if name:
                 # name属性は attribute selector で安全に指定
-                esc_name = str(name).replace('\\', r'\\').replace('"', r'\"')
-                selector = f"{tag}[name=\"{esc_name}\"]"
+                esc_name = str(name).replace("\\", r"\\").replace('"', r"\"")
+                selector = f'{tag}[name="{esc_name}"]'
                 if type_attr:
-                    esc_type = str(type_attr).replace('\\', r'\\').replace('"', r'\"')
-                    selector += f"[type=\"{esc_type}\"]"
+                    esc_type = str(type_attr).replace("\\", r"\\").replace('"', r"\"")
+                    selector += f'[type="{esc_type}"]'
                 return selector
 
             # nameが無い場合：type属性があるinputのみ[type]を付与
-            if tag == 'input' and type_attr:
-                esc_type2 = str(type_attr).replace('\\', r'\\').replace('"', r'\"')
-                return f"{tag}[type=\"{esc_type2}\"]"
+            if tag == "input" and type_attr:
+                esc_type2 = str(type_attr).replace("\\", r"\\").replace('"', r"\"")
+                return f'{tag}[type="{esc_type2}"]'
             return tag
         except Exception:
-            return 'input'
+            return "input"
 
     def _determine_input_type(self, element_info: Dict[str, Any]) -> str:
-        tag_name = element_info.get('tag_name', '').lower()
-        element_type = element_info.get('type', '').lower()
-        if tag_name == 'textarea': return 'textarea'
-        if tag_name == 'select': return 'select'
-        if tag_name == 'input':
-            if element_type in ['checkbox', 'radio', 'email', 'tel', 'url', 'number']:
+        tag_name = element_info.get("tag_name", "").lower()
+        element_type = element_info.get("type", "").lower()
+        if tag_name == "textarea":
+            return "textarea"
+        if tag_name == "select":
+            return "select"
+        if tag_name == "input":
+            if element_type in ["checkbox", "radio", "email", "tel", "url", "number"]:
                 return element_type
-        return 'text'
+        return "text"
 
     def _generate_temp_field_value(self, field_name: str) -> str:
         # Simplified version for duplicate checking
