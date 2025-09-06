@@ -262,6 +262,9 @@ class FieldCombinationManager:
             return self.generate_combined_value('phone', client_data)
         if field_name in ['住所', 'address']:
             return self.generate_combined_value('address', client_data)
+        if field_name in ['都道府県']:
+            # address_1 を都道府県として扱う（値が無ければ空を返し、アルゴリズム選択に委譲）
+            return client_info.get('address_1', '')
         if field_name in ['郵便番号', 'postal_code']:
             return self.generate_combined_value('postal_code', client_data)
         if field_name in ['統合氏名カナ']:

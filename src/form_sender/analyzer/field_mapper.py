@@ -243,6 +243,17 @@ class FieldMapper:
         # 情報付与用にコンテキストは取得するが、採点は ElementScorer に一元化する
         contexts = await self.context_text_extractor.extract_context_for_element(element, element_bounds)
         score, score_details = await self.element_scorer.calculate_element_score(element, field_patterns, field_name)
+        # 必須マーカーのある要素は優先（汎用安全ボーナス）
+        try:
+            if await self.element_scorer._detect_required_status(element):
+                # 設定で明示されたブースト値を使用（マジックナンバー排除）
+                boost = int(self.settings.get('required_boost', 40))
+                if field_name == '電話番号':
+                    boost = int(self.settings.get('required_phone_boost', 200))  # 必須の電話番号を最優先
+                score += boost
+                score_details['score_breakdown']['required_boost'] = boost
+        except Exception:
+            pass
         if score <= 0:
             return 0, {}, []
         # ここでの追加ボーナスは廃止（重複加点防止）
@@ -610,9 +621,18 @@ class FieldMapper:
                     # ルール: どのフィールドとも判断がつかない必須テキストは全角空白などの安全値で入力する。
                     # （実際の値の割当は assigner 側のテンポラリ値生成に委譲）
 
-                    # 同一論理フィールドが既に確定している場合は重複登録を抑止
+                    # 同一論理フィールドが既に確定している場合の扱い
+                    # 住所は分割必須（市区/番地/建物 等）で複数の必須入力欄が存在するケースが多いため、
+                    # 『住所_補助N』として追加登録を許可する（Nは1からの通番）。
                     if field_name in field_mapping:
-                        continue
+                        if field_name == '住所':
+                            base = '住所_補助'
+                            n = 1
+                            while f'{base}{n}' in field_mapping:
+                                n += 1
+                            field_name = f'{base}{n}'
+                        else:
+                            continue
                     # 必須救済で登録する要素は、評価スコアが 0 のままだと
                     # downstream の評価（例: テストの低信頼アラート）で誤検知される。
                     # そこで、救済登録時は安全側の保守的なスコアを与える。
@@ -639,7 +659,13 @@ class FieldMapper:
     def _infer_logical_field_name_for_required(self, element_info: Dict[str, Any], contexts: List) -> str:
         tag = (element_info.get('tag_name') or '').lower()
         typ = (element_info.get('type') or '').lower()
-        name_id_cls = ' '.join([(element_info.get('name') or ''), (element_info.get('id') or ''), (element_info.get('class') or '')]).lower()
+        # placeholder も含めて論理名推定のヒントにする（(姓)/(名) 等の明示に対応）
+        name_id_cls = ' '.join([
+            (element_info.get('name') or ''),
+            (element_info.get('id') or ''),
+            (element_info.get('class') or ''),
+            (element_info.get('placeholder') or ''),
+        ]).lower()
         try:
             ctx_best = (self.context_text_extractor.get_best_context_text(contexts) or '')
         except Exception:

@@ -117,8 +117,10 @@ class FormPreProcessor:
         first_elements: list[FormElement] = []
 
         for el in structured_elements:
+            # placeholder も含めて分割姓名の手がかりにする（(姓)/(名) プレースホルダ対応）
             blob = ' '.join([
-                (el.name or ''), (el.id or ''), (el.class_name or ''), (el.label_text or ''), (el.associated_text or '')
+                (el.name or ''), (el.id or ''), (el.class_name or ''), (el.placeholder or ''),
+                (el.label_text or ''), (el.associated_text or '')
             ]).lower()
 
             if not blob:

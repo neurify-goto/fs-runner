@@ -91,6 +91,7 @@ class RuleBasedAnalyzer:
                 # 汎用で安全な下限値の追加（誤検出抑止の微調整）
                 '会社名': 78,
                 'メールアドレス': 75,
+                '都道府県': 75,
             },
             'analysis_timeout': 30,
             'enable_fallback': True,
@@ -105,6 +106,9 @@ class RuleBasedAnalyzer:
             'quick_top_k_essential': 25,
             'early_stop_enabled': True,
             'early_stop_score': 95,
+            # 必須判定時のボーナス（安全側）
+            'required_boost': 40,
+            'required_phone_boost': 200,
             # 追加: 設定化されたしきい値/トークン
             'email_fallback_min_score': 60,
             'confirm_tokens': ['confirm', 'confirmation', '確認', '確認用', '再入力', 'もう一度', '再度'],

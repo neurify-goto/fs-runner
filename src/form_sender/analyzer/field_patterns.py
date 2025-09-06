@@ -579,6 +579,29 @@ class FieldPatterns:
                 # 「郵便番号」自体は除外パターンから削除
             },
             
+            # 21b. 都道府県 (prefecture) - 住所内の選択式（select優先）
+            "都道府県": {
+                "names": ["pref", "prefecture", "todouhuken", "todofuken", "都道府県"],
+                "ids": ["pref", "prefecture"],
+                "classes": ["pref", "prefecture"],
+                "placeholders": ["都道府県", "Prefecture"],
+                "types": [],
+                "tags": ["select"],
+                "weight": 14,
+                "strict_patterns": ["都道府県", "prefecture", "pref"],
+                "exclude_patterns": [
+                    # 人名/連絡先/件名・本文など明確に別物
+                    "name", "お名前", "氏名", "fullname", "kana", "カナ", "フリガナ", "ふりがな",
+                    "email", "mail", "メール", "phone", "tel", "電話", "zip", "postal", "郵便",
+                    "件名", "subject", "message", "本文",
+                    # 住所系でも都道府県以外のパーツを強く除外
+                    "address", "addr", "street", "building", "apartment", "room", "号室",
+                    "address1", "address_1", "address2", "address_2", "address3", "address_3",
+                    "address4", "address_4", "address5", "address_5",
+                    "city", "ward", "区", "市", "町", "村", "丁目", "番地"
+                ]
+            },
+
             # 22. 会社名カナ (company_name_kana) - GAS必須
             "会社名カナ": {
                 "names": ["company_kana", "corp_kana", "company_name_kana", "corporation_kana", 
