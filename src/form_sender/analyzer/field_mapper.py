@@ -574,7 +574,9 @@ class FieldMapper:
                         )
                     except Exception:
                         options = []
-                    names = [n for n in (get_prefectures() or [])]
+                    # get_prefectures() は {"names": [...]} 構造のため、実際の名称リストを参照する
+                    pref_cfg = get_prefectures() or {}
+                    names = pref_cfg.get("names", []) if isinstance(pref_cfg, dict) else []
                     hits = 0
                     if options and names:
                         low_opts = [str(o).lower() for o in options]
