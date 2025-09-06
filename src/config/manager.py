@@ -80,6 +80,10 @@ class ConfigManager:
         """プライバシー同意チェック処理の設定を取得"""
         return self._load_config("consent_agreement.json")
     
+    def get_choice_priority_config(self) -> Dict[str, Any]:
+        """選択肢優先度（checkbox/radio用）設定を取得"""
+        return self._load_config("choice_priority.json")
+    
     def get_form_explorer_config(self) -> Dict[str, Any]:
         """フォーム探索設定を取得"""
         worker_config = self.get_worker_config()
@@ -161,3 +165,7 @@ def get_cookie_consent_config() -> Dict[str, Any]:
 def get_privacy_consent_config() -> Dict[str, Any]:
     """プライバシー同意チェック処理設定を取得する便利関数"""
     return config_manager.get_privacy_consent_config()
+
+def get_choice_priority_config() -> Dict[str, Any]:
+    """選択肢優先度（checkbox/radio用）設定を取得する便利関数"""
+    return config_manager.get_choice_priority_config()

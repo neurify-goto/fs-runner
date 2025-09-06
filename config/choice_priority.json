@@ -1,0 +1,22 @@
+{
+  "checkbox": {
+    "primary_keywords": ["営業", "提案", "メール"],
+    "secondary_keywords": ["その他", "other", "該当なし"],
+    "privacy_keywords": [
+      "プライバシー", "プライバシーポリシー", "個人情報", "個人情報保護",
+      "個人情報の取り扱い", "個人情報の取扱い", "privacy", "privacy policy",
+      "利用規約", "terms", "terms of service"
+    ],
+    "agree_tokens": ["同意", "承諾", "agree", "同意する", "確認の上", "に同意"]
+  },
+  "radio": {
+    "primary_keywords": ["営業", "提案", "メール"],
+    "secondary_keywords": ["その他", "other", "該当なし"],
+    "gender": {
+      "male": ["男", "男性", "male"],
+      "female": ["女", "女性", "female"],
+      "other": ["その他", "other"]
+    }
+  }
+}
+

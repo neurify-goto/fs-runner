@@ -20,7 +20,12 @@ from typing import Dict, Any, Optional, List
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Page
 
 # 設定とユーティリティ
-from config.manager import get_form_sender_config, get_retry_config_for, get_worker_config
+from config.manager import (
+    get_form_sender_config,
+    get_retry_config_for,
+    get_worker_config,
+    get_choice_priority_config,
+)
 from ..detection.bot_detector import BotDetectionSystem
 from ..detection.pattern_matcher import FormDetectionPatternMatcher
 from ..template.company_processor import CompanyPlaceholderAnalyzer
@@ -983,36 +988,158 @@ class IsolatedFormWorker:
                             return fcm.get_field_value_for_type('郵便番号','single', client_blob) or ''
                         return ''
 
+                    # 優先度設定の読み込み（失敗時はデフォルトにフォールバック）
+                    try:
+                        choice_cfg = get_choice_priority_config()
+                    except Exception:
+                        choice_cfg = {
+                            'checkbox': {
+                                'primary_keywords': ['営業','提案','メール'],
+                                'secondary_keywords': ['その他','other','該当なし'],
+                                'privacy_keywords': ['プライバシー','privacy','個人情報','利用規約','terms'],
+                                'agree_tokens': ['同意','agree','承諾']
+                            },
+                            'radio': {
+                                'primary_keywords': ['営業','提案','メール'],
+                                'secondary_keywords': ['その他','other','該当なし']
+                            }
+                        }
+
+                    def _choose_priority_index(texts: list, pri1: list, pri2: list) -> int:
+                        def last_match(keys):
+                            cand = [i for i, t in enumerate(texts) if any(str(k).lower() in (t or '').lower() for k in keys)]
+                            return cand[-1] if cand else None
+                        idx = last_match(pri1)
+                        if idx is not None:
+                            return idx
+                        idx = last_match(pri2)
+                        if idx is not None:
+                            return idx
+                        return max(0, len(texts) - 1)
+
+                    def _is_privacy_like(text: str) -> bool:
+                        tl = (text or '').lower()
+                        for kw in (choice_cfg.get('checkbox', {}).get('privacy_keywords') or []):
+                            if str(kw).lower() in tl:
+                                return True
+                        return False
+
+                    def _has_agree_token(text: str) -> bool:
+                        tl = (text or '').lower()
+                        for kw in (choice_cfg.get('checkbox', {}).get('agree_tokens') or []):
+                            if str(kw).lower() in tl:
+                                return True
+                        return False
+
                     filled_ok = 0
                     filled_categories = []
-                    for ent in invalids:
-                        try:
+                    try:
+                        checkbox_invalids = [e for e in invalids if e.get('input_type') == 'checkbox']
+                        other_invalids = [e for e in invalids if e.get('input_type') != 'checkbox']
+
+                        # checkbox: name > id > class を用いたグルーピング
+                        groups = {}
+                        for ent in checkbox_invalids:
+                            meta = ent.get('meta') or {}
+                            key = (meta.get('name') or meta.get('id') or meta.get('class') or f"cb:{ent.get('selector')}")
+                            groups.setdefault(key, []).append(ent)
+
+                        pri1 = choice_cfg.get('checkbox', {}).get('primary_keywords', [])
+                        pri2 = choice_cfg.get('checkbox', {}).get('secondary_keywords', [])
+
+                        for _, ents in groups.items():
+                            # hint優先、無ければ name/id/class を評価対象に
+                            texts = []
+                            for ent in ents:
+                                meta = ent.get('meta') or {}
+                                base = ent.get('hint') or ''
+                                if not base:
+                                    base = ' '.join([meta.get('name',''), meta.get('id',''), meta.get('class','')])
+                                texts.append(base)
+
+                            is_privacy_group = any(_is_privacy_like(t) for t in texts)
+                            if is_privacy_group:
+                                chosen_idx = None
+                                for i, t in enumerate(texts):
+                                    if _has_agree_token(t):
+                                        chosen_idx = i
+                                        break
+                                if chosen_idx is None:
+                                    chosen_idx = _choose_priority_index(texts, pri1, pri2)
+                            else:
+                                chosen_idx = _choose_priority_index(texts, pri1, pri2)
+
+                            try:
+                                ent = ents[chosen_idx]
+                            except Exception:
+                                ent = ents[-1]
+
                             sel = ent.get('selector')
-                            itype = ent.get('input_type','text')
-                            val = _gen_value(itype, ent.get('hint') or '', ent.get('meta') or {})
-                            if not val and itype == 'select':
-                                fo = ent.get('select_first_option') or {}
-                                val = fo.get('value') or fo.get('text') or ''
-                                if not val:
-                                    continue
-                            if not val and itype in ['checkbox','radio']:
-                                val = True
-                            if (not val or (isinstance(val, str) and val.strip() == '')) and itype in ['text','textarea']:
-                                # 空白扱いの値はハンドラで弾かれるため、可視で安全な1文字にフォールバック
-                                val = 'ー'  # 全角ハイフン（必須バリデーション通過用）
                             if not sel:
                                 continue
-                            field_info = { 'selector': sel, 'input_type': itype, 'type': itype }
-                            ok = await input_handler.fill_rule_based_field('retry', field_info, val)
+                            field_info = {'selector': sel, 'input_type': 'checkbox', 'type': 'checkbox'}
+                            ok = await input_handler.fill_rule_based_field('retry', field_info, True)
                             if ok:
                                 filled_ok += 1
-                                filled_categories.append(itype)
+                                filled_categories.append('checkbox')
                                 if show_retry_logs:
-                                    logger.debug(f"retry-filled {itype} via {sel}")
-                        except Exception as e:
-                            if show_retry_logs:
-                                logger.debug(f"retry-fill error: {e}")
-                            continue
+                                    logger.debug("retry-filled checkbox via priority rule")
+
+                        # その他（radio/select/text/textareaなど）は既存フォールバック
+                        for ent in other_invalids:
+                            try:
+                                sel = ent.get('selector')
+                                itype = ent.get('input_type','text')
+                                val = _gen_value(itype, ent.get('hint') or '', ent.get('meta') or {})
+                                if not val and itype == 'select':
+                                    fo = ent.get('select_first_option') or {}
+                                    val = fo.get('value') or fo.get('text') or ''
+                                    if not val:
+                                        continue
+                                if not val and itype in ['radio']:
+                                    val = True
+                                if (not val or (isinstance(val, str) and val.strip() == '')) and itype in ['text','textarea']:
+                                    val = 'ー'
+                                if not sel:
+                                    continue
+                                field_info = { 'selector': sel, 'input_type': itype, 'type': itype }
+                                ok = await input_handler.fill_rule_based_field('retry', field_info, val)
+                                if ok:
+                                    filled_ok += 1
+                                    filled_categories.append(itype)
+                                    if show_retry_logs:
+                                        logger.debug(f"retry-filled {itype} via standard rule")
+                            except Exception as e:
+                                if show_retry_logs:
+                                    logger.debug(f"retry-fill error: {e}")
+                                continue
+                    except Exception as e:
+                        if show_retry_logs:
+                            logger.debug(f"priority checkbox retry flow error: {e}")
+                        # フォールバック: 旧ロジック
+                        for ent in invalids:
+                            try:
+                                sel = ent.get('selector')
+                                itype = ent.get('input_type','text')
+                                val = _gen_value(itype, ent.get('hint') or '', ent.get('meta') or {})
+                                if not val and itype == 'select':
+                                    fo = ent.get('select_first_option') or {}
+                                    val = fo.get('value') or fo.get('text') or ''
+                                    if not val:
+                                        continue
+                                if not val and itype in ['checkbox','radio']:
+                                    val = True
+                                if (not val or (isinstance(val, str) and val.strip() == '')) and itype in ['text','textarea']:
+                                    val = 'ー'
+                                if not sel:
+                                    continue
+                                field_info = { 'selector': sel, 'input_type': itype, 'type': itype }
+                                ok = await input_handler.fill_rule_based_field('retry', field_info, val)
+                                if ok:
+                                    filled_ok += 1
+                                    filled_categories.append(itype)
+                            except Exception:
+                                continue
 
                     # 1回だけリトライ送信
                     try:
