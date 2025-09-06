@@ -6,6 +6,7 @@ from .element_scorer import ElementScorer
 from .context_text_extractor import ContextTextExtractor
 from .field_combination_manager import FieldCombinationManager
 from .form_structure_analyzer import FormStructure
+from src.config.manager import get_prefectures
 
 logger = logging.getLogger(__name__)
 
@@ -247,11 +248,18 @@ class UnmappedElementHandler:
                         continue
                 except Exception:
                     pass
-                # 除外（確認用/認証等）
+                # 除外（確認用/認証等）: ここでは軽量なローカル判定で十分
                 try:
-                    from .field_mapper import FieldMapper
-                    fm = FieldMapper(self.page, self.element_scorer, self.context_text_extractor, self.field_combination_manager, self.settings, None, None, None)
-                    if fm._is_nonfillable_required(info):
+                    name_id_cls = ' '.join([
+                        (info.get('name') or ''), (info.get('id') or ''), (info.get('class') or '')
+                    ]).lower()
+                    input_type = (info.get('type') or '').lower()
+                    tag = (info.get('tag_name') or '').lower()
+                    blacklist = ['captcha','image_auth','image-auth','spam-block','token','otp','verification',
+                                 'email_confirm','mail_confirm','email_confirmation','confirm_email','confirm','re_email','re-mail']
+                    if any(b in name_id_cls for b in blacklist):
+                        continue
+                    if input_type in ['checkbox', 'radio'] or tag == 'select':
                         continue
                 except Exception:
                     pass
@@ -309,7 +317,7 @@ class UnmappedElementHandler:
         handled: Dict[str, Dict[str, Any]] = {}
         if '都道府県' in field_mapping:
             return handled
-        tokens_attr = ['pref', 'prefecture']
+        tokens_attr = ['pref', 'prefecture', 'todofuken', 'todouhuken']
         tokens_ctx = ['都道府県', 'prefecture']
 
         # 1) select を優先
@@ -335,7 +343,24 @@ class UnmappedElementHandler:
                     except Exception:
                         ctx_hit = False
 
+                # 追加検証: selectのoptionに都道府県名が一定数含まれるか
+                option_ok = False
                 if not (attr_hit or ctx_hit):
+                    try:
+                        pref_list = [p.lower() for p in (get_prefectures().get('names') or [])]
+                    except Exception:
+                        pref_list = []
+                    try:
+                        options = await el.evaluate(
+                            "el => Array.from(el.querySelectorAll('option')).map(o => (o.textContent||'').trim())"
+                        )
+                    except Exception:
+                        options = []
+                    lowered = [str(o).lower() for o in options]
+                    hits = sum(1 for p in pref_list if any(p in o for o in lowered)) if pref_list else 0
+                    option_ok = hits >= 5
+
+                if not (attr_hit or ctx_hit or option_ok):
                     continue
 
                 selector = await self._generate_playwright_selector(el)
@@ -654,6 +679,18 @@ class UnmappedElementHandler:
                     if _option_gender(t) == client_gender_norm:
                         idx = i
                         break
+
+            # 会社/個人の汎用判定: ラジオに『法人』『個人』がある場合、会社名の有無で選択
+            if idx is None:
+                try:
+                    has_corporate = any(('法人' in (t or '')) for t in texts)
+                    has_personal = any(('個人' in (t or '')) for t in texts)
+                    company_name = str(client_info.get('company_name','') or '').strip()
+                    if has_corporate and has_personal and company_name:
+                        # 『法人』を選択
+                        idx = next((i for i, t in enumerate(texts) if '法人' in (t or '')), None)
+                except Exception:
+                    pass
 
             # フォールバック: 既存優先度ロジック
             if idx is None:

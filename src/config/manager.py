@@ -79,6 +79,10 @@ class ConfigManager:
     def get_privacy_consent_config(self) -> Dict[str, Any]:
         """プライバシー同意チェック処理の設定を取得"""
         return self._load_config("consent_agreement.json")
+
+    def get_prefectures(self) -> Dict[str, Any]:
+        """都道府県名リストを取得"""
+        return self._load_config("prefectures.json")
     
     def get_form_explorer_config(self) -> Dict[str, Any]:
         """フォーム探索設定を取得"""
@@ -161,3 +165,7 @@ def get_cookie_consent_config() -> Dict[str, Any]:
 def get_privacy_consent_config() -> Dict[str, Any]:
     """プライバシー同意チェック処理設定を取得する便利関数"""
     return config_manager.get_privacy_consent_config()
+
+def get_prefectures() -> Dict[str, Any]:
+    """都道府県名リストを取得する便利関数"""
+    return config_manager.get_prefectures()
