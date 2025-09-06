@@ -219,7 +219,6 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'bot_protection_detected': False
         }
 
-    success = (result and getattr(result, 'status', None) == None and False)  # placeholder to avoid mypy
     # WorkerResult dataclass → dict 互換
     status = getattr(result, 'status', None)
     if hasattr(status, 'value'):

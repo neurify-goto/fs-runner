@@ -19,6 +19,14 @@ declare
   v_ng_ids bigint[];
   v_limit integer := 5000; -- 一律上限
 begin
+  -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
+  -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
+  if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
+    -- 危険キーワード/記号を禁止（大文字小文字無視）
+    if trim(p_targeting_sql) ~* '(;|--|/\*|\*/|\\x00|insert\s|update\s|delete\s|drop\s|alter\s|create\s|grant\s|revoke\s|truncate\s|commit\s|rollback\s)' then
+      raise exception 'Invalid targeting_sql: contains forbidden tokens';
+    end if;
+  end if;
   -- NGリストを配列化
   if p_ng_companies is null or length(trim(p_ng_companies)) = 0 then
     v_ng_ids := null;

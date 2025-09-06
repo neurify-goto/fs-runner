@@ -150,8 +150,9 @@ class BrowserManager:
         try:
             # 既存のコンテキストは極力再利用（GUI安定性優先）
             last_err: Optional[Exception] = None
+            page: Optional[Page] = None  # retryスコープ外で初期化して参照安全性を確保
             for i in range(2):
-                page: Optional[Page] = None
+                page = None
                 try:
                     # コンテキストが無い場合のみ作成
                     if not self.context:
