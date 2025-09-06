@@ -7,6 +7,7 @@ YAML内での直接変数展開を使わないため、ログに機密データ�
 """
 
 import json
+import logging
 import os
 import sys
 import stat
@@ -16,6 +17,7 @@ import hashlib
 import time
 import threading
 
+logger = logging.getLogger(__name__)
 
 # 型定義（2シート構造完全対応版）
 class TargetingConfig(TypedDict, total=False):

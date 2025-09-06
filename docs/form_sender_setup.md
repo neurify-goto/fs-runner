@@ -51,7 +51,7 @@ psql "$DATABASE_URL" -f scripts/functions/requeue_stale_assigned.sql
 - 07:00–19:00: targeting ごとに `form_sender_task` の repository_dispatch を多数送信（Runner起動）。
 
 注意
-- GAS ログに企業名/URL等を出さない（既存のポリシー準拠）。
+- GAS プロジェクトはプライベート運用のため、GAS 側ログの機微情報マスキングは必須ではありません（任意運用）。一方で、GitHub Actions（CI）上のログは従来通りマスキングを維持してください。
 - `targeting_sql` は WHERE 断片として送る。GAS 側で最低限の整形/検証（危険句拒否）を行う。
  - 送信済みは `submissions.success=true` により自動除外されるため、日中にリセットを実行しても致命的な重複送信は発生しません（必要時の手動実行を許容）。
 
