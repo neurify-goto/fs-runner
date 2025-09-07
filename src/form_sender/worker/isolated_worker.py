@@ -43,6 +43,7 @@ from ..utils.button_config import (
     get_fallback_selectors,
     get_exclude_keywords,
 )
+from ..security.log_sanitizer import LogSanitizer
 
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,11 @@ class IsolatedFormWorker:
         self.stats = {"processed": 0, "success": 0, "failed": 0, "errors": 0, "start_time": time.time()}
 
         logger.info(f"IsolatedFormWorker {worker_id} initialized")
+        # 文字列サニタイザ（機微情報抑止用）
+        try:
+            self._content_sanitizer = LogSanitizer()
+        except Exception:
+            self._content_sanitizer = None
 
     def _is_page_valid(self) -> bool:
         """ページが有効かどうかを確認する"""
@@ -1490,10 +1496,17 @@ class IsolatedFormWorker:
                     # 優先: エラーレスポンス先頭のステータス
                     try:
                         errs = resp.get('error_responses') or []
-                        if errs and isinstance(errs, list):
-                            st = errs[0].get('status')
-                            if isinstance(st, int):
-                                http_status = st
+                        if isinstance(errs, list) and errs:
+                            # 優先順位: 429 > 403 > 5xx > その他 → 最終（最新）
+                            statuses = [e.get('status') for e in errs if isinstance(e, dict) and isinstance(e.get('status'), int)]
+                            if any(s == 429 for s in statuses):
+                                http_status = 429
+                            elif any(s == 403 for s in statuses):
+                                http_status = 403
+                            elif any(500 <= s < 600 for s in statuses):
+                                http_status = next((s for s in statuses if 500 <= s < 600), statuses[-1])
+                            else:
+                                http_status = statuses[-1]
                     except Exception:
                         http_status = None
 
@@ -1504,22 +1517,23 @@ class IsolatedFormWorker:
                         "has_error_responses": bool(resp.get('has_error_responses')) if isinstance(resp, dict) else None,
                         "has_redirects": bool(resp.get('has_redirects')) if isinstance(resp, dict) else None,
                         "http_status": http_status,
-                        # ページ本文は短いスニペットのみ（ログには出さない想定）
-                        "page_content_snippet": (page_content[:600] if isinstance(page_content, str) else ""),
+                        # ページ本文は短いスニペットのみ（DB保存前にサニタイズし、ログには出さない）
+                        "page_content_snippet": (
+                            (self._content_sanitizer.sanitize_string(page_content[:600]) if self._content_sanitizer else page_content[:600])
+                            if isinstance(page_content, str) else ""
+                        ),
                     }
 
-                    # 既存 additional_data（例: retry メタ）とマージ
-                    add = submit_result.get('additional_data') if isinstance(submit_result, dict) else None
-                    if not isinstance(add, dict):
-                        add = {}
+                    # 既存 additional_data（例: retry メタ）と安全にマージ
+                    add: Dict[str, Any] = {}
+                    if isinstance(submit_result, dict) and isinstance(submit_result.get('additional_data'), dict):
+                        add.update(submit_result['additional_data'])
+                    # classify_context は必ず保持
                     add['classify_context'] = classify_ctx
                     result_dict['additional_data'] = add
                 except Exception:
                     pass
 
-                # 追加: 追加入力/リトライのメタがあれば（未設定時のみ）伝搬
-                if 'additional_data' not in result_dict and submit_result.get('additional_data'):
-                    result_dict['additional_data'] = submit_result['additional_data']
                 return result_dict
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Form submission execution error: {e}")

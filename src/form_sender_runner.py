@@ -83,6 +83,8 @@ def _extract_max_daily_sends(client_data: Dict[str, Any]) -> Optional[int]:
         return None
 
 _SUCC_CACHE: Dict[str, Any] = {}
+# 失敗分類の軽量キャッシュ（同一メッセージの連続多発時の負荷抑制）
+_CLASSIFY_CACHE: Dict[str, Any] = {}
 
 def _get_success_count_today_jst(supabase, targeting_id: int, target_date: date) -> int:
     """当日(JST)成功数をUTC境界で集計"""
@@ -297,20 +299,37 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 http_status = ctx.get('http_status') if isinstance(ctx, dict) else None
                 # page_content はログ非出力ポリシーのため最小限のみ参照
                 page_content = ctx.get('page_content_snippet', '') if isinstance(ctx, dict) else ''
-            # ErrorClassifier で詳細分類を実行
-            classify_detail = ErrorClassifier.classify_detail(
-                error_message=err_msg or '',
-                page_content=page_content or '',
-                http_status=http_status,
-                context={'error_type_hint': error_type} if error_type else None,
+            # ErrorClassifier で詳細分類を実行（軽量キャッシュ使用）
+            cache_key = (
+                (err_msg or '')[:160],
+                http_status,
+                error_type or '',
+                (page_content or '')[:160],
             )
+            if cache_key in _CLASSIFY_CACHE:
+                classify_detail = _CLASSIFY_CACHE[cache_key]
+            else:
+                classify_detail = ErrorClassifier.classify_detail(
+                    error_message=err_msg or '',
+                    page_content=page_content or '',
+                    http_status=http_status,
+                    context={'error_type_hint': error_type} if error_type else None,
+                )
+                # キャッシュサイズを256に抑制
+                if len(_CLASSIFY_CACHE) >= 256:
+                    try:
+                        _CLASSIFY_CACHE.pop(next(iter(_CLASSIFY_CACHE)))
+                    except Exception:
+                        _CLASSIFY_CACHE.clear()
+                _CLASSIFY_CACHE[cache_key] = classify_detail
             # Bot/WAF 判定の補強
             if classify_detail and isinstance(classify_detail, dict):
                 code = classify_detail.get('code')
                 if code in {'BOT_DETECTED', 'WAF_CHALLENGE'}:
-                    bp = True or bool(bp)
-        except Exception:
+                    bp = True
+        except Exception as _classify_err:
             # 分類失敗は重大ではないため握り潰す
+            logger.debug(f"detail classification failed: {_classify_err}")
             classify_detail = None
 
     # 4) finalize via RPC（固定 company_id の場合も submissions 記録目的で呼ぶ。send_queue更新は0件でも問題なし）
