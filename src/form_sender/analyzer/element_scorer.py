@@ -121,8 +121,8 @@ class ElementScorer:
             ],
             "姓": ["姓", "苗字", "名字", "せい", "みょうじ"],
             "名": ["名", "名前", "めい"],
-            "姓ひらがな": ["ひらがな", "ふりがな", "せい", "姓"],
-            "名ひらがな": ["ひらがな", "ふりがな", "めい", "名"],
+            "姓ひらがな": ["ひらがな", "せい", "姓"],
+            "名ひらがな": ["ひらがな", "めい", "名"],
             # 『携帯』はモバイル番号専用ラベルに引っ張られやすいため除外
             "電話番号": ["電話", "電話番号", "tel", "phone", "連絡先"],
             "住所": ["住所", "所在地", "じゅうしょ", "都道府県", "市区町村"],
@@ -290,8 +290,7 @@ class ElementScorer:
                 hiragana_tokens = [
                     "hiragana",
                     "ひらがな",
-                    "ふりがな",
-                ]  # 『ふりがな』は概ねひらがな指定
+                ]
                 return any(tok in t for tok in hiragana_tokens)
 
             def _is_katakana_like_text(t: str) -> bool:
@@ -305,7 +304,8 @@ class ElementScorer:
                     "カナ",
                     "ｶﾅ",
                     "フリガナ",
-                ]  # 『フリガナ』は多くがカタカナ指定
+                    "ふりがな",
+                ]  # 『フリガナ/ふりがな』は多くがカタカナ指定として扱う
                 return any(tok.lower() in t for tok in katakana_tokens)
 
             def _field_is_kana_like(name: str, patterns: Dict[str, Any]) -> bool:
@@ -2043,8 +2043,11 @@ class ElementScorer:
                         if (!node) return false;
                         const txt = (node.innerText || node.textContent || '').trim();
                         const cls = (node.getAttribute && (node.getAttribute('class') || '').toLowerCase()) || '';
-                        return cls.includes('require') || cls.includes('required') ||
-                               txt === '*' || txt === '＊' || txt.includes('必須');
+                        if (cls.includes('require') || cls.includes('required')) return true;
+                        if (txt === '*' || txt === '＊' || txt.includes('必須')) return true;
+                        // 『※』は注記と紛れるため短文(<=10文字)に限定
+                        if (txt.includes('※') && txt.length <= 10) return true;
+                        return false;
                       };
                       let p = el.parentElement; let depth = 0;
                       while (p && depth < 2) { // 直近の親までに限定（セクション跨ぎの誤検出防止）
@@ -2065,6 +2068,38 @@ class ElementScorer:
             except Exception:
                 near_mark = False
             if near_mark:
+                return True
+
+            # 5.6) 画像のaltテキストによる必須表示（例: <img alt="必須">）
+            try:
+                alt_mark = await element.evaluate(
+                    """
+                    el => {
+                      const hasAltRequired = (root) => {
+                        if (!root) return false;
+                        const imgs = root.querySelectorAll('img[alt]');
+                        for (const im of imgs) {
+                          const alt = (im.getAttribute('alt') || '').toLowerCase();
+                          if (!alt) continue;
+                          if (alt.includes('必須') || alt.includes('required')) return true;
+                        }
+                        return false;
+                      };
+                      // 直近の親にある <img alt="必須"> / 直前兄弟セル(td/th)内の画像も確認
+                      const p = el.parentElement;
+                      if (hasAltRequired(p)) return true;
+                      const prev = p && p.previousElementSibling;
+                      if (hasAltRequired(prev)) return true;
+                      // さらに1階層上まで限定的に確認
+                      const gp = p && p.parentElement;
+                      if (hasAltRequired(gp)) return true;
+                      return false;
+                    }
+                """
+                )
+            except Exception:
+                alt_mark = False
+            if alt_mark:
                 return True
 
             # 6) 並列グループ内の必須マーカー検出（新規追加）
@@ -2090,7 +2125,10 @@ class ElementScorer:
                         try {
                           const txt = (node.innerText || node.textContent || '').trim();
                           if (!txt) return false;
-                          return MARKS.some(m => txt.includes(m));
+                          if (MARKS.some(m => txt.includes(m))) return true;
+                          // 『※』は短文（<=10文字）のときのみ必須と判断
+                          if (txt.includes('※') && txt.length <= 10) return true;
+                          return false;
                         } catch { return false; }
                       };
                       const parent = el.parentElement;

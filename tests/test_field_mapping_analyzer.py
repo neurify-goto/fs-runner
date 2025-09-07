@@ -1088,6 +1088,23 @@ class FieldMappingAnalyzer:
             soup = BeautifulSoup(form_content, "html.parser")
             required_elements = []
 
+            # 0. hiddenフィールドに含まれるバリデーションヒントを検出
+            # 例: <input type="hidden" name="F2M_CHECK_01" value="NAME,お名前は必須です">
+            hinted_names_upper = []
+            try:
+                for h in soup.find_all("input", {"type": "hidden"}):
+                    name_attr = (h.get("name") or "").upper()
+                    value_attr = (h.get("value") or "")
+                    if any(k in name_attr for k in ["F2M_CHECK", "REQ_CHECK", "REQUIRED_CHECK", "VALIDATE_"]):
+                        if "," in value_attr:
+                            candidate = value_attr.split(",", 1)[0].strip()
+                            if 0 < len(candidate) <= 64:
+                                hinted_names_upper.append(candidate.upper())
+            except Exception:
+                pass
+            # 重複排除
+            hinted_names_upper = list(dict.fromkeys(hinted_names_upper))
+
             # required属性、aria-required="true"、クラス名、隣接要素をチェック
             for element in soup.find_all(["input", "textarea", "select"]):
                 is_required = False
@@ -1107,6 +1124,15 @@ class FieldMappingAnalyzer:
                 # 4. 隣接要素の必須マーカーチェック
                 elif self._check_required_by_adjacent_text(element):
                     is_required = True
+
+                # 5. hiddenヒント（名前一致）
+                elif hinted_names_upper:
+                    try:
+                        elem_name = (element.get("name") or "").strip()
+                        if elem_name and elem_name.upper() in hinted_names_upper:
+                            is_required = True
+                    except Exception:
+                        pass
 
                 if is_required:
                     element_info = {
@@ -1174,29 +1200,39 @@ class FieldMappingAnalyzer:
             # 次の兄弟要素をチェック
             next_sibling = element.next_sibling
             while next_sibling:
+                # <img alt="必須"> に対応
+                try:
+                    if getattr(next_sibling, 'name', '') == 'img':
+                        alt = (next_sibling.get('alt') or '').strip()
+                        if any(m in alt for m in ["必須", "Required", "Mandatory"]):
+                            return True
+                except Exception:
+                    pass
                 if hasattr(next_sibling, "get_text"):
                     text = next_sibling.get_text().strip()
-                    # 『※』は注記用途が多く、必須の確証にならないため除外。全角スター『＊』は許可。
-                    if any(
-                        marker in text
-                        for marker in ["必須", "Required", "Mandatory", "*", "＊"]
-                    ):
+                    # ラベル近傍では『※』が必須記号として使われることが多い。
+                    # ただし注記との混同を避けるため、短いテキストに限定して許可する。
+                    if any(marker in text for marker in ["必須", "Required", "Mandatory", "*", "＊"]):
+                        return True
+                    if "※" in text and len(text) <= 10:
                         return True
                 next_sibling = next_sibling.next_sibling
 
             # 親要素内の他の子要素もチェック
             if element.parent:
-                for sibling in element.parent.find_all(["span", "label", "div"]):
+                for sibling in element.parent.find_all(["span", "label", "div", "img"]):
                     if sibling != element:
-                        text = sibling.get_text().strip()
-                        if (
-                            any(
-                                marker in text
-                                for marker in ["必須", "Required", "Mandatory"]
-                            )
-                            and len(text) <= 10
-                        ):
-                            return True
+                        if getattr(sibling, 'name', '') == 'img':
+                            try:
+                                alt = (sibling.get('alt') or '').strip()
+                                if any(m in alt for m in ["必須", "Required", "Mandatory"]):
+                                    return True
+                            except Exception:
+                                pass
+                        else:
+                            text = sibling.get_text().strip()
+                            if (any(marker in text for marker in ["必須", "Required", "Mandatory"]) or "※" in text) and len(text) <= 10:
+                                return True
 
             # テーブルレイアウト対応: td内のinputに対して直前のthを確認
             try:
@@ -1209,11 +1245,16 @@ class FieldMappingAnalyzer:
                     prev = td.find_previous_sibling("th")
                     if prev:
                         th_text = prev.get_text().strip()
-                        if any(
-                            marker in th_text
-                            for marker in ["必須", "Required", "Mandatory", "＊", "*"]
-                        ):
+                        if any(marker in th_text for marker in ["必須", "Required", "Mandatory", "＊", "*", "※"]):
                             return True
+                        # th 内の画像 alt でも必須を検出
+                        try:
+                            for img in prev.find_all("img"):
+                                alt = (img.get('alt') or '').strip()
+                                if any(m in alt for m in ["必須", "Required", "Mandatory"]):
+                                    return True
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -1763,7 +1804,14 @@ class FieldMappingAnalyzer:
 """連続実行(--count)は廃止。単一実行のみをサポート。"""
 
 
-DEFAULT_TEST_TIMEOUT_SECONDS = 120  # デフォルトの単一実行タイムアウト（2分）
+# 長めの動的生成フォームにも対応するため延長（単発テストのみ実行のため許容）。
+# デフォルトの単一実行タイムアウト（4分）
+# 環境変数 `FM_TEST_TIMEOUT_SECONDS` で上書き可能（例: 300）
+import os as _os
+try:
+    DEFAULT_TEST_TIMEOUT_SECONDS = int(_os.getenv("FM_TEST_TIMEOUT_SECONDS", "240"))
+except Exception:
+    DEFAULT_TEST_TIMEOUT_SECONDS = 240
 
 
 async def main():

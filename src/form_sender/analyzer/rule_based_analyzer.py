@@ -259,6 +259,12 @@ class RuleBasedAnalyzer:
             except Exception as e:
                 logger.debug(f"name mapping prune skipped: {e}")
 
+            # 汎用補正: WPForms 等で first/last が逆割当されるケースの是正
+            try:
+                self._fix_name_mapping_mismatch()
+            except Exception as e:
+                logger.debug(f"name mapping mismatch fix skipped: {e}")
+
             # 汎用ポストプロセス: カナ/ひらがなの整合性を正規化
             try:
                 await self._normalize_kana_hiragana_fields()
@@ -272,8 +278,6 @@ class RuleBasedAnalyzer:
                 logger.debug(f"auto_promote_postal_split failed: {e}")
 
             # --- Handle Unmapped and Special Fields ---
-            split_groups = self._detect_split_field_patterns(self.field_mapping)
-
             auto_handled = await self.unmapped_handler.handle_unmapped_elements(
                 classified_elements,
                 self.field_mapping,
@@ -296,6 +300,13 @@ class RuleBasedAnalyzer:
             if promoted_kana:
                 for k in promoted_kana:
                     auto_handled.pop(k, None)
+
+            # 分割フィールドの検出は auto_handled も含めた集合で再計算（メール確認や分割入力に対応）
+            try:
+                combined_for_split = {**self.field_mapping, **auto_handled}
+            except Exception:
+                combined_for_split = self.field_mapping
+            split_groups = self._detect_split_field_patterns(combined_for_split)
 
             # --- Value Assignment & Validation ---
             self.assigner.required_analysis = required_analysis
@@ -533,6 +544,47 @@ class RuleBasedAnalyzer:
         if getattr(self.form_structure, "form_bounds", None):
             self.context_text_extractor.set_form_bounds(self.form_structure.form_bounds)
             await self.context_text_extractor.build_form_context_index()
+
+    def _fix_name_mapping_mismatch(self) -> None:
+        """姓/名（およびカナ）の selector が first/last で取り違えられている場合に field_mapping を是正。
+
+        - 入力値側の補正だけでなく、マッピング自体も整合させることで後段処理の一貫性を担保する。
+        - 厳格な条件（相互に first/last を含む）に限定して実施。
+        """
+        def blob(key: str) -> str:
+            info = (self.field_mapping.get(key, {}) or {})
+            return " ".join(
+                [
+                    str(info.get("selector", "")),
+                    str(info.get("name", "")),
+                    str(info.get("id", "")),
+                    str(info.get("class", "")),
+                ]
+            ).lower()
+
+        def swap(a: str, b: str) -> None:
+            if (a in self.field_mapping) and (b in self.field_mapping):
+                self.field_mapping[a], self.field_mapping[b] = (
+                    self.field_mapping[b],
+                    self.field_mapping[a],
+                )
+                logger.info(f"Swapped field_mapping entries: {a} <-> {b}")
+
+        def mismatch(sei_blob: str, mei_blob: str) -> bool:
+            if not sei_blob or not mei_blob:
+                return False
+            return ("first" in sei_blob and "last" in mei_blob) or (
+                "mei" in sei_blob and "sei" in mei_blob
+            )
+
+        # 1) 漢字 姓/名
+        if mismatch(blob("姓"), blob("名")):
+            swap("姓", "名")
+        # 2) カナ 姓/名
+        if mismatch(blob("姓カナ"), blob("名カナ")) and (
+            "kana" in blob("姓カナ") and "kana" in blob("名カナ")
+        ):
+            swap("姓カナ", "名カナ")
 
     def _detect_split_field_patterns(self, field_mapping: Dict[str, Any]):
         field_mappings_list = [

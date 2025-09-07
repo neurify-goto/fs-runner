@@ -174,6 +174,20 @@ class InputValueAssigner:
                         input_assignments["郵便番号1"]["value"] = combined
         except Exception:
             pass
+        # 追加補正: メールアドレスに '@' が含まれない場合は統合値を適用
+        try:
+            assign = input_assignments.get("メールアドレス")
+            if isinstance(assign, dict):
+                v = str(assign.get("value", "") or "")
+                if v and ("@" not in v):
+                    full = self.field_combination_manager.generate_combined_value(
+                        "email", client_data
+                    )
+                    if full:
+                        assign["value"] = full
+                        logger.info("Patched incomplete email local-part to full address")
+        except (KeyError, AttributeError, TypeError) as e:
+            logger.debug(f"email patch skipped: {e}")
         # 共通の取り違えを補正（例: sei/mei の入れ違い、sei_kana/mei_kanaの入れ違い）
         try:
             self._fix_name_selector_mismatch(field_mapping, input_assignments)

@@ -200,9 +200,9 @@ class FieldPatterns:
             # 5. 姓カナ (last_name_kana) - GAS/スプレッドシート必須 
         "姓カナ": {
                 "names": ["last_name_kana", "lastname_kana", "last-name-kana", "kana_last", "katakana_sei", 
-                         "セイ", "カナ姓", "sei_kana", "family_kana", "lastname_katakana", "lastkananame"],
-                "ids": ["lastname_kana", "last_name_kana", "last-name-kana", "kana-last", "katakana-sei", "sei", "lastname_katakana", "lastkananame"],
-                "classes": ["kana", "katakana", "sei", "kana-lastname", "lastname_kana", "lastname-katakana"],
+                         "セイ", "カナ姓", "sei_kana", "family_kana", "lastname_katakana", "lastkananame", "furigana"],
+                "ids": ["lastname_kana", "last_name_kana", "last-name-kana", "kana-last", "katakana-sei", "sei", "lastname_katakana", "lastkananame", "furigana"],
+                "classes": ["kana", "katakana", "sei", "kana-lastname", "lastname_kana", "lastname-katakana", "furigana"],
                 "placeholders": ["セイ", "ヤマダ", "カタカナ", "Kana Last", "姓（カタカナ）", 
                                "フリガナ（姓）", "セイ（全角カタカナ）", "Lastname Kana"],
                 "types": ["text"],
@@ -210,7 +210,7 @@ class FieldPatterns:
                 "weight": 18,
                 "strict_patterns": ["セイ", "姓カナ", "sei_kana", "lastname_kana", "katakana_sei", "kana"],
                 # かな判定: フィールド名に"kana"が含まれているかで判断
-                "kana_indicator": ["kana", "カナ", "katakana"],
+                "kana_indicator": ["kana", "カナ", "katakana", "furigana"],
                 # 除外パターンから漢字フィールドを強く除外
                 "exclude_patterns": [
                     "company", "会社", "corp", "corporation", "firm", "organization", "business",
@@ -228,16 +228,16 @@ class FieldPatterns:
             # 6. 名カナ (first_name_kana) - GAS/スプレッドシート必須
         "名カナ": {
                 "names": ["first_name_kana", "firstname_kana", "first-name-kana", "kana_first", "katakana_mei", 
-                         "メイ", "カナ名", "mei_kana", "given_kana", "firstname_katakana", "kana"],
-                "ids": ["firstname_kana", "first_name_kana", "first-name-kana", "kana-first", "katakana-mei", "mei", "firstname_katakana"],
-                "classes": ["kana", "katakana", "mei", "kana-firstname", "firstname_kana", "firstname-katakana"],
+                         "メイ", "カナ名", "mei_kana", "given_kana", "firstname_katakana", "kana", "furigana"],
+                "ids": ["firstname_kana", "first_name_kana", "first-name-kana", "kana-first", "katakana-mei", "mei", "firstname_katakana", "furigana"],
+                "classes": ["kana", "katakana", "mei", "kana-firstname", "firstname_kana", "firstname-katakana", "furigana"],
                 "placeholders": ["メイ", "タロウ", "カタカナ", "Kana First", "名（カタカナ）", 
                                "フリガナ（名）", "メイ（全角カタカナ）", "Firstname Kana"],
                 "types": ["text"],
                 "tags": ["input"],
                 "weight": 12,
                 "strict_patterns": ["メイ", "名カナ", "mei_kana", "firstname_kana", "katakana_mei", "kana"],
-                "kana_indicator": ["kana", "カナ", "katakana"],
+                "kana_indicator": ["kana", "カナ", "katakana", "furigana"],
                 # ふりがな系の属性名（furigana）は分割カナで一般的に使われるため除外しない
                 "exclude_patterns": [
                     "company", "会社", "corp", "corporation", "firm", "organization", "business",
@@ -255,7 +255,7 @@ class FieldPatterns:
             # 7. 姓ひらがな (last_name_hiragana) - GAS必須
             "姓ひらがな": {
                 "names": ["last_name_hiragana", "lastname_hiragana", "hiragana_last", 
-                         "hiragana_sei", "ひらがな姓", "sei_hiragana", "furigana", "姓ふりがな"],
+                         "hiragana_sei", "ひらがな姓", "sei_hiragana", "姓ふりがな"],
                 "ids": ["lastname_hiragana", "last_name_hiragana", "hiragana-last", "hiragana-sei"],
                 "classes": ["hiragana", "sei", "hiragana-lastname", "lastname_hiragana"],
                 "placeholders": ["せい", "やまだ", "ひらがな", "ふりがな", "姓ふりがな", "姓（ひらがな）", 
@@ -269,7 +269,7 @@ class FieldPatterns:
             # 8. 名ひらがな (first_name_hiragana) - GAS必須
             "名ひらがな": {
                 "names": ["first_name_hiragana", "firstname_hiragana", "hiragana_first", 
-                         "hiragana_mei", "ひらがな名", "mei_hiragana", "furigana", "名ふりがな"],
+                         "hiragana_mei", "ひらがな名", "mei_hiragana", "名ふりがな"],
                 "ids": ["firstname_hiragana", "first_name_hiragana", "hiragana-first", "hiragana-mei"],
                 "classes": ["hiragana", "mei", "hiragana-firstname", "firstname_hiragana"],
                 "placeholders": ["めい", "たろう", "ひらがな", "ふりがな", "名ふりがな", "名（ひらがな）", 

@@ -1390,7 +1390,9 @@ class FieldMapper:
             "フリガナ",
             "ふりがな",
         ]
-        hira_tokens = ["hiragana", "ひらがな", "ふりがな"]
+        # 『ふりがな』は実務上カタカナ入力を指すケースが多いため、
+        # ひらがなトークンからは除外し、kana 側で扱う（上の kana_tokens に含めている）。
+        hira_tokens = ["hiragana", "ひらがな"]
         last_tokens = [
             "lastname",
             "last_name",
@@ -1416,23 +1418,26 @@ class FieldMapper:
             "お名前",
             "名前",
         ]
-        has_kana = any(t in name_id_cls for t in kana_tokens) or (
-            "フリガナ" in ctx_text
-        )
-        has_hira = any(t in name_id_cls for t in hira_tokens) or (
-            "ひらがな" in ctx_text
-        )
-        is_last = any(t in name_id_cls for t in last_tokens) or any(
-            t in ctx_text for t in ["姓", "せい", "苗字"]
-        )
+        has_kana = any(t in name_id_cls for t in kana_tokens) or ("フリガナ" in ctx_text)
+        has_hira = any(t in name_id_cls for t in hira_tokens) or ("ひらがな" in ctx_text)
+        # 属性(first/last)の手掛かりを最優先に用い、文脈は補助として利用
+        attr_last = any(t in name_id_cls for t in last_tokens)
+        attr_first = any(t in name_id_cls for t in first_tokens)
+        ctx_last = any(t in ctx_text for t in ["姓", "せい", "苗字"])
+        ctx_first = any(t in ctx_text for t in ["名", "めい"])
+
+        # 両方の属性シグナルが無い場合のみ、文脈シグナルを採用（かつ相互排他的に）
+        if not (attr_last or attr_first):
+            is_last = ctx_last and not ctx_first
+            is_first_token_hit = ctx_first and not ctx_last
+        else:
+            is_last = attr_last
+            is_first_token_hit = attr_first
         # 非個人名（会社名/商品名/部署名/建物名…）の文脈では『名』の判定を抑止
         from .element_scorer import ElementScorer
 
         non_personal_ctx = bool(
             ElementScorer.NON_PERSONAL_NAME_PATTERN.search(ctx_text or "")
-        )
-        is_first_token_hit = any(t in name_id_cls for t in first_tokens) or any(
-            t in ctx_text for t in ["名", "めい"]
         )
         is_first = is_first_token_hit and not non_personal_ctx
         has_kanji = ("kanji" in name_id_cls) or ("漢字" in ctx_text)
@@ -1447,6 +1452,31 @@ class FieldMapper:
             return "統合氏名カナ"
 
         if has_hira:
+            # 『ふりがな』は実務上カタカナ入力を要求するフォームが多いため、
+            # 文脈やプレースホルダにカタカナ指標があればカナ系に寄せる（汎用安全化）。
+            try:
+                placeholder = str(element_info.get("placeholder", "") or "")
+                def _has_hiragana(s: str) -> bool:
+                    return any("ぁ" <= ch <= "ゖ" for ch in s)
+                def _has_katakana(s: str) -> bool:
+                    return any(("ァ" <= ch <= "ヺ") or ch == "ー" for ch in s)
+                katakana_hint = (
+                    ("カタカナ" in ctx_text)
+                    or ("katakana" in ctx_text.lower())
+                    or _has_katakana(placeholder)
+                    or any(tok in name_id_cls for tok in ["katakana", "kana"])
+                )
+            except Exception:
+                katakana_hint = False
+
+            if katakana_hint:
+                if is_last and not is_first:
+                    return "姓カナ"
+                if is_first and not is_last:
+                    return "名カナ"
+                return "統合氏名カナ"
+
+            # それ以外は『ひらがな』系として扱う
             if is_last and not is_first:
                 return "姓ひらがな"
             if is_first and not is_last:
