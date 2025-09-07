@@ -5,10 +5,9 @@
 フィールドグループ化と説明テキストペアリングシステム
 """
 
-import asyncio
 import logging
-from typing import Dict, List, Any, Optional, Tuple, Set
-from playwright.async_api import Page, Locator
+from typing import Dict, List, Any, Optional, Tuple
+from playwright.async_api import Locator
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)

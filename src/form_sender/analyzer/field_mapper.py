@@ -7,6 +7,8 @@ from .context_text_extractor import ContextTextExtractor
 from .field_patterns import FieldPatterns
 from .duplicate_prevention import DuplicatePreventionManager
 from config.manager import get_prefectures
+from .mapping_safeguards import passes_safeguard
+from .candidate_filters import allow_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -178,72 +180,32 @@ class FieldMapper:
                     # スコアが動的閾値（品質優先）を満たす場合のみ採用。
                     map_ok = best_score >= dynamic_threshold
 
-            # フィールド固有の安全ガード
+            # フィールド固有の安全ガード（メール）
             if map_ok and field_name == "メールアドレス":
                 try:
-                    ei = (best_score_details or {}).get("element_info", {})
-                    etype = (ei.get("type") or "").lower()
-                    attrs_blob = " ".join(
-                        [
-                            (ei.get("name") or ""),
-                            (ei.get("id") or ""),
-                            (ei.get("class") or ""),
-                            (ei.get("placeholder") or ""),
-                        ]
-                    ).lower()
-                    best_txt = (
-                        (
-                            self.context_text_extractor.get_best_context_text(
-                                best_context
-                            )
-                            or ""
-                        ).lower()
-                        if best_context
-                        else ""
-                    )
-                    email_tokens = ["email", "e-mail", "mail", "メール"]
-                    is_semantic_email = any(
-                        t in attrs_blob for t in email_tokens
-                    ) or any(t in best_txt for t in email_tokens)
-                    # type=email か、強いメール語が属性またはラベルにない限り採用しない
-                    if not (etype == "email" or is_semantic_email):
+                    if not passes_safeguard(
+                        field_name,
+                        best_score_details,
+                        best_context,
+                        self.context_text_extractor,
+                        field_patterns,
+                        self.settings,
+                    ):
                         map_ok = False
                 except Exception:
                     pass
 
-            # 電話番号の安全ガード
+            # フィールド固有の安全ガード（電話）
             if map_ok and field_name == "電話番号":
                 try:
-                    ei = (best_score_details or {}).get("element_info", {})
-                    etype = (ei.get("type") or "").lower()
-                    attrs_blob = " ".join(
-                        [
-                            (ei.get("name") or ""),
-                            (ei.get("id") or ""),
-                            (ei.get("class") or ""),
-                            (ei.get("placeholder") or ""),
-                        ]
-                    ).lower()
-                    best_txt = (
-                        (
-                            self.context_text_extractor.get_best_context_text(
-                                best_context
-                            )
-                            or ""
-                        ).lower()
-                        if best_context
-                        else ""
-                    )
-                    pos_attr = any(t in attrs_blob for t in ["tel", "phone"])
-                    pos_ctx = any(
-                        t in best_txt
-                        for t in ["電話", "tel", "phone", "携帯", "mobile", "cell"]
-                    )
-                    neg_ctx = any(
-                        t in best_txt
-                        for t in ["時", "時頃", "午前", "午後", "連絡方法"]
-                    ) or any(t in attrs_blob for t in ["timeno", "h1", "h2"])
-                    if not (etype == "tel" or pos_attr or (pos_ctx and not neg_ctx)):
+                    if not passes_safeguard(
+                        field_name,
+                        best_score_details,
+                        best_context,
+                        self.context_text_extractor,
+                        field_patterns,
+                        self.settings,
+                    ):
                         map_ok = False
                 except Exception:
                     pass
@@ -251,118 +213,47 @@ class FieldMapper:
             # 郵便番号の安全ガード（CAPTCHA誤検出/汎用テキストへの誤割当て対策）
             if map_ok and field_name == "郵便番号":
                 try:
-                    ei = (best_score_details or {}).get("element_info", {})
-                    attrs_blob = " ".join(
-                        [
-                            (ei.get("name") or ""),
-                            (ei.get("id") or ""),
-                            (ei.get("class") or ""),
-                            (ei.get("placeholder") or ""),
-                        ]
-                    ).lower()
-                    best_txt = (
-                        (
-                            self.context_text_extractor.get_best_context_text(
-                                best_context
-                            )
-                            or ""
-                        ).lower()
-                        if best_context
-                        else ""
-                    )
-                    # 強いポジティブシグナル
-                    pos_attr = any(
-                        t in attrs_blob
-                        for t in ["zip", "postal", "postcode", "zipcode", "郵便", "〒"]
-                    )
-                    pos_ctx = any(
-                        t in best_txt
-                        for t in ["郵便番号", "郵便", "〒", "postal", "zip"]
-                    )
-                    # 強いネガティブシグナル（認証/確認系・CAPTCHA）
-                    neg = any(
-                        t in attrs_blob
-                        for t in [
-                            "captcha",
-                            "image_auth",
-                            "token",
-                            "otp",
-                            "verification",
-                            "confirm",
-                            "確認",
-                        ]
-                    )
-                    if not (pos_attr or pos_ctx) or neg:
+                    if not passes_safeguard(
+                        field_name,
+                        best_score_details,
+                        best_context,
+                        self.context_text_extractor,
+                        field_patterns,
+                        self.settings,
+                    ):
                         map_ok = False
                 except Exception:
                     map_ok = False
 
-            # 都道府県の安全ガード（select誤検出対策）
+            # 都道府県の安全ガード（共通ユーティリティ）
             if map_ok and field_name == "都道府県":
                 try:
-                    ei = (best_score_details or {}).get("element_info", {})
-                    tag = (ei.get("tag_name") or "").lower()
-                    attrs_blob = " ".join(
-                        [
-                            (ei.get("name") or ""),
-                            (ei.get("id") or ""),
-                            (ei.get("class") or ""),
-                            (ei.get("placeholder") or ""),
-                        ]
-                    ).lower()
-                    best_txt = (
-                        (
-                            self.context_text_extractor.get_best_context_text(
-                                best_context
-                            )
-                            or ""
-                        ).lower()
-                        if best_context
-                        else ""
-                    )
-
-                    # 1) 属性/文脈に prefecture を示す強いシグナル
-                    attr_hit = any(
-                        t in attrs_blob
-                        for t in ["prefecture", "pref", "todofuken", "todouhuken"]
-                    )
-                    ctx_hit = any(t in best_txt for t in ["都道府県", "prefecture"])
-
-                    confident = False
-                    if attr_hit or ctx_hit:
-                        confident = True
-                    elif tag == "select":
-                        # 2) selectオプションの中に都道府県名が一定数以上含まれる
-                        try:
-                            pref_list = [
-                                p.lower()
-                                for p in (get_prefectures().get("names") or [])
-                            ]
-                        except Exception:
-                            pref_list = []
-                        try:
-                            options = await best_element.evaluate(
-                                """
-                                el => Array.from(el.querySelectorAll('option')).map(o => (o.textContent||'').trim())
-                            """
-                            )
-                        except Exception:
-                            options = []
-                        lowered = [str(o).lower() for o in options]
-                        hits = (
-                            sum(1 for p in pref_list if any(p in o for o in lowered))
-                            if pref_list
-                            else 0
-                        )
-                        # 47都道府県のうち5件以上一致を閾値とする（CMSの一部サンプル短縮も考慮）
-                        if hits >= 5:
-                            confident = True
-
-                    if not confident:
+                    if not passes_safeguard(
+                        field_name,
+                        best_score_details,
+                        best_context,
+                        self.context_text_extractor,
+                        field_patterns,
+                        self.settings,
+                    ):
                         map_ok = False
                 except Exception:
-                    # 失敗時は安全側（マッピングしない）
-                    map_ok = False
+                    pass
+
+            # 汎用のセーフガード呼び出し（上記以外のフィールドは常に True だが、将来拡張に備えて共通化）
+            if map_ok and field_name not in {"メールアドレス", "電話番号", "郵便番号", "都道府県"}:
+                try:
+                    if not passes_safeguard(
+                        field_name,
+                        best_score_details,
+                        best_context,
+                        self.context_text_extractor,
+                        field_patterns,
+                        self.settings,
+                    ):
+                        map_ok = False
+                except Exception:
+                    pass
 
             if map_ok:
                 element_info = await self._create_enhanced_element_info(
@@ -560,6 +451,13 @@ class FieldMapper:
         score, score_details = await self.element_scorer.calculate_element_score(
             element, field_patterns, field_name
         )
+        # 候補除外フィルタ（住所/性別 select の誤検出抑止）
+        try:
+            ei = score_details.get("element_info", {})
+            if not await allow_candidate(field_name, element, ei):
+                return 0, {}, []
+        except Exception:
+            pass
         # 住所×select の誤検出抑止（汎用）
         # 都道府県セレクト以外の select を『住所』と誤認しないように、
         # option に都道府県名が十分数含まれない場合はスコアを無効化する。
@@ -1058,208 +956,10 @@ class FieldMapper:
         used_elements: set,
         required_elements_set: set,
     ) -> None:
-        """必須要素を必ず field_mapping に登録する救済フェーズ
-
-        改善点:
-        - required_elements_set が空（もしくは不十分）な場合でも、
-          コンテキストに必須マーカー（*, 必須, Required など）がある入力要素を救済登録する。
-        - これにより、<th>に必須マークがあり input 自体に required 属性が無いテーブル型フォームでも
-          『住所』『郵便番号』等の取りこぼしを防止する。
-        """
-        # 既に使用済みname/idの組を控える
-        used_names_ids = set()
-        for info in field_mapping.values():
-            try:
-                used_names_ids.add((info.get("name", ""), info.get("id", "")))
-            except Exception:
-                pass
-
-        # 必須マーカー
-        # メモ記号の『※』は必須と無関係な注記に使われることが多いため除外
-        required_markers = [
-            "*",
-            "必須",
-            "Required",
-            "Mandatory",
-            "Must",
-            "(必須)",
-            "（必須）",
-            "[必須]",
-            "［必須］",
-        ]
-        allowed_required_sources = {
-            "dt_label",
-            "th_label",
-            "th_label_index",
-            "label_for",
-            "aria_labelledby",
-            "label_element",
-        }
-
-        # 走査対象
-        buckets = [
-            "email_inputs",
-            "tel_inputs",
-            "url_inputs",
-            "number_inputs",
-            "text_inputs",
-            "textareas",
-            "selects",
-            "radios",
-            "checkboxes",
-        ]
-        auto_counter = 1
-        for bucket in buckets:
-            for el in classified_elements.get(bucket, []):
-                try:
-                    if id(el) in used_elements:
-                        continue
-                    ei = await self.element_scorer._get_element_info(el)
-                    nm = (ei.get("name") or "").strip()
-                    idv = (ei.get("id") or "").strip()
-                    # 既知の必須集合に含まれる、もしくは必須マーカーをコンテキストから検出
-                    in_known_required = (
-                        nm in required_elements_set or idv in required_elements_set
-                    )
-                    # ヒューリスティック: name/id に must/required を含む場合は必須とみなす
-                    if not in_known_required:
-                        low = f"{nm} {idv}".lower()
-                        if ("must" in low) or ("required" in low):
-                            in_known_required = True
-                    has_required_marker = False
-                    if not in_known_required:
-                        try:
-                            contexts = await self.context_text_extractor.extract_context_for_element(
-                                el
-                            )
-                            for ctx in contexts or []:
-                                if (
-                                    getattr(ctx, "source_type", "")
-                                    in allowed_required_sources
-                                ):
-                                    txt = ctx.text or ""
-                                    if any(m in txt for m in required_markers):
-                                        has_required_marker = True
-                                        break
-                        except Exception:
-                            has_required_marker = False
-                    if not (in_known_required or has_required_marker):
-                        continue
-
-                    if (nm, idv) in used_names_ids:
-                        continue
-
-                    if self._is_nonfillable_required(ei):
-                        continue
-
-                    contexts = (
-                        await self.context_text_extractor.extract_context_for_element(
-                            el
-                        )
-                    )
-                    field_name = self._infer_logical_field_name_for_required(
-                        ei, contexts
-                    )
-                    # 追加救済: 『ふりがな/フリガナ/カナ/かな』を示す見出しがある場合、
-                    # auto_required_text_* ではなく『統合氏名カナ』として扱う
-                    try:
-                        if field_name.startswith("auto_required_text_"):
-                            ctx_texts = " ".join(
-                                [
-                                    (getattr(c, "text", "") or "")
-                                    for c in (contexts or [])
-                                ]
-                            )
-                            if any(
-                                t in ctx_texts
-                                for t in ["ふりがな", "フリガナ", "カナ", "かな"]
-                            ):
-                                field_name = "統合氏名カナ"
-                            else:
-                                # 確認用メールアドレスを救済（auto_email_confirm_*）
-                                if self._is_confirmation_field(ei, contexts) or any(
-                                    t
-                                    in (
-                                        ei.get("name", "").lower()
-                                        + " "
-                                        + ei.get("id", "").lower()
-                                    )
-                                    for t in [
-                                        "mail2",
-                                        "email2",
-                                        "email_check",
-                                        "mail_check",
-                                        "confirm-email",
-                                        "email-confirm",
-                                    ]
-                                ):
-                                    field_name = f"auto_email_confirm_{auto_counter}"
-                    except Exception:
-                        pass
-
-                    # 除外パターンに該当する要素は救済対象から除外（汎用安全ガード）
-                    try:
-                        patterns_for_field = self.field_patterns.get_pattern(field_name) or {}
-                        if await self.element_scorer._is_excluded_element_with_context(
-                            ei, el, patterns_for_field
-                        ):
-                            # ログイン/認証/CAPTCHA/検索 等の誤救済を防止
-                            continue
-                    except Exception:
-                        pass
-
-                    # 汎用必須テキスト(auto_required_text_*)も救済対象に含める。
-                    # ルール: どのフィールドとも判断がつかない必須テキストは全角空白などの安全値で入力する。
-                    # （実際の値の割当は assigner 側のテンポラリ値生成に委譲）
-
-                    # 同一論理フィールドが既に確定している場合の扱い
-                    # 住所は分割必須（市区/番地/建物 等）で複数の必須入力欄が存在するケースが多いため、
-                    # 『住所_補助N』として追加登録を許可する（Nは1からの通番）。
-                    if field_name in field_mapping:
-                        if field_name == "住所":
-                            base = "住所_補助"
-                            n = 1
-                            while f"{base}{n}" in field_mapping:
-                                n += 1
-                            field_name = f"{base}{n}"
-                        else:
-                            continue
-                    # 必須救済で登録する要素は、評価スコアが 0 のままだと
-                    # downstream の評価（例: テストの低信頼アラート）で誤検知される。
-                    # そこで、救済登録時は安全側の保守的なスコアを与える。
-                    # しきい値は settings の最小スコア閾値を使用（デフォルト: 70）。
-                    salvage_score = max(
-                        15, int(self.settings.get("min_score_threshold", 70))
-                    )
-                    details = {"element_info": ei, "total_score": salvage_score}
-                    info = await self._create_enhanced_element_info(
-                        el, details, contexts
-                    )
-                    try:
-                        info["source"] = "required_rescue"
-                    except Exception:
-                        pass
-                    info["required"] = True
-                    # 確認用メールアドレスの場合はコピー動作を指示
-                    if field_name.startswith("auto_email_confirm_"):
-                        info["input_type"] = "email"
-                        try:
-                            info["auto_action"] = "copy_from"
-                            info["copy_from_field"] = "メールアドレス"
-                        except Exception:
-                            pass
-
-                    temp_value = self._generate_temp_field_value(field_name)
-                    # 重複抑止にも救済スコアを渡しておく（後続の参照整合のため）
-                    if self.duplicate_prevention.register_field_assignment(
-                        field_name, temp_value, salvage_score, info
-                    ):
-                        key = field_name
-                        field_mapping[key] = info
-                        used_elements.add(id(el))
-                        used_names_ids.add((nm, idv))
-                except Exception as e:
-                    logger.debug(f"Ensure required mapping for element failed: {e}")
+        """必須要素を必ず field_mapping に登録する救済フェーズ（委譲版）。"""
+        await self._required_rescue.ensure_required_mappings(
+            classified_elements, field_mapping, used_elements, required_elements_set
+        )
 
     def _infer_logical_field_name_for_required(
         self, element_info: Dict[str, Any], contexts: List
@@ -1359,15 +1059,6 @@ class FieldMapper:
         # 汎用入力(type=text)でも文脈/属性から論理フィールドを推定（救済判定）
         # 1) メールアドレス: ラベル/見出し/placeholder/属性にメール系語が含まれる
         email_tokens = ["メール", "e-mail", "email", "mail"]
-        confirm_tokens = [
-            "confirm",
-            "confirmation",
-            "確認",
-            "確認用",
-            "再入力",
-            "もう一度",
-            "再度",
-        ]
         if tag == "input" and typ in ["", "text"]:
             if any(tok in ctx_text for tok in email_tokens) or any(
                 tok in name_id_cls for tok in ["email", "mail"]
@@ -1440,7 +1131,7 @@ class FieldMapper:
             ElementScorer.NON_PERSONAL_NAME_PATTERN.search(ctx_text or "")
         )
         is_first = is_first_token_hit and not non_personal_ctx
-        has_kanji = ("kanji" in name_id_cls) or ("漢字" in ctx_text)
+        # has_kanji は参照箇所が無いため削除（判定ロジックには影響しない）
 
         # Prioritize split-specific logical names when tokens available
         if has_kana:
@@ -1549,49 +1240,14 @@ class FieldMapper:
     def _get_dynamic_quality_threshold(
         self, field_name: str, essential_fields_completed: set
     ) -> float:
-        # フィールド別の最低スコアしきい値（優先採用）
-        per_field = self.settings.get("min_score_threshold_per_field", {}) or {}
-        if field_name in per_field:
-            return per_field[field_name]
+        from .mapping_thresholds import get_dynamic_quality_threshold as _impl
 
-        # 必須フィールド（essential_fields）は常に標準閾値
-        if field_name in self.settings.get("essential_fields", []):
-            return self.settings["min_score_threshold"]
-
-        # 品質優先モードでない場合は標準閾値
-        if not self.settings.get("quality_first_mode", False):
-            return self.settings["min_score_threshold"]
-
-        # 重要だが任意になりがちなフィールドは、
-        # 必須項目完了後でも過度にしきい値を吊り上げない（誤検出抑止と網羅性のバランス）
-        if field_name in self.OPTIONAL_HIGH_PRIORITY_FIELDS:
-            return min(
-                self.settings["min_score_threshold"]
-                + self.settings["quality_threshold_boost"],
-                self.settings["max_quality_threshold"],
-            )
-
-        # 任意フィールドに対しては高い閾値を設定（不要な入力を回避）
-        # 特に必須フィールドが全て完了した後は、さらに高い閾値を適用
-        if len(essential_fields_completed) >= len(
-            self.settings.get("essential_fields", [])
-        ):
-            # 必須フィールド完了後：任意フィールドは非常に高い信頼度が必要
-            return min(
-                self.settings["min_score_threshold"]
-                + self.settings["quality_threshold_boost"]
-                + 50,
-                400,
-            )
-        else:
-            # 必須フィールド未完了：任意フィールドも高い閾値
-            return min(
-                self.settings["min_score_threshold"]
-                + self.settings["quality_threshold_boost"],
-                self.settings["max_quality_threshold"],
-            )
-
-        return self.settings["min_score_threshold"]
+        return _impl(
+            field_name,
+            self.settings,
+            essential_fields_completed,
+            self.OPTIONAL_HIGH_PRIORITY_FIELDS,
+        )
 
     def _is_core_field(self, field_name: str) -> bool:
         """

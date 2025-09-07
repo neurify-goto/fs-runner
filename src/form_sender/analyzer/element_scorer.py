@@ -159,15 +159,21 @@ class ElementScorer:
             self._cjk_re = None
 
     def _has_cjk(self, s: str) -> bool:
-        """日本語(CJK)文字を含むかの軽量判定（事前コンパイル済みのパターンを使用）。"""
+        """日本語(CJK)文字を含むかの軽量判定（ユーティリティへ委譲）。"""
         try:
-            if not s:
-                return False
-            if self._cjk_re is None:
-                return bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]", s))
-            return self._cjk_re.search(s) is not None
+            from .text_utils import has_cjk as _has_cjk_util
+
+            return _has_cjk_util(s)
         except Exception:
-            return False
+            # 従来のフォールバック（互換維持）
+            try:
+                if not s:
+                    return False
+                if self._cjk_re is None:
+                    return bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]", s))
+                return self._cjk_re.search(s) is not None
+            except Exception:
+                return False
 
     def _should_bypass_generic_text_penalty(
         self, field_name: str, score_details: Dict[str, Any]
@@ -187,46 +193,15 @@ class ElementScorer:
             return False
 
     def _contains_token_with_boundary(self, text: str, token: str) -> bool:
-        """語境界を考慮した包含判定（日本語対応）。
-
-        - まず拡張境界（半角/全角スペース、括弧、句読点、中点、全角スラッシュ等）での境界一致を試みる。
-        - それでも一致しない場合、トークンが日本語(CJK: 漢字・ひらがな・カタカナ)を含むなら、
-          日本語では語境界が空白で区切られない前提から安全側の部分一致を許容する。
-          ただし、偽陽性リスクの高い『名』は除外し、単文字一般トークンも除外する。
-          例外的に『姓』は『姓名』ケース対応のため許容する。
-        """
+        """語境界を考慮した包含判定（ユーティリティへ委譲）。"""
         try:
-            if not text or not token:
-                return False
+            from .text_utils import contains_token_with_boundary as _ctwb
 
-            # 1) 拡張境界一致（半角/全角の各種記号を境界として扱う）
-            #   - 半角: 空白, _ - . / \
-            #   - 全角: 空白、各種括弧、句読点、中点、コロン/セミコロン、全角スラッシュ など
-            boundary_chars = (
-                r"_\-\./\\\s"  # 半角
-                + r"\u3000（）［］｛｝「」『』【】。、・：；！？”“’‘？／＼＜＞《》〈〉【】『』—－ー〜･・，．｡"  # 全角
-            )
-            left_boundary = rf"(^|[{boundary_chars}])"
-            right_boundary = rf"($|[{boundary_chars}])"
-            pattern = left_boundary + re.escape(token) + right_boundary
-            if re.search(pattern, text, flags=re.IGNORECASE):
-                return True
-
-            # 2) 日本語(CJK)を含むトークンの緩和マッチ（安全側）
-            t = token
-            if self._has_cjk(t):
-                # 単文字一般は広すぎて危険だが、『姓』だけは許容（『姓名』を拾うため）
-                if len(t) == 1 and t != "姓":
-                    return False
-                # 『名』は別途セマンティック検証で扱うため、ここでは許容しない
-                if t == "名":
-                    return False
-                return t in text
-
-            return False
+            return _ctwb(text, token)
         except Exception as e:
             logger.debug(f"boundary match failed: {e}")
-            return token.lower() in (text or "").lower()
+            # 互換フォールバック（case-insensitive の部分一致）
+            return (token or "").lower() in (text or "").lower()
 
     async def calculate_element_score(
         self, element: Locator, field_patterns: Dict[str, Any], field_name: str
@@ -1598,82 +1573,10 @@ class ElementScorer:
     async def _calculate_penalties(
         self, element: Locator, element_info: Dict[str, Any]
     ) -> Tuple[int, List[str]]:
-        """ペナルティスコア計算"""
-        penalty = 0
-        penalties = []
+        """ペナルティスコア計算（外部モジュールへ委譲）。"""
+        from .penalties import calculate_penalties as _calc
 
-        # 非表示要素ペナルティ（強化）
-        if not element_info.get("visible", True):
-            penalty += self.SCORE_WEIGHTS["visibility_penalty"]
-            penalties.append("element_not_visible")
-
-        # 非有効要素ペナルティ
-        if not element_info.get("enabled", True):
-            penalty += self.SCORE_WEIGHTS["visibility_penalty"] // 2
-            penalties.append("element_not_enabled")
-
-        # style="display:none"等のペナルティ（キャッシュ優先）
-        try:
-            style = element_info.get("style")
-            if style is None:
-                style = await element.get_attribute("style") or ""
-            if (
-                "display:none" in style
-                or "display: none" in style
-                or "visibility:hidden" in style
-                or "visibility: hidden" in style
-            ):
-                penalty += self.SCORE_WEIGHTS["visibility_penalty"]
-                penalties.append("display_none_or_hidden_style")
-        except:
-            pass
-
-        # hidden属性ペナルティ
-        if element_info.get("type", "") == "hidden":
-            penalty += self.SCORE_WEIGHTS["visibility_penalty"]
-            penalties.append("hidden_input_type")
-
-        # aria-hidden属性ペナルティ（キャッシュ優先）
-        try:
-            aria_hidden = element_info.get("aria_hidden")
-            if aria_hidden is None:
-                aria_hidden = await element.get_attribute("aria-hidden")
-            if aria_hidden and aria_hidden.lower() == "true":
-                penalty += self.SCORE_WEIGHTS["visibility_penalty"]
-                penalties.append("aria_hidden_true")
-        except:
-            pass
-
-        # tabindex="-1"ペナルティ（フォーカス不可要素）（キャッシュ優先）
-        try:
-            tabindex = element_info.get("tabindex")
-            if tabindex is None:
-                tabindex = await element.get_attribute("tabindex")
-            if tabindex == "-1":
-                penalty += self.SCORE_WEIGHTS["visibility_penalty"] // 2
-                penalties.append("tabindex_negative")
-        except:
-            pass
-
-        # position:absolute + 極小サイズのハニーポット判定
-        try:
-            style = element_info.get("style")
-            if style is None:
-                style = await element.get_attribute("style") or ""
-            if "position: absolute" in style and (
-                "height: 1px" in style
-                or "width: 1px" in style
-                or "overflow: hidden" in style
-            ):
-                penalty += self.SCORE_WEIGHTS["visibility_penalty"]
-                penalties.append("honeypot_style_detected")
-        except:
-            pass
-
-        if penalties:
-            logger.debug(f"Penalties applied: {penalties} (total: {penalty})")
-
-        return penalty, penalties
+        return await _calc(element, element_info, self.SCORE_WEIGHTS)
 
     def compare_elements(
         self, element1_score: Dict[str, Any], element2_score: Dict[str, Any]
@@ -1735,120 +1638,9 @@ class ElementScorer:
     def _is_excluded_element(
         self, element_info: Dict[str, Any], field_patterns: Dict[str, Any]
     ) -> bool:
-        """除外パターンに該当するかチェック（認証・FAXフィールド等の除外）"""
-        exclude_patterns = field_patterns.get("exclude_patterns", [])
-        if not exclude_patterns:
-            return False
+        from .exclusion_rules import is_excluded_element as _impl
 
-        # チェック対象の属性
-        attributes_to_check = ["name", "id", "class", "placeholder"]
-
-        for attr in attributes_to_check:
-            attr_value = (element_info.get(attr, "") or "").lower()
-            if not attr_value:
-                continue
-
-            if attr == "class":
-                # 空白トークン化に加え、ハイフン/アンダースコア境界も意識した判定を行う
-                class_tokens = [
-                    t
-                    for t in (attr_value.split() if isinstance(attr_value, str) else [])
-                    if t
-                ]
-                if not class_tokens:
-                    continue
-
-                for exclude_pattern in exclude_patterns:
-                    ep = (exclude_pattern or "").lower()
-                    if not ep:
-                        continue
-
-                    # 1) 完全一致（空白トークン）
-                    if any(tok == ep for tok in class_tokens):
-                        logger.debug(
-                            f"EXCLUSION(class exact): token matches '{ep}' in class='***CLASS_REDACTED***'"
-                        )
-                        return True
-
-                    # 2) セキュリティ重要トークンは -/_ 境界での一致も許可（例: user-auth-input）
-                    if ep in self.CRITICAL_CLASS_EXCLUDE_TOKENS:
-                        boundary_re = self._critical_boundary_regex.get(ep)
-                        if boundary_re and any(
-                            boundary_re.search(tok) for tok in class_tokens
-                        ):
-                            logger.debug(
-                                f"EXCLUSION(class critical-boundary): '{ep}' matched in class='***CLASS_REDACTED***'"
-                            )
-                            return True
-
-                    # 3) 長い除外語はハイフン/アンダースコア連結でも部分一致を許容
-                    if len(ep) >= self.LONG_EXCLUDE_LENGTH:
-                        if any(ep in tok for tok in class_tokens):
-                            logger.debug(
-                                f"EXCLUSION(class long-substring): '{ep}' found in class='***CLASS_REDACTED***'"
-                            )
-                            return True
-
-                continue  # class のチェックはここで終了
-
-            # name/id/placeholder は語境界（日本語含む）も考慮
-            for exclude_pattern in exclude_patterns:
-                exclude_pattern_lower = exclude_pattern.lower()
-
-                # CJKや短いトークン（例:『姓』）は日本語境界マッチで厳密に判定
-                if len(exclude_pattern_lower) <= 2 or self._has_cjk(
-                    exclude_pattern_lower
-                ):
-                    try:
-                        if self._contains_token_with_boundary(
-                            attr_value, exclude_pattern_lower
-                        ):
-                            logger.debug(
-                                f"EXCLUSION(boundary jp): {attr}='***REDACTED***' contains token '{exclude_pattern}'"
-                            )
-                            return True
-                    except Exception:
-                        pass
-
-                # 1. 完全一致チェック（最優先）
-                if attr_value == exclude_pattern_lower:
-                    logger.debug(
-                        f"EXCLUSION: {attr}='***REDACTED***' exactly matches exclude_pattern '{exclude_pattern}'"
-                    )
-                    return True
-
-                # 2. 単語境界を考慮した一致チェック（認証系パターン用）
-                if len(exclude_pattern_lower) >= 3:  # 短すぎるパターンは除外
-                    # 単語境界またはアンダースコア/ハイフンで区切られた場合
-                    if (
-                        re.search(
-                            r"\b" + re.escape(exclude_pattern_lower) + r"\b", attr_value
-                        )
-                        or re.search(
-                            r"[_-]" + re.escape(exclude_pattern_lower) + r"[_-]",
-                            attr_value,
-                        )
-                        or attr_value.startswith(exclude_pattern_lower + "_")
-                        or attr_value.startswith(exclude_pattern_lower + "-")
-                        or attr_value.endswith("_" + exclude_pattern_lower)
-                        or attr_value.endswith("-" + exclude_pattern_lower)
-                    ):
-                        logger.debug(
-                            f"EXCLUSION: {attr}='***REDACTED***' contains word-boundary exclude_pattern '{exclude_pattern}'"
-                        )
-                        return True
-
-                # 3. 特定長さ以上での部分一致（汎用除外用）
-                if (
-                    len(exclude_pattern_lower) >= 5
-                    and exclude_pattern_lower in attr_value
-                ):
-                    logger.debug(
-                        f"EXCLUSION: {attr}='***REDACTED***' contains long exclude_pattern '{exclude_pattern}'"
-                    )
-                    return True
-
-        return False
+        return _impl(element_info, field_patterns)
 
     async def _is_excluded_element_with_context(
         self,
@@ -1856,81 +1648,13 @@ class ElementScorer:
         element: Locator,
         field_patterns: Dict[str, Any],
     ) -> bool:
-        """コンテキストテキストも含めた除外パターンチェック"""
-        exclude_patterns = field_patterns.get("exclude_patterns", [])
-        logger.debug(f"Context exclusion check - patterns: {exclude_patterns}")
+        from .exclusion_rules import (
+            is_excluded_element_with_context as _impl_ctx,
+        )
 
-        if not exclude_patterns:
-            logger.debug("No exclude patterns found")
-            return False
-
-        # 既存の属性チェック
-        if self._is_excluded_element(element_info, field_patterns):
-            logger.debug("Excluded by attribute patterns")
-            return True
-
-        # コンテキストテキストのチェック
-        try:
-            # 共有ContextTextExtractorを使用（パフォーマンス最適化）
-            if self._context_extractor:
-                contexts = await self._context_extractor.extract_context_for_element(
-                    element
-                )
-            else:
-                # フォールバック: 新しいインスタンスを作成
-                from .context_text_extractor import ContextTextExtractor
-
-                context_extractor = ContextTextExtractor(element.page)
-                contexts = await context_extractor.extract_context_for_element(element)
-            logger.debug(f"Found contexts: {contexts}")
-
-            if contexts:
-                # 除外判定に用いるコンテキスト種別を限定（誤除外防止）
-                # 直接の label 要素テキスト（label_element）も許可して、
-                # 「確認用メールアドレス」のような明確なラベル文言での除外を有効化
-                allowed_sources = {
-                    "dt_label",
-                    "th_label",
-                    "label_for",
-                    "label_parent",
-                    "aria_labelledby",
-                    "label_element",
-                }
-                for context in contexts:
-                    if getattr(context, "source_type", "") not in allowed_sources:
-                        continue  # 位置ベースや親要素の汎用テキストでは除外しない
-                    context_text = context.text.lower()
-                    logger.debug(f"Checking context_text: '{context_text}'")
-                    if not context_text:
-                        continue
-
-                    # 除外パターンマッチング
-                    for exclude_pattern in exclude_patterns:
-                        exclude_pattern_lower = exclude_pattern.lower()
-                        # CJKや短いトークンは日本語境界を考慮
-                        if len(exclude_pattern_lower) <= 2 or self._has_cjk(
-                            exclude_pattern_lower
-                        ):
-                            try:
-                                if self._contains_token_with_boundary(
-                                    context_text, exclude_pattern_lower
-                                ):
-                                    logger.debug(
-                                        f"CONTEXT_EXCLUSION(boundary jp): context_text='***REDACTED***' contains '{exclude_pattern}'"
-                                    )
-                                    return True
-                            except Exception:
-                                pass
-                        # コンテキストテキストでの完全一致またはキーワード含有チェック（通常）
-                        if exclude_pattern_lower in context_text:
-                            logger.debug(
-                                f"CONTEXT_EXCLUSION: context_text='***REDACTED***' contains exclude_pattern '{exclude_pattern}'"
-                            )
-                            return True
-        except Exception as e:
-            logger.error(f"Failed to check context exclusion: {e}")
-
-        return False
+        return await _impl_ctx(
+            element_info, element, field_patterns, context_extractor=self._context_extractor
+        )
 
     async def _detect_required_status(
         self, element: Locator, parallel_groups: List[List] = None

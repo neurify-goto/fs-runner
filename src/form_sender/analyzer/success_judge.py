@@ -7,17 +7,15 @@ Playwrightベースでの実装（トレーシング機能付き）
 
 import asyncio
 import re
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from playwright.async_api import Page, Response
 from urllib.parse import urlparse
-import logging
 
 from ..utils.judgment_tracer import JudgmentTracer, JudgmentStage, JudgmentResult
 from ..utils.secure_logger import get_secure_logger
 from ..detection.prohibition_detector import ProhibitionDetector
 from ..detection.bot_detector import BotDetectionSystem
 from ..detection.pattern_matcher import FormDetectionPatternMatcher
-from ..detection.bot_detector import BotDetectionSystem
 
 logger = get_secure_logger(__name__)
 
@@ -217,7 +215,7 @@ class SuccessJudge:
                     self.tracer.add_stage_detail("prohibition_phrases_count", len(self.prohibition_phrases))
                 self.tracer.complete_stage(JudgmentResult.SUCCESS, 1.0, "初期化完了")
             
-            logger.info(f"送信前初期化完了", {
+            logger.info("送信前初期化完了", {
                 "url": self.original_url,
                 "form_elements_count": len(self.original_form_elements),
                 "prohibition_detected": self.prohibition_detected,

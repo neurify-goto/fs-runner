@@ -5,11 +5,10 @@
 説明表示テキストの解析と活用機能
 """
 
-import asyncio
 import re
 import logging
-from typing import Dict, List, Any, Optional, Tuple, Set
-from playwright.async_api import Page, Locator
+from typing import Dict, List, Any, Optional
+from playwright.async_api import Locator
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -419,7 +418,7 @@ class ContextTextExtractor:
                                     const iv = Math.min(r.bottom, formArea.y + formArea.height) - Math.max(r.top, formArea.y);
                                     if (ih <= 0 || iv <= 0) continue;
                                 }}
-                                arr.push({ x:r.left, y:r.top, width:r.width, height:r.height, text:dtText });
+                                arr.push({{ x:r.left, y:r.top, width:r.width, height:r.height, text:dtText }});
                             }}
                         }}
                     }}
@@ -464,7 +463,7 @@ class ContextTextExtractor:
                                 }}
                                 let headerText = rowHeader;
                                 if (!headerText && colHeaders.length > ci) headerText = colHeaders[ci] || '';
-                                records.push({ x:r.left, y:r.top, width:r.width, height:r.height, text: headerText });
+                                records.push({{ x:r.left, y:r.top, width:r.width, height:r.height, text: headerText }});
                             }}
                         }}
                     }}
