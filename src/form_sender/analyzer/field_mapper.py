@@ -1103,6 +1103,32 @@ class FieldMapper:
                 logger.info(
                     f"Fallback mapped '{target}' via label/attr (score {score})"
                 )
+            return
+
+        # 追加救済: name/id が 'sub' / 'subject' / 'title' の要素を安全に採用
+        try:
+            for el in classified_elements.get("text_inputs", []) or []:
+                if id(el) in used_elements:
+                    continue
+                ei = await self.element_scorer._get_element_info(el)
+                nm = (ei.get("name") or "").lower()
+                ide = (ei.get("id") or "").lower()
+                if nm in {"sub", "subject", "title"} or ide in {"sub", "subject", "title"}:
+                    info = await self._create_enhanced_element_info(el, {"element_info": ei, "total_score": 60}, [])
+                    try:
+                        info["source"] = "fallback_attr"
+                    except Exception:
+                        pass
+                    tmp = self._generate_temp_field_value(target)
+                    if self.duplicate_prevention.register_field_assignment(
+                        target, tmp, 60, info
+                    ):
+                        field_mapping[target] = info
+                        used_elements.add(id(el))
+                        logger.info("Fallback mapped '件名' via attribute name/id match (sub/subject/title)")
+                        return
+        except Exception:
+            pass
 
     def _determine_target_element_types(
         self, field_patterns: Dict[str, Any]
