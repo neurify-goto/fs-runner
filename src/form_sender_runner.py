@@ -285,8 +285,20 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             return False
 
         company_id = rows[0]['company_id']
+        # 処理開始ログ（最小限、IDのみ）
+        try:
+            wid = getattr(worker, 'worker_id', 0)
+            logger.info(f"process_start: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}")
+        except Exception:
+            pass
     else:
         company_id = int(fixed_company_id)
+        # 固定ID指定時も開始を記録
+        try:
+            wid = getattr(worker, 'worker_id', 0)
+            logger.info(f"process_start: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}")
+        except Exception:
+            pass
 
     # 2) fetch company
     try:
@@ -316,6 +328,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 'p_bot_protection': False,
                 'p_submitted_at': jst_now().isoformat()
             }).execute()
+            # 失敗完了ログ
+            try:
+                wid = getattr(worker, 'worker_id', 0)
+                logger.info(f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=NOT_FOUND")
+            except Exception:
+                pass
         except Exception:
             pass
         return True
@@ -340,6 +358,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_bot_protection': False,
             'p_submitted_at': jst_now().isoformat()
         }).execute()
+        # 失敗完了ログ
+        try:
+            wid = getattr(worker, 'worker_id', 0)
+            logger.info(f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=NO_FORM_URL")
+        except Exception:
+            pass
         return True
 
     task_data = {
@@ -401,6 +425,16 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 _SUCC_CACHE.pop(key, None)
             except Exception:
                 pass
+        # 完了ログ（成功/失敗）
+        try:
+            wid = getattr(worker, 'worker_id', 0)
+            if is_success:
+                logger.info(f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=True")
+            else:
+                # 理由はエラー種別のみ（詳細メッセージは出さない）
+                logger.info(f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason={error_type or 'UNKNOWN'}")
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"mark_done RPC error ({company_id}): {e}")
 
