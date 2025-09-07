@@ -70,6 +70,13 @@ class ElementScorer:
         # 追加: 5-7 文字の重要短語や広く使われる用語
         "csrf",
         "session",
+        # 追加: 罠/スパム対策系の一般的クラス名（誤入力抑止）
+        "honeypot",
+        "trap",
+        "botfield",
+        "no-print",
+        "noprint",
+        "hidden",
     }
 
     # 長語のしきい値（class 部分一致を許可する長さ）
@@ -1939,14 +1946,14 @@ class ElementScorer:
             # 6.5) 追加フォールバック: 親→前方兄弟ブロックの明示『必須』検出
             # 事例: <div class="contact__title"><p>ふりがな</p><p>必須</p></div>
             #       <input name="姓ふりがな"> <input name="名ふりがな">
-            # 入力要素の直近親から最大3階層まで遡り、それぞれの直前の兄弟ブロック（最大3つ）に
+            # 入力要素の直近親から最大3階層まで遡り、それぞれの直前の兄弟ブロック（最大3件）に
             # 『必須/Required/Mandatory/Must』が含まれていれば必須とみなす。
             try:
                 extended_mark = await element.evaluate(
                     """
                     el => {
                       // フォールバックは誤検出が多いため、非常に限定的に適用：
-                      // 直近の親の直前の兄弟1件のみを確認し、『必須』等の明示があればTrue。
+                      // 直近の親の直前の兄弟 最大3件 を確認し、『必須』等の明示があればTrue。
                       const MARKS = ['必須','required','Required','MANDATORY','Mandatory','Must'];
                       const hasReq = (node) => {
                         if (!node) return false;
@@ -1961,8 +1968,13 @@ class ElementScorer:
                       };
                       const parent = el.parentElement;
                       if (!parent) return false;
-                      const sib = parent.previousElementSibling;
-                      if (sib && hasReq(sib)) return true;
+                      let sib = parent.previousElementSibling;
+                      let checked = 0;
+                      while (sib && checked < 3) {
+                        if (hasReq(sib)) return true;
+                        sib = sib.previousElementSibling;
+                        checked++;
+                      }
                       return false;
                     }
                 """
@@ -1971,6 +1983,41 @@ class ElementScorer:
                 extended_mark = False
             if extended_mark:
                 return True
+
+            # 6.6) aria-labelledby の参照先に必須表示があるかの確認（汎用）
+            # 例: <input aria-labelledby="label_ruby"> / <label id="label_ruby">ふりがな <span>*</span></label>
+            try:
+                aria_ids = await element.get_attribute("aria-labelledby")
+            except Exception:
+                aria_ids = None
+            if aria_ids:
+                try:
+                    ids = [s.strip() for s in str(aria_ids).split() if s.strip()]
+                    aria_found = await element.evaluate(
+                        """
+                        (el, ids) => {
+                          const MARKS = ['必須','required','Required','MANDATORY','Mandatory','Must'];
+                          const hasReq = (node) => {
+                            if (!node) return false;
+                            const txt = (node.innerText || node.textContent || '').trim();
+                            if (!txt) return false;
+                            if (MARKS.some(m => txt.includes(m))) return true;
+                            if (txt.includes('※') && txt.length <= 10) return true;
+                            return false;
+                          };
+                          for (const id of ids) {
+                            const n = document.getElementById(id);
+                            if (n && hasReq(n)) return true;
+                          }
+                          return false;
+                        }
+                    """,
+                        ids,
+                    )
+                except Exception:
+                    aria_found = False
+                if aria_found:
+                    return True
 
             # 祖先クラスのヒントのみがあるケースを限定的に許可
             # 例: <div class="required"> ... <input> ... </div>

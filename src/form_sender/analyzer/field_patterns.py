@@ -154,7 +154,8 @@ class FieldPatterns:
             # 4. 姓 (last_name) - GAS/スプレッドシート必須
         "姓": {
                 "names": ["lastname", "last_name", "last-name", "family_name", "family-name", "姓", "苗字", "sei", "myoji",
-                         "surname", "user_name", "member_name", "client_name", "contact_name", "person_name", "last-name-kanji", "last_name_kanji", "family-name-kanji", "family_name_kanji"],
+                         "surname", "user_name", "member_name", "client_name", "contact_name", "person_name", "last-name-kanji", "last_name_kanji", "family-name-kanji", "family_name_kanji",
+                         "lname", "l_name"],
                 "ids": ["lastname", "family-name", "last_name", "last-name", "sei", "surname", 
                        "personal_name", "user_name", "member_name", "last-name-kanji", "last_name_kanji", "family-name-kanji", "family_name_kanji"],
                 # class名の実態に合わせて 'last-name' / 'last_name' も許容
@@ -177,7 +178,8 @@ class FieldPatterns:
             # 5. 名 (first_name) - GAS/スプレッドシート必須
         "名": {
                 "names": ["firstname", "first_name", "first-name", "given_name", "given-name", "名", "mei", 
-                         "forename", "user_name", "member_name", "client_name", "contact_name", "person_name", "first-name-kanji", "first_name_kanji", "given-name-kanji", "given_name_kanji"],
+                         "forename", "user_name", "member_name", "client_name", "contact_name", "person_name", "first-name-kanji", "first_name_kanji", "given-name-kanji", "given_name_kanji",
+                         "fname", "f_name"],
                 "ids": ["firstname", "first-name", "first_name", "given_name", "given-name", "mei", 
                        "personal_name", "user_name", "member_name", "first-name-kanji", "first_name_kanji", "given-name-kanji", "given_name_kanji"],
                 "classes": ["firstname", "first-name", "input-first-name", "given", "mei",

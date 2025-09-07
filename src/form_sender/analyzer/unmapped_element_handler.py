@@ -548,6 +548,17 @@ class UnmappedElementHandler:
                 info = await self.element_scorer._get_element_info(el)
                 if not info.get('visible', True):
                     continue
+                # 罠/スパム対策フィールドは除外
+                try:
+                    trap_blob = ' '.join([
+                        (info.get('name','') or ''),
+                        (info.get('id','') or ''),
+                        (info.get('class','') or ''),
+                    ]).lower()
+                    if any(t in trap_blob for t in ['honeypot','honey','trap','botfield','no-print','noprint']):
+                        continue
+                except Exception:
+                    pass
                 # 既存のマッピングと同一セレクタはスキップ（重複対策）
                 try:
                     sel = await self._generate_playwright_selector(el)

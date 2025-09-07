@@ -144,6 +144,26 @@ def _passes_prefecture(ei: Dict[str, Any], best_txt: str) -> bool:
     # 非selectはより厳格（属性または強いラベル）
     return bool(pos_attr or pos_ctx)
 
+def _passes_message(ei: Dict[str, Any], best_txt: str) -> bool:
+    """お問い合わせ本文テキストエリアの安全ガード。
+
+    - 住所系の強いトークン（microformats や address/住所 等）を含む場合は不許可
+    - 可能であれば『お問い合わせ/内容/メッセージ』系の文脈を優先
+    """
+    attrs = _attrs_blob(ei)
+    # 住所系・microformatsトークン
+    address_like = [
+        "住所", "address", "addr", "street", "city", "prefecture", "都道府県", "市区町村",
+        "p-region", "p-locality", "p-street-address", "p-extended-address",
+    ]
+    if any(t in attrs for t in address_like) or any(t in best_txt for t in address_like):
+        # メッセージ系の強い指標が同時にある場合のみ許容
+        msg_tokens = ["お問い合わせ", "メッセージ", "本文", "内容", "message", "inquiry", "contact"]
+        has_msg = any(t in best_txt for t in msg_tokens) or any(t in attrs for t in msg_tokens)
+        if not has_msg:
+            return False
+    return True
+
 
 def passes_safeguard(
     field_name: str,
@@ -169,6 +189,8 @@ def passes_safeguard(
         return _passes_postal(ei, best_txt)
     if field_name == "都道府県":
         return _passes_prefecture(ei, best_txt)
+    if field_name == "お問い合わせ本文":
+        return _passes_message(ei, best_txt)
     if field_name == "役職":
         # 役職/職位/position/job title のいずれかの指標が属性/ラベルに必要
         attrs = _attrs_blob(ei)

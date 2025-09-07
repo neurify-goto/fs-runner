@@ -20,8 +20,14 @@ class FormPreProcessor:
         self.split_field_detector = split_field_detector
         self.field_patterns = field_patterns
         # 分割姓名検出用の定数（漢字系のみを対象）
-        self.LAST_NAME_TOKENS = ['lastname', 'last_name', 'last-name', 'last', 'family-name', 'family_name', 'surname', 'sei', '姓']
-        self.FIRST_NAME_TOKENS = ['firstname', 'first_name', 'first-name', 'first', 'given-name', 'given_name', 'forename', 'mei', '名']
+        self.LAST_NAME_TOKENS = [
+            'lastname', 'last_name', 'last-name', 'last', 'family-name', 'family_name', 'surname', 'sei', '姓',
+            'lname', 'l_name'
+        ]
+        self.FIRST_NAME_TOKENS = [
+            'firstname', 'first_name', 'first-name', 'first', 'given-name', 'given_name', 'forename', 'mei', '名',
+            'fname', 'f_name'
+        ]
         # カナ/ふりがな/ひらがな等の指標（含む要素は分割姓名検出から除外）
         self.KANA_HIRA_INDICATORS = ['kana', 'katakana', 'furigana', 'フリガナ', 'カタカナ', 'ひらがな', 'hiragana']
         # 事前コンパイル（ホットパス最適化）
