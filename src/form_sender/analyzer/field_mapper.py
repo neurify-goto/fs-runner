@@ -1197,6 +1197,17 @@ class FieldMapper:
                     except Exception:
                         pass
 
+                    # 除外パターンに該当する要素は救済対象から除外（汎用安全ガード）
+                    try:
+                        patterns_for_field = self.field_patterns.get_pattern(field_name) or {}
+                        if await self.element_scorer._is_excluded_element_with_context(
+                            ei, el, patterns_for_field
+                        ):
+                            # ログイン/認証/CAPTCHA/検索 等の誤救済を防止
+                            continue
+                    except Exception:
+                        pass
+
                     # 汎用必須テキスト(auto_required_text_*)も救済対象に含める。
                     # ルール: どのフィールドとも判断がつかない必須テキストは全角空白などの安全値で入力する。
                     # （実際の値の割当は assigner 側のテンポラリ値生成に委譲）
@@ -1485,6 +1496,9 @@ class FieldMapper:
             "confirm",
             "re_email",
             "re-mail",
+            # 追加: ログイン/認証/パスワード系（汎用安全強化）
+            "login", "signin", "sign_in", "auth", "authentication", "login_id",
+            "password", "pass", "pswd", "mfa", "totp",
         ]
         if any(b in name_id_cls for b in blacklist):
             return True
