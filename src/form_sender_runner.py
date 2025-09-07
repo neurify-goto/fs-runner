@@ -41,6 +41,68 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = setup_sanitized_logging(__name__)
 
 
+class _LifecycleOnlyFilter(logging.Filter):
+    """ワークフローの標準ログを最小化するためのフィルタ。
+
+    - INFO以上は form_sender.lifecycle のみ通す
+    - ERROR以上は全ロガー通す（致命的情報は見える化）
+    - それ以外は抑制
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        try:
+            if record.levelno >= logging.ERROR:
+                return True
+            name = record.name or ""
+            if record.levelno >= logging.INFO and name.startswith("form_sender.lifecycle"):
+                return True
+            return False
+        except Exception:
+            # フィルタで例外が出てもログ消失は避け ERROR のみ通す
+            return record.levelno >= logging.ERROR
+
+
+def _get_lifecycle_logger() -> logging.Logger:
+    """開始/完了専用のライフサイクルロガーを作成（INFOを必ず表示）。"""
+    log = logging.getLogger("form_sender.lifecycle")
+    log.setLevel(logging.INFO)
+    # 独自ハンドラー（rootに依存しない）
+    if not log.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        log.addHandler(handler)
+        # サニタイズ適用
+        setup_sanitized_logging("form_sender.lifecycle")
+        # 親へは伝播しない
+        log.propagate = False
+    return log
+
+
+def _install_logging_policy_for_ci():
+    """CI/GitHub Actions用のログ抑制ポリシーを適用。
+
+    - rootにフィルタを付与して非ライフサイクルのINFO/WARNを抑制
+    - ワーカー配下は WARNING 以上でも出ないように（ERRORは許可）
+    """
+    try:
+        if os.getenv('GITHUB_ACTIONS', '').lower() == 'true':
+            root = logging.getLogger()
+            # 二重追加防止（idで判定）
+            if not any(isinstance(f, _LifecycleOnlyFilter) for f in getattr(root, 'filters', [])):
+                root.addFilter(_LifecycleOnlyFilter())
+
+            # ノイズが出やすいロガーはERROR以上のみ通す
+            for noisy in [
+                'form_sender.worker',
+                'form_sender.analyzer',
+                'playwright', 'urllib3', 'requests', 'supabase'
+            ]:
+                logging.getLogger(noisy).setLevel(logging.ERROR)
+    except Exception:
+        pass
+
+
 def jst_today() -> date:
     return (datetime.utcnow() + timedelta(hours=9)).date()
 
@@ -288,7 +350,9 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # 処理開始ログ（最小限、IDのみ）
         try:
             wid = getattr(worker, 'worker_id', 0)
-            logger.info(f"process_start: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}")
+            _get_lifecycle_logger().info(
+                f"process_start: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}"
+            )
         except Exception:
             pass
     else:
@@ -296,7 +360,9 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # 固定ID指定時も開始を記録
         try:
             wid = getattr(worker, 'worker_id', 0)
-            logger.info(f"process_start: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}")
+            _get_lifecycle_logger().info(
+                f"process_start: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}"
+            )
         except Exception:
             pass
 
@@ -331,7 +397,9 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             # 失敗完了ログ
             try:
                 wid = getattr(worker, 'worker_id', 0)
-                logger.info(f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=NOT_FOUND")
+                _get_lifecycle_logger().info(
+                    f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=NOT_FOUND"
+                )
             except Exception:
                 pass
         except Exception:
@@ -361,7 +429,9 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # 失敗完了ログ
         try:
             wid = getattr(worker, 'worker_id', 0)
-            logger.info(f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=NO_FORM_URL")
+            _get_lifecycle_logger().info(
+                f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=NO_FORM_URL"
+            )
         except Exception:
             pass
         return True
@@ -429,10 +499,14 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         try:
             wid = getattr(worker, 'worker_id', 0)
             if is_success:
-                logger.info(f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=True")
+                _get_lifecycle_logger().info(
+                    f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=True"
+                )
             else:
                 # 理由はエラー種別のみ（詳細メッセージは出さない）
-                logger.info(f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason={error_type or 'UNKNOWN'}")
+                _get_lifecycle_logger().info(
+                    f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason={error_type or 'UNKNOWN'}"
+                )
         except Exception:
             pass
     except Exception as e:
@@ -444,6 +518,8 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
 def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_opt: Optional[bool], target_date: date, shard_id: Optional[int], run_id: str, max_processed: Optional[int], fixed_company_id: Optional[int]):
     # child process
     try:
+        # 子プロセスにも抑制ポリシーを適用
+        _install_logging_policy_for_ci()
         supabase = _build_supabase_client()
         worker = IsolatedFormWorker(worker_id=worker_id, headless=headless_opt)
         loop = asyncio.new_event_loop()
@@ -534,6 +610,9 @@ def main():
         pass
 
     run_id = os.environ.get('GITHUB_RUN_ID') or f'local-{int(time.time())}'
+
+    # 親プロセスにも抑制ポリシーを適用
+    _install_logging_policy_for_ci()
 
     procs: List[mp.Process] = []
     # company_id 指定時は重複処理を避けるためワーカーは1に制限
