@@ -207,7 +207,7 @@ class FormStructureAnalyzer:
                         data = await form.evaluate(
                             """
                             f => ({
-                                email: f.querySelectorAll('input[type="email"]').length,
+                                email: f.querySelectorAll('input[type="email"], input[type="mail"]').length,
                                 text: f.querySelectorAll('input[type="text"]').length,
                                 textarea: f.querySelectorAll('textarea').length,
                                 select: f.querySelectorAll('select').length,
@@ -323,6 +323,7 @@ class FormStructureAnalyzer:
         element_selectors = [
             'input[type="text"]',
             'input[type="email"]',
+            'input[type="mail"]',  # 一部サイトの独自型（メール）を正式サポート
             'input[type="tel"]', 
             'input[type="url"]',
             'input[type="number"]',

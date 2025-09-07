@@ -1781,7 +1781,8 @@ class UnmappedElementHandler:
                 field_mapping['統合氏名カナ'] = {
                     **{kk: vv for kk, vv in element_info.items() if kk not in ['auto_action', 'default_value']},
                     'input_type': 'text',
-                    'required': True,
+                    # 実際の必須性を要素から再判定して反映（誤必須を防止）
+                    'required': (await self.element_scorer._detect_required_status(el)) if el else bool(element_info.get('required')), 
                     'source': 'promoted'
                 }
                 # 呼び出し側で auto_handled から除去できるよう、昇格元キー（auto_*）を返す

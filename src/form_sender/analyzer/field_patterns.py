@@ -343,7 +343,7 @@ class FieldPatterns:
                 "classes": ["email", "mail", "e-mail", "email-input", "wpcf7-email", "fldemail"],
                 "placeholders": ["メール", "Email", "メールアドレス", "email@example.com", 
                                "連絡先メールアドレス", "your@email.com", "E-mail"],
-                "types": ["email", "text"],  # 最高優先度（100点）- text追加でtype="text"も対象に
+                "types": ["email", "mail", "text"],  # 一部サイトの独自型 type="mail" を正式サポート
                 "tags": ["input"],
                 "weight": 22,  # 最重要
                 # 文脈評価用の厳密パターン（DT/THラベル一致時のボーナス強化）

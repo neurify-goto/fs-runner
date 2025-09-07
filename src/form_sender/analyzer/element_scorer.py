@@ -158,6 +158,22 @@ class ElementScorer:
             # フォールバック（コンパイル失敗時は None）
             self._cjk_re = None
 
+        # email/phone 等の構造的プレースホルダー用パターン（高速化のため事前コンパイル）
+        try:
+            # RFC準拠までは厳密にせず、実務上の判定（*@*.* を包含）
+            self._email_like_re = re.compile(
+                r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+            )
+        except Exception:
+            self._email_like_re = None
+        try:
+            # 日本の電話番号例を広く許容（記号・国番号・桁区切りを許容）
+            self._phone_like_re = re.compile(
+                r"^(?:\+?\d{1,3}[-.\s]?)?(?:\d{2,4}[-.\s]?){2,4}\d{2,4}$"
+            )
+        except Exception:
+            self._phone_like_re = None
+
     def _has_cjk(self, s: str) -> bool:
         """日本語(CJK)文字を含むかの軽量判定（ユーティリティへ委譲）。"""
         try:
@@ -1025,6 +1041,48 @@ class ElementScorer:
                         f"Placeholder match found: {pattern_placeholder} in {placeholder}"
                     )
                     break
+
+        # 追加: プレースホルダーの構造からの汎用高信頼判定
+        # - メール: *@*.* の形（例: "xxxx@example.com"）
+        # - 住所: 日本の住所に頻出するトークンを複合的に含む
+        try:
+            # すでにplaceholder一致で加点済みなら重複加点を避ける
+            already_placeholder_matched = any(
+                str(m).startswith("placeholder:") for m in matches
+            )
+            if field_name == "メールアドレス" and not already_placeholder_matched:
+                pl = placeholder.strip()
+                looks_like_email = False
+                if self._email_like_re is not None:
+                    looks_like_email = bool(self._email_like_re.match(pl))
+                else:
+                    # フォールバック: 『@』とその後に『.』を含む
+                    at = pl.find("@")
+                    dot = pl.rfind(".")
+                    looks_like_email = at > 0 and dot > at + 1 and dot < len(pl) - 1
+                if looks_like_email:
+                    matches.append("placeholder:email_like")
+                    total_score += self.SCORE_WEIGHTS["placeholder"]
+
+            if field_name == "住所" and not already_placeholder_matched:
+                # 住所を示す強いシグナル（複合判定）
+                tokens = [
+                    "都道府県",
+                    "住所",
+                    "丁目",
+                    "番地",
+                    "号",
+                    "県",
+                    "市",
+                    "区",
+                    "町",
+                    "村",
+                ]
+                if any(t in placeholder for t in tokens):
+                    matches.append("placeholder:address_like")
+                    total_score += self.SCORE_WEIGHTS["placeholder"]
+        except Exception:
+            pass
 
         # 日本語形態素解析ボーナス（ただし非カナ氏名×ふりがな/カナ/ひらがなは除外）
         jp_score_allowed = True

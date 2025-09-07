@@ -320,6 +320,10 @@ class FieldMapper:
         await self._fallback_map_postal_field(
             classified_elements, field_mapping, used_elements
         )
+        # 住所の取りこぼし救済（placeholder/ラベル/属性から強い住所シグナルを検出）
+        await self._fallback_map_address_field(
+            classified_elements, field_mapping, used_elements
+        )
         # 追加フォールバック: 氏名/件名の取りこぼし救済（安全側の厳格条件）
         await self._fallback_map_fullname_field(
             classified_elements, field_mapping, used_elements
@@ -972,6 +976,121 @@ class FieldMapper:
                 field_mapping[target_field] = info
                 used_elements.add(id(el))
                 logger.info(f"Fallback mapped '{target_field}' (score {score})")
+
+    async def _fallback_map_address_field(
+        self, classified_elements, field_mapping, used_elements
+    ):
+        """住所の取りこぼし救済。
+
+        条件:
+        - まだ『住所』が未確定
+        - input[type=text] のうち、placeholder/属性/ラベルに住所系の強いシグナル
+        - スコアが安全閾値以上
+        """
+        target_field = "住所"
+        if target_field in field_mapping:
+            return
+        text_inputs = classified_elements.get("text_inputs", []) or []
+        if not text_inputs:
+            return
+        patterns = self.field_patterns.get_pattern(target_field) or {}
+
+        addr_attr_tokens = [
+            "address",
+            "addr",
+            "street",
+            "building",
+            "pref",
+            "prefecture",
+            "city",
+            "town",
+            "room",
+            "apt",
+            "apartment",
+        ]
+        addr_ctx_tokens = [
+            "住所",
+            "所在地",
+            "都道府県",
+            "prefecture",
+            "市区町村",
+            "番地",
+            "丁目",
+            "マンション",
+            "ビル",
+        ]
+        # ひらがな/カナなど人名指標が強いものは除外
+        name_like_excl = ["ふりがな", "フリガナ", "カナ", "ひらがな"]
+
+        best = (None, 0, None, [])
+        for el in text_inputs:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                continue
+            # 確認/認証/非入力系の除外
+            try:
+                if await self.element_scorer._is_excluded_element_with_context(
+                    ei, el, patterns
+                ):
+                    continue
+            except Exception:
+                pass
+            blob = " ".join(
+                [
+                    (ei.get("name") or ""),
+                    (ei.get("id") or ""),
+                    (ei.get("class") or ""),
+                    (ei.get("placeholder") or ""),
+                ]
+            ).lower()
+            if any(tok in blob for tok in name_like_excl):
+                continue
+            el_bounds = (
+                self._element_bounds_cache.get(str(el))
+                if hasattr(self, "_element_bounds_cache")
+                else None
+            )
+            contexts = await self.context_text_extractor.extract_context_for_element(
+                el, el_bounds
+            )
+            best_ctx = (
+                self.context_text_extractor.get_best_context_text(contexts) or ""
+            ).lower()
+            attr_hit = any(t in blob for t in addr_attr_tokens) or any(
+                t in (ei.get("placeholder", "") or "") for t in ["県", "市", "区", "丁目", "番地", "-", "ー", "－"]
+            )
+            ctx_hit = any(t in best_ctx for t in addr_ctx_tokens)
+            if not (attr_hit or ctx_hit):
+                continue
+
+            score, details = await self.element_scorer.calculate_element_score(
+                el, patterns, target_field
+            )
+            if score > best[1]:
+                best = (el, score, details, contexts)
+
+        el, score, details, contexts = best
+        if not el:
+            return
+        threshold = max(60, int(self.settings.get("email_fallback_min_score", 60)))
+        if score >= threshold:
+            info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info["source"] = "fallback"
+            except Exception:
+                pass
+            tmp = self._generate_temp_field_value(target_field)
+            if self.duplicate_prevention.register_field_assignment(
+                target_field, tmp, score, info
+            ):
+                field_mapping[target_field] = info
+                used_elements.add(id(el))
+                logger.info(
+                    f"Fallback mapped '{target_field}' via label/attr/placeholder (score {score})"
+                )
 
     async def _salvage_strict_email_by_attr(
         self, classified_elements, field_mapping, used_elements
