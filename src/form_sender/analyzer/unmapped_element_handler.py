@@ -1285,12 +1285,18 @@ class UnmappedElementHandler:
                 continue
             name_raw = (info.get("name", "") or "").strip()
             id_raw = (info.get("id", "") or "").strip()
+            placeholder_raw = (info.get("placeholder", "") or "").strip()
             name_id_class = " ".join(
-                [name_raw, id_raw, info.get("class", ""), info.get("placeholder", "")]
+                [name_raw, id_raw, info.get("class", ""), placeholder_raw]
             ).lower()
             if any(b in name_id_class for b in blacklist):
                 continue
             attr_hit = any(p in name_id_class for p in confirmation_attr_patterns)
+            # プレースホルダに『確認』『再入力』等が含まれる場合も確認欄とみなす
+            if not attr_hit and placeholder_raw:
+                low_pl = placeholder_raw.lower()
+                if any(t.lower() in low_pl for t in confirmation_ctx_tokens):
+                    attr_hit = True
 
             # バリアント規則:
             # - 主メール name/id に対して、"_<name>" or "<name>2" や "<id>2" を確認欄とみなす

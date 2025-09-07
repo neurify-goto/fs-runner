@@ -42,7 +42,7 @@ class ElementScorer:
         "会社名|法人名|団体名|組織名|部署名|学校名|店舗名|病院名|施設名|"
         "建物名|マンション名|ビル名|邸名|棟名|館名|校名|園名|"
         "商品名|品名|製品名|サービス名|プロジェクト名|"
-        "件名|題名|書名"
+        "件名|題名|書名|名称"
         ")",
         re.IGNORECASE,
     )
@@ -1065,22 +1065,37 @@ class ElementScorer:
                     total_score += self.SCORE_WEIGHTS["placeholder"]
 
             if field_name == "住所" and not already_placeholder_matched:
-                # 住所を示す強いシグナル（複合判定）
-                tokens = [
-                    "都道府県",
-                    "住所",
-                    "丁目",
-                    "番地",
-                    "号",
-                    "県",
-                    "市",
-                    "区",
-                    "町",
-                    "村",
+                pl = placeholder_lower
+                # 住所の否定ヒント（建物名/部屋番号等）は本文住所として不適切
+                negative = [
+                    "建物名",
+                    "建物",
+                    "マンション",
+                    "アパート",
+                    "部屋番号",
+                    "号室",
+                    "階",
                 ]
-                if any(t in placeholder for t in tokens):
-                    matches.append("placeholder:address_like")
-                    total_score += self.SCORE_WEIGHTS["placeholder"]
+                if any(t in pl for t in negative):
+                    # 明示的にプレースホルダ加点を抑止
+                    pass
+                else:
+                    # 住所を示す強いシグナル（複合判定）
+                    tokens = [
+                        "都道府県",
+                        "住所",
+                        "丁目",
+                        "番地",
+                        "号",
+                        "県",
+                        "市",
+                        "区",
+                        "町",
+                        "村",
+                    ]
+                    if any(t in placeholder for t in tokens):
+                        matches.append("placeholder:address_like")
+                        total_score += self.SCORE_WEIGHTS["placeholder"]
         except Exception:
             pass
 

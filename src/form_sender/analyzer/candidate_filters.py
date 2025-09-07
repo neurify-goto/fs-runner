@@ -56,6 +56,16 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
                                 break
                 if hits < 5 and not any("都道府県" in (o or "") for o in options):
                     return False
+            # 入力欄の場合、建物名・部屋番号のみを示唆するプレースホルダ/属性は除外
+            ph = str(element_info.get("placeholder") or "").lower()
+            name_id_cls = " ".join([
+                str(element_info.get("name") or ""),
+                str(element_info.get("id") or ""),
+                str(element_info.get("class") or ""),
+            ]).lower()
+            neg = ["建物名", "建物", "マンション", "アパート", "部屋番号", "号室", "room", "apartment", "building"]
+            if any(t in ph for t in neg) or any(t in name_id_cls for t in neg):
+                return False
 
         if field_name == "性別":
             tag = (element_info.get("tag_name") or "").lower()

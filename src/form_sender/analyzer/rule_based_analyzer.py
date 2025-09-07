@@ -488,7 +488,10 @@ class RuleBasedAnalyzer:
                         " ".join(fe.nearby_text or []),
                     ]
                 ).lower()
-                if any(tok in text_blob for tok in postal_tokens):
+                has_postal = any(tok in text_blob for tok in postal_tokens)
+                # 『address』系の語を含み、郵便トークンが無い場合は住所欄の可能性が高いので除外
+                is_address_like = any(t in text_blob for t in ["address", "addr", "住所"]) and not has_postal
+                if has_postal and not is_address_like:
                     candidates.append((order_index[sel], fe))
             except Exception:
                 continue
