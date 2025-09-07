@@ -313,6 +313,13 @@ class FieldMapper:
         await self._fallback_map_postal_field(
             classified_elements, field_mapping, used_elements
         )
+        # 追加フォールバック: 氏名/件名の取りこぼし救済（安全側の厳格条件）
+        await self._fallback_map_fullname_field(
+            classified_elements, field_mapping, used_elements
+        )
+        await self._fallback_map_subject_field(
+            classified_elements, field_mapping, used_elements
+        )
         return field_mapping
 
     async def _has_kana_split_candidates(self, classified_elements: Dict[str, List[Locator]]) -> bool:
@@ -956,6 +963,141 @@ class FieldMapper:
                 used_elements.add(id(el))
                 logger.info(f"Fallback mapped '{target_field}' (score {score})")
 
+    async def _fallback_map_fullname_field(
+        self, classified_elements, field_mapping, used_elements
+    ):
+        """統合氏名の取りこぼし救済（安全条件）。"""
+        if any(k in field_mapping for k in ["統合氏名", "姓", "名"]):
+            return
+        text_inputs = classified_elements.get("text_inputs", []) or []
+        if not text_inputs:
+            return
+        patterns = self.field_patterns.get_pattern("統合氏名") or {}
+        pos_tokens = {"氏名", "お名前", "name", "fullname"}
+        neg_tokens = {
+            "会社", "法人", "団体", "組織", "部署", "役職",
+            "住所", "postal", "郵便", "zip", "prefecture", "都道府県",
+            "email", "mail", "メール", "tel", "phone", "電話",
+        }
+        best = (None, 0, None, [])
+        for el in text_inputs:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                ei = {}
+            blob = " ".join([
+                (ei.get("name") or ""),
+                (ei.get("id") or ""),
+                (ei.get("class") or ""),
+                (ei.get("placeholder") or ""),
+            ]).lower()
+            if any(t in blob for t in neg_tokens):
+                continue
+            el_bounds = (
+                self._element_bounds_cache.get(str(el))
+                if hasattr(self, "_element_bounds_cache")
+                else None
+            )
+            contexts = await self.context_text_extractor.extract_context_for_element(
+                el, el_bounds
+            )
+            best_txt = (
+                self.context_text_extractor.get_best_context_text(contexts) or ""
+            ).lower()
+            if not (any(t in blob for t in pos_tokens) or any(t in best_txt for t in pos_tokens)):
+                continue
+            s, details = await self.element_scorer.calculate_element_score(
+                el, patterns, "統合氏名"
+            )
+            if s > best[1]:
+                best = (el, s, details, contexts)
+        el, score, details, contexts = best
+        if el and score >= max(65, int(self.settings.get("email_fallback_min_score", 60))):
+            info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info["source"] = "fallback"
+            except Exception:
+                pass
+            tmp = self._generate_temp_field_value("統合氏名")
+            if self.duplicate_prevention.register_field_assignment(
+                "統合氏名", tmp, score, info
+            ):
+                field_mapping["統合氏名"] = info
+                used_elements.add(id(el))
+                logger.info(
+                    f"Fallback mapped '統合氏名' via label/attr (score {score})"
+                )
+
+    async def _fallback_map_subject_field(
+        self, classified_elements, field_mapping, used_elements
+    ):
+        """件名の取りこぼし救済（安全条件）。"""
+        target = "件名"
+        if target in field_mapping:
+            return
+        text_inputs = classified_elements.get("text_inputs", []) or []
+        if not text_inputs:
+            return
+        patterns = self.field_patterns.get_pattern(target) or {}
+        pos_tokens = {"件名", "タイトル", "subject", "topic", "heading", "sub", "title"}
+        neg_tokens = {
+            "会社", "法人", "団体", "組織", "部署", "役職",
+            "氏名", "お名前", "name", "fullname", "メール", "email", "mail",
+            "tel", "phone", "電話", "住所", "郵便", "postal", "zip",
+        }
+        best = (None, 0, None, [])
+        for el in text_inputs:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                ei = {}
+            blob = " ".join([
+                (ei.get("name") or ""),
+                (ei.get("id") or ""),
+                (ei.get("class") or ""),
+                (ei.get("placeholder") or ""),
+            ]).lower()
+            if any(t in blob for t in neg_tokens):
+                continue
+            el_bounds = (
+                self._element_bounds_cache.get(str(el))
+                if hasattr(self, "_element_bounds_cache")
+                else None
+            )
+            contexts = await self.context_text_extractor.extract_context_for_element(
+                el, el_bounds
+            )
+            best_txt = (
+                self.context_text_extractor.get_best_context_text(contexts) or ""
+            ).lower()
+            if not (any(t in blob for t in pos_tokens) or any(t in best_txt for t in pos_tokens)):
+                continue
+            s, details = await self.element_scorer.calculate_element_score(
+                el, patterns, target
+            )
+            if s > best[1]:
+                best = (el, s, details, contexts)
+        el, score, details, contexts = best
+        if el and score >= max(65, int(self.settings.get("email_fallback_min_score", 60))):
+            info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info["source"] = "fallback"
+            except Exception:
+                pass
+            tmp = self._generate_temp_field_value(target)
+            if self.duplicate_prevention.register_field_assignment(
+                target, tmp, score, info
+            ):
+                field_mapping[target] = info
+                used_elements.add(id(el))
+                logger.info(
+                    f"Fallback mapped '{target}' via label/attr (score {score})"
+                )
+
     def _determine_target_element_types(
         self, field_patterns: Dict[str, Any]
     ) -> List[str]:
@@ -1160,7 +1302,18 @@ class FieldMapper:
 
         # 汎用入力(type=text)でも文脈/属性から論理フィールドを推定（救済判定）
         # 1) メールアドレス: ラベル/見出し/placeholder/属性にメール系語が含まれる
-        email_tokens = ["メール", "e-mail", "email", "mail"]
+        email_tokens = [
+            "メール",
+            "e-mail",
+            "email",
+            "mail",
+            "ｅメール",
+            "Ｅメール",
+            "eﾒｰﾙ",
+            "電子メール",
+            "E-mail",
+            "Eメール",
+        ]
         if tag == "input" and typ in ["", "text"]:
             if any(tok in ctx_text for tok in email_tokens) or any(
                 tok in name_id_cls for tok in ["email", "mail"]
