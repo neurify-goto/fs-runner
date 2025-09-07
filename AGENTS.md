@@ -85,10 +85,6 @@ Each GAS module follows the same pattern:
 * **Test Data**: For local submission testing, use actual client data from `tests/info.json` (company's own content) instead of creating test input content.
 * **Playwright Configuration**: When performing local submission tests, use Playwright in GUI mode (not headless) so users can observe the operation.
 
-#### **Shell Command Execution**
-
-* Always set explicit timeouts for shell commands to prevent indefinite hangs. Choose timeouts appropriate to the operation, and on timeout ensure child processes are terminated and a clear, actionable error is surfaced.
-
 ### **Coding Style**
 
 * **Adhere to PEP 8:** All Python code should follow the PEP 8 style guide.  
@@ -137,6 +133,6 @@ Each GAS module follows the same pattern:
 
 ### **Task Execution Policy**
 
-* **Continuous execution:** Agents must execute assigned tasks end-to-end without pausing for interim check-ins or status updates. Continue until the task is fully completed.
+* **Continuous execution:** You must execute assigned tasks end-to-end without pausing for interim check-ins or status updates. Continue until the task is fully completed.
 * **Exceptions — major issues only:** Pausing or stopping is allowed only when a blocking or high‑risk issue occurs, such as safety/security concerns, legal or policy constraints, missing required access/approvals, risk of data loss or corruption, or unrecoverable environmental failures.
 * **If an exception occurs:** Surface a concise problem report that includes what was attempted, the exact blocker, and concrete next steps or a minimal, clearly scoped request for input/approval.
