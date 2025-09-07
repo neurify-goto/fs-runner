@@ -618,141 +618,28 @@ class FieldMappingAnalyzer:
 
         try:
             # Step 1: ナビゲーション（ポップアップ/セルフクローズに強い実装）
-            # 先にポップアップ監視を仕込む（once で自動解除）。
-            popup_captured: List[Page] = []
+            await self._goto_with_popup_recovery(form_url)
 
-            def _on_popup(p):
-                try:
-                    popup_captured.append(p)
-                    logger.debug("Popup captured during navigation")
-                except Exception:
-                    pass
+            # DOM安定化とCookie同意処理
+            await self._stabilize_after_navigation()
 
-            self.page.once("popup", _on_popup)
+            # Step 2: 初期検出（form数/HubSpot検出）
+            form_count, has_hubspot_script = await self._detect_initial_form_and_hubspot()
 
-            try:
-                await self.page.goto(
-                    form_url, wait_until="domcontentloaded", timeout=25000
-                )
-            except Exception as e:
-                # 旧ページが閉じられた場合でも、ポップアップが取れていればそちらを採用
-                if "has been closed" in str(e) and popup_captured:
-                    try:
-                        candidate = popup_captured[-1]
-                        # 既に閉じていないか確認
-                        is_closed = False
-                        try:
-                            if hasattr(candidate, "is_closed"):
-                                is_closed = bool(candidate.is_closed())
-                        except Exception:
-                            is_closed = False
-
-                        if not is_closed:
-                            self.page = candidate
-                            logger.info("Detected self-close -> switched to popup page")
-                        else:
-                            logger.info(
-                                "Captured popup already closed. Recreating page and retrying..."
-                            )
-                            await self._recreate_page()
-                            await self.page.goto(
-                                form_url, wait_until="domcontentloaded", timeout=25000
-                            )
-                    finally:
-                        popup_captured.clear()
-                elif "has been closed" in str(e):
-                    logger.info(
-                        "Detected unexpected page close. Recreating page and retrying once..."
-                    )
-                    await self._recreate_page()
-                    await self.page.goto(
-                        form_url, wait_until="domcontentloaded", timeout=25000
-                    )
-                else:
-                    raise
-
-            # DOMの安定化を最小限の待機で確保
-            await asyncio.sleep(0.5)  # 500msの最小待機でDOM安定化
-
-            # Cookie同意バナーがあれば処理
-            await CookieConsentHandler.handle(self.page)
-
-            # Step 2: フォーム要素の存在チェック
-            form_count = await self.page.evaluate(
-                "document.querySelectorAll('form').length"
-            )
-            logger.info(f"📋 Initial form elements found: {form_count}")
-
-            # HubSpotスクリプトの検出
-            has_hubspot_script = await self.page.evaluate("""
-                () => {
-                    const scripts = Array.from(document.querySelectorAll('script'));
-                    return scripts.some(script => 
-                        script.src && (script.src.includes('hsforms.net') || script.src.includes('hubspot'))
-                    );
-                }
-            """)
-
-            if has_hubspot_script:
-                logger.info(
-                    "🔍 HubSpot forms script detected - applying specialized handling"
-                )
-
-            # Step 3: フォームが見つからない場合またはHubSpotが検出された場合のみ追加待機
-            if form_count == 0 or has_hubspot_script:
-                if form_count == 0:
-                    logger.info(
-                        "No form elements found with domcontentloaded, trying additional strategies..."
-                    )
-                else:
-                    logger.info("HubSpot detected - ensuring complete form loading...")
-
-                success = await self._wait_for_dynamic_content()
-                if success:
-                    form_count = await self.page.evaluate(
-                        "document.querySelectorAll('form').length"
-                    )
-                    logger.info(
-                        f"📋 Form elements found after dynamic waiting: {form_count}"
-                    )
-
-                    # HubSpot要素の詳細チェック
-                    if has_hubspot_script:
-                        hubspot_info = await self.page.evaluate("""
-                            () => {
-                                const hbsptForms = document.querySelectorAll('.hbspt-form').length;
-                                const hsInputs = document.querySelectorAll('.hs-input').length;
-                                const hsFieldsets = document.querySelectorAll('fieldset.form-columns-1, fieldset.form-columns-2').length;
-                                return {hbsptForms, hsInputs, hsFieldsets};
-                            }
-                        """)
-                        logger.info(
-                            f"📋 HubSpot elements: containers={hubspot_info['hbsptForms']}, inputs={hubspot_info['hsInputs']}, fieldsets={hubspot_info['hsFieldsets']}"
-                        )
-
-            # ページソースから<form>要素のみを抽出して保存
-            page_source = await self.page.content()
-            form_content = self._extract_form_content(page_source)
-
-            # iframe内のフォーム要素を抽出し、target_frameも同時に決定（統合処理）
-            target_frame = None
-            if form_count == 0:  # メインページにformがない場合のみチェック
-                logger.info("🔍 No forms found in main page, checking iframes...")
-                iframe_content, target_frame = await self._analyze_iframes()
-                if iframe_content:
-                    form_content += "\n\n" + iframe_content
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            source_file = os.path.join(self.temp_dir, f"page_source_{timestamp}.html")
-
-            with open(source_file, "w", encoding="utf-8") as f:
-                f.write(form_content)
-
-            logger.info(
-                f"📄 Form content saved: {source_file}", extra={"summary": True}
+            # Step 3: 必要に応じて動的待機の実施
+            form_count = await self._maybe_wait_dynamic_and_log(
+                form_count, has_hubspot_script
             )
 
-            # RuleBasedAnalyzerでフィールドマッピング実行
+            # Step 4: フォームHTML抽出＋iframe検査
+            form_content, target_frame = await self._extract_form_content_with_iframes(
+                form_count
+            )
+
+            # Step 5: ページソース保存
+            source_file = await self._save_form_content(form_content)
+
+            # Step 6: RuleBasedAnalyzerでフィールドマッピング実行
             if target_frame:
                 analyzer = RuleBasedAnalyzer(target_frame)  # iframe内を解析
                 logger.info("📋 Analyzing iframe content for field mapping")
@@ -760,7 +647,6 @@ class FieldMappingAnalyzer:
                 analyzer = RuleBasedAnalyzer(self.page)  # 通常のページを解析
                 logger.info("📋 Analyzing main page content for field mapping")
 
-            # 入力値生成のため、client/targeting を含む構造体を渡す
             analysis_result = await analyzer.analyze_form(
                 client_data=create_test_client_config()
             )
@@ -815,84 +701,12 @@ class FieldMappingAnalyzer:
         field_analysis = {}
 
         for field_name, field_info in field_mappings.items():
-            logger.info(f"\n🎯 Field: {field_name}")
-
-            # より詳細な情報を抽出
-            input_value = field_info.get("input_value", "N/A")
-            score = field_info.get("score", 0)
-            element = field_info.get("element", {})
-
-            # PlaywrightのLocatorオブジェクト vs 辞書型の判別
-            element_type_name = str(type(element))
-            element_str = str(element)
-
-            # デバッグログ追加
-            logger.debug(
-                f"Element type: {element_type_name}, Element str: {element_str[:100]}..."
+            analysis_entry, field_issues = self._log_field_details_and_collect_issues(
+                field_name, field_info
             )
-
-            if "Locator" in element_type_name or "Locator" in element_str:
-                # PlaywrightのLocatorオブジェクトの場合
-                element_name = element_str
-                element_id = "Locator-Object"
-                element_type = "Locator"
-                selector = element_str
-            elif isinstance(element, dict):
-                # 辞書型の場合（レガシー形式のサポート）
-                element_name = element.get("name", "N/A")
-                element_id = element.get("id", "N/A")
-                element_type = element.get("type", "N/A")
-                selector = element.get("selector", "N/A")
-            else:
-                # その他のオブジェクト
-                element_name = element_str
-                element_id = "Unknown"
-                element_type = (
-                    element_type_name.split("'")[1]
-                    if "'" in element_type_name
-                    else "Unknown"
-                )
-                selector = element_str
-
-            logger.info(f"   Input Value: '{input_value}'")
-            logger.info(f"   Score: {score}")
-            logger.info(f"   Element Type: {element_type}")
-            logger.info(f"   Selector: {selector}")
-
-            # Locatorの場合はより詳細な情報を提供
-            if "Locator" in element_type:
-                # Locatorから有用な情報を抽出
-                if "selector=" in element_str:
-                    try:
-                        # selector='...' の部分を抽出
-                        selector_start = element_str.find("selector='") + len(
-                            "selector='"
-                        )
-                        selector_end = element_str.find("'>", selector_start)
-                        if selector_end > selector_start:
-                            extracted_selector = element_str[
-                                selector_start:selector_end
-                            ]
-                            logger.info(f"   Extracted Selector: {extracted_selector}")
-                    except Exception:
-                        pass
-
-                logger.info(f"   Full Locator: {element_str}")
-            else:
-                logger.info(
-                    f"   Target Element: name='{element_name}', id='{element_id}'"
-                )
-
-            # 問題パターンチェック
-            field_issues = self._check_field_issues(field_name, field_info)
             if field_issues:
                 issues.extend(field_issues)
-
-            field_analysis[field_name] = {
-                "value": field_info.get("value", ""),
-                "score": field_info.get("score", 0),
-                "issues": field_issues,
-            }
+            field_analysis[field_name] = analysis_entry
 
         # form_sender_name使用チェック
         if "form_sender_name" in field_mappings or any(
@@ -955,6 +769,207 @@ class FieldMappingAnalyzer:
             "duplicates": duplicates,
             "required_fields_info": required_info,
         }
+
+    # --- Helper methods (extracted; no behavior change) ---
+
+    async def _goto_with_popup_recovery(self, form_url: str) -> None:
+        """`page.goto` 実行時のセルフクローズ/ポップアップ遷移を安全に吸収する。"""
+        popup_captured: List[Page] = []
+
+        def _on_popup(p):
+            try:
+                popup_captured.append(p)
+                logger.debug("Popup captured during navigation")
+            except Exception:
+                pass
+
+        self.page.once("popup", _on_popup)
+
+        try:
+            await self.page.goto(form_url, wait_until="domcontentloaded", timeout=25000)
+        except Exception as e:
+            if "has been closed" in str(e) and popup_captured:
+                try:
+                    candidate = popup_captured[-1]
+                    is_closed = False
+                    try:
+                        if hasattr(candidate, "is_closed"):
+                            is_closed = bool(candidate.is_closed())
+                    except Exception:
+                        is_closed = False
+
+                    if not is_closed:
+                        self.page = candidate
+                        logger.info("Detected self-close -> switched to popup page")
+                    else:
+                        logger.info(
+                            "Captured popup already closed. Recreating page and retrying..."
+                        )
+                        await self._recreate_page()
+                        await self.page.goto(
+                            form_url, wait_until="domcontentloaded", timeout=25000
+                        )
+                finally:
+                    popup_captured.clear()
+            elif "has been closed" in str(e):
+                logger.info(
+                    "Detected unexpected page close. Recreating page and retrying once..."
+                )
+                await self._recreate_page()
+                await self.page.goto(
+                    form_url, wait_until="domcontentloaded", timeout=25000
+                )
+            else:
+                raise
+
+    async def _stabilize_after_navigation(self) -> None:
+        """DOM安定化待機とCookie同意処理。"""
+        await asyncio.sleep(0.5)  # 500msの最小待機でDOM安定化
+        await CookieConsentHandler.handle(self.page)
+
+    async def _detect_initial_form_and_hubspot(self) -> Tuple[int, bool]:
+        """初期フォーム数とHubSpotスクリプト検出。ログ出力含む。"""
+        form_count = await self.page.evaluate("document.querySelectorAll('form').length")
+        logger.info(f"📋 Initial form elements found: {form_count}")
+
+        has_hubspot_script = await self.page.evaluate(
+            """
+            () => {
+                const scripts = Array.from(document.querySelectorAll('script'));
+                return scripts.some(script => 
+                    script.src && (script.src.includes('hsforms.net') || script.src.includes('hubspot'))
+                );
+            }
+            """
+        )
+
+        if has_hubspot_script:
+            logger.info("🔍 HubSpot forms script detected - applying specialized handling")
+
+        return form_count, bool(has_hubspot_script)
+
+    async def _maybe_wait_dynamic_and_log(
+        self, form_count: int, has_hubspot_script: bool
+    ) -> int:
+        """必要時のみ動的待機。待機後のform数およびHubSpot要素をログ。"""
+        if form_count == 0 or has_hubspot_script:
+            if form_count == 0:
+                logger.info(
+                    "No form elements found with domcontentloaded, trying additional strategies..."
+                )
+            else:
+                logger.info("HubSpot detected - ensuring complete form loading...")
+
+            success = await self._wait_for_dynamic_content()
+            if success:
+                form_count = await self.page.evaluate(
+                    "document.querySelectorAll('form').length"
+                )
+                logger.info(
+                    f"📋 Form elements found after dynamic waiting: {form_count}"
+                )
+
+                if has_hubspot_script:
+                    hubspot_info = await self.page.evaluate(
+                        """
+                        () => {
+                            const hbsptForms = document.querySelectorAll('.hbspt-form').length;
+                            const hsInputs = document.querySelectorAll('.hs-input').length;
+                            const hsFieldsets = document.querySelectorAll('fieldset.form-columns-1, fieldset.form-columns-2').length;
+                            return {hbsptForms, hsInputs, hsFieldsets};
+                        }
+                        """
+                    )
+                    logger.info(
+                        f"📋 HubSpot elements: containers={hubspot_info['hbsptForms']}, inputs={hubspot_info['hsInputs']}, fieldsets={hubspot_info['hsFieldsets']}"
+                    )
+        return form_count
+
+    async def _extract_form_content_with_iframes(
+        self, form_count: int
+    ) -> Tuple[str, Optional[Any]]:
+        """フォームHTML抽出＋必要ならiframeも解析し結合。"""
+        page_source = await self.page.content()
+        form_content = self._extract_form_content(page_source)
+
+        target_frame = None
+        if form_count == 0:  # メインページにformがない場合のみチェック
+            logger.info("🔍 No forms found in main page, checking iframes...")
+            iframe_content, target_frame = await self._analyze_iframes()
+            if iframe_content:
+                form_content += "\n\n" + iframe_content
+
+        return form_content, target_frame
+
+    async def _save_form_content(self, form_content: str) -> str:
+        """抽出したフォームHTMLをテスト用一時ディレクトリに保存。"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        source_file = os.path.join(self.temp_dir, f"page_source_{timestamp}.html")
+        with open(source_file, "w", encoding="utf-8") as f:
+            f.write(form_content)
+        logger.info(f"📄 Form content saved: {source_file}", extra={"summary": True})
+        return source_file
+
+    def _log_field_details_and_collect_issues(
+        self, field_name: str, field_info: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """フィールド詳細ログ＋問題収集。元実装と同一出力・同一判定。"""
+        logger.info(f"\n🎯 Field: {field_name}")
+
+        input_value = field_info.get("input_value", "N/A")
+        score = field_info.get("score", 0)
+        element = field_info.get("element", {})
+
+        element_type_name = str(type(element))
+        element_str = str(element)
+        logger.debug(
+            f"Element type: {element_type_name}, Element str: {element_str[:100]}..."
+        )
+
+        if "Locator" in element_type_name or "Locator" in element_str:
+            element_name = element_str
+            element_id = "Locator-Object"
+            element_type = "Locator"
+            selector = element_str
+        elif isinstance(element, dict):
+            element_name = element.get("name", "N/A")
+            element_id = element.get("id", "N/A")
+            element_type = element.get("type", "N/A")
+            selector = element.get("selector", "N/A")
+        else:
+            element_name = element_str
+            element_id = "Unknown"
+            element_type = (
+                element_type_name.split("'")[1] if "'" in element_type_name else "Unknown"
+            )
+            selector = element_str
+
+        logger.info(f"   Input Value: '{input_value}'")
+        logger.info(f"   Score: {score}")
+        logger.info(f"   Element Type: {element_type}")
+        logger.info(f"   Selector: {selector}")
+
+        if "Locator" in element_type:
+            if "selector=" in element_str:
+                try:
+                    selector_start = element_str.find("selector='") + len("selector='")
+                    selector_end = element_str.find("'>", selector_start)
+                    if selector_end > selector_start:
+                        extracted_selector = element_str[selector_start:selector_end]
+                        logger.info(f"   Extracted Selector: {extracted_selector}")
+                except Exception:
+                    pass
+            logger.info(f"   Full Locator: {element_str}")
+        else:
+            logger.info(f"   Target Element: name='{element_name}', id='{element_id}'")
+
+        field_issues = self._check_field_issues(field_name, field_info)
+        analysis_entry = {
+            "value": field_info.get("value", ""),
+            "score": field_info.get("score", 0),
+            "issues": field_issues,
+        }
+        return analysis_entry, field_issues
 
     def _check_field_issues(
         self, field_name: str, field_info: Dict[str, Any]
