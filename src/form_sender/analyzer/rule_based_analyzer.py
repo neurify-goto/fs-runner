@@ -272,8 +272,6 @@ class RuleBasedAnalyzer:
                 logger.debug(f"auto_promote_postal_split failed: {e}")
 
             # --- Handle Unmapped and Special Fields ---
-            split_groups = self._detect_split_field_patterns(self.field_mapping)
-
             auto_handled = await self.unmapped_handler.handle_unmapped_elements(
                 classified_elements,
                 self.field_mapping,
@@ -296,6 +294,13 @@ class RuleBasedAnalyzer:
             if promoted_kana:
                 for k in promoted_kana:
                     auto_handled.pop(k, None)
+
+            # 分割フィールドの検出は auto_handled も含めた集合で再計算（メール確認や分割入力に対応）
+            try:
+                combined_for_split = {**self.field_mapping, **auto_handled}
+            except Exception:
+                combined_for_split = self.field_mapping
+            split_groups = self._detect_split_field_patterns(combined_for_split)
 
             # --- Value Assignment & Validation ---
             self.assigner.required_analysis = required_analysis

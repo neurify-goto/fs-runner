@@ -1033,6 +1033,23 @@ class FieldMappingAnalyzer:
             soup = BeautifulSoup(form_content, "html.parser")
             required_elements = []
 
+            # 0. hiddenフィールドに含まれるバリデーションヒントを検出
+            # 例: <input type="hidden" name="F2M_CHECK_01" value="NAME,お名前は必須です">
+            hinted_names_upper = []
+            try:
+                for h in soup.find_all("input", {"type": "hidden"}):
+                    name_attr = (h.get("name") or "").upper()
+                    value_attr = (h.get("value") or "")
+                    if any(k in name_attr for k in ["F2M_CHECK", "REQ_CHECK", "REQUIRED_CHECK", "VALIDATE_"]):
+                        if "," in value_attr:
+                            candidate = value_attr.split(",", 1)[0].strip()
+                            if 0 < len(candidate) <= 64:
+                                hinted_names_upper.append(candidate.upper())
+            except Exception:
+                pass
+            # 重複排除
+            hinted_names_upper = list(dict.fromkeys(hinted_names_upper))
+
             # required属性、aria-required="true"、クラス名、隣接要素をチェック
             for element in soup.find_all(["input", "textarea", "select"]):
                 is_required = False
@@ -1052,6 +1069,15 @@ class FieldMappingAnalyzer:
                 # 4. 隣接要素の必須マーカーチェック
                 elif self._check_required_by_adjacent_text(element):
                     is_required = True
+
+                # 5. hiddenヒント（名前一致）
+                elif hinted_names_upper:
+                    try:
+                        elem_name = (element.get("name") or "").strip()
+                        if elem_name and elem_name.upper() in hinted_names_upper:
+                            is_required = True
+                    except Exception:
+                        pass
 
                 if is_required:
                     element_info = {
@@ -1121,11 +1147,11 @@ class FieldMappingAnalyzer:
             while next_sibling:
                 if hasattr(next_sibling, "get_text"):
                     text = next_sibling.get_text().strip()
-                    # 『※』は注記用途が多く、必須の確証にならないため除外。全角スター『＊』は許可。
-                    if any(
-                        marker in text
-                        for marker in ["必須", "Required", "Mandatory", "*", "＊"]
-                    ):
+                    # ラベル近傍では『※』が必須記号として使われることが多い。
+                    # ただし注記との混同を避けるため、短いテキストに限定して許可する。
+                    if any(marker in text for marker in ["必須", "Required", "Mandatory", "*", "＊"]):
+                        return True
+                    if "※" in text and len(text) <= 10:
                         return True
                 next_sibling = next_sibling.next_sibling
 
@@ -1134,13 +1160,7 @@ class FieldMappingAnalyzer:
                 for sibling in element.parent.find_all(["span", "label", "div"]):
                     if sibling != element:
                         text = sibling.get_text().strip()
-                        if (
-                            any(
-                                marker in text
-                                for marker in ["必須", "Required", "Mandatory"]
-                            )
-                            and len(text) <= 10
-                        ):
+                        if (any(marker in text for marker in ["必須", "Required", "Mandatory"]) or "※" in text) and len(text) <= 10:
                             return True
 
             # テーブルレイアウト対応: td内のinputに対して直前のthを確認
@@ -1154,10 +1174,7 @@ class FieldMappingAnalyzer:
                     prev = td.find_previous_sibling("th")
                     if prev:
                         th_text = prev.get_text().strip()
-                        if any(
-                            marker in th_text
-                            for marker in ["必須", "Required", "Mandatory", "＊", "*"]
-                        ):
+                        if any(marker in th_text for marker in ["必須", "Required", "Mandatory", "＊", "*", "※"]):
                             return True
             except Exception:
                 pass
@@ -1708,7 +1725,8 @@ class FieldMappingAnalyzer:
 """連続実行(--count)は廃止。単一実行のみをサポート。"""
 
 
-DEFAULT_TEST_TIMEOUT_SECONDS = 120  # デフォルトの単一実行タイムアウト（2分）
+# 長めの動的生成フォームにも対応するため延長（単発テストのみ実行のため許容）。
+DEFAULT_TEST_TIMEOUT_SECONDS = 240  # デフォルトの単一実行タイムアウト（4分）
 
 
 async def main():
