@@ -349,6 +349,13 @@ class FieldMapper:
         await self._fallback_map_subject_field(
             classified_elements, field_mapping, used_elements
         )
+        # 安全補正: 都道府県が非selectに割当てられていたら、都道府県セレクトへ差し替え
+        try:
+            await self._remap_prefecture_to_select_if_available(
+                classified_elements, field_mapping
+            )
+        except Exception as e:
+            logger.debug(f"prefecture remap skipped: {e}")
         return field_mapping
 
     async def _has_kana_split_candidates(self, classified_elements: Dict[str, List[Locator]]) -> bool:
@@ -414,31 +421,91 @@ class FieldMapper:
             return
         import re
 
-        candidates = {}
+        # 方式A: name/id/class に 'tel1/tel2/tel3' 等の明示番号を含むケース
+        explicit_candidates = {}
+        # 方式B: 配列インデックス（[0]/[1]/[2] など）で分割されているケース（例: telnum[data][0]）
+        grouped_by_base: dict[str, dict[int, Any]] = {}
+
+        def _extract_array_index(s: str) -> list[int]:
+            return [int(x) for x in re.findall(r"\[(\d+)\]", s)]
+
+        def _base_key(s: str) -> str:
+            # 配列インデックスを正規化し、グルーピング用のキーを生成
+            # 例: "telnum[data][0]" -> "telnum[data][]"
+            return re.sub(r"\[\d+\]", "[]", s)
+
         for el in tel_inputs:
             try:
                 info = await self.element_scorer._get_element_info(el)
                 nm = (info.get("name", "") or "").lower()
                 ide = (info.get("id", "") or "").lower()
                 cls = (info.get("class", "") or "").lower()
-                blob = nm + " " + ide + " " + cls
+                blob = f"{nm} {ide} {cls}"
                 if "tel" not in blob and "phone" not in blob:
                     continue
+
+                # A) 明示番号（1/2/3）判定
                 m = re.search(r"(?:tel|phone)[^\d]*([123])(?!.*\d)", blob)
                 if m:
                     idx = int(m.group(1))
-                else:
-                    # 'tel' / 'phone' に数字が無い場合は 1 と見なす（一般的な your-tel, tel, phone）
-                    if re.search(r"(?:^|\b)(tel|phone)(?:\b|[_-])", blob):
-                        idx = 1
-                    else:
+                    if idx in (1, 2, 3):
+                        explicit_candidates[idx] = el
                         continue
-                if idx in (1, 2, 3):
-                    candidates[idx] = el
+
+                # B) 配列インデックス判定（[0]/[1]/[2] → 1/2/3にマップ）
+                indexes = _extract_array_index(nm) or _extract_array_index(ide)
+                if indexes:
+                    # base に tel/phone を含むもののみ対象
+                    base_source = nm or ide
+                    base = _base_key(base_source)
+                    if ("tel" in base) or ("phone" in base):
+                        # 最後のインデックスだけを採用（多次元でも末尾が分割番号）
+                        idx0 = indexes[-1]
+                        if idx0 in (0, 1, 2):
+                            mapped = {0: 1, 1: 2, 2: 3}[idx0]
+                            grouped_by_base.setdefault(base, {})[mapped] = el
             except Exception:
                 continue
-        if not all(k in candidates for k in (1, 2, 3)):
-            return
+
+        # 明示番号が3つ揃っていれば優先採用
+        candidates = None
+        if all(k in explicit_candidates for k in (1, 2, 3)):
+            candidates = explicit_candidates
+        else:
+            # 配列インデックスで 0/1/2 が揃っている base グループを探す
+            for base, parts in grouped_by_base.items():
+                if all(k in parts for k in (1, 2, 3)):
+                    candidates = parts
+                    break
+
+        if not candidates:
+            # 追加フォールバック: 既に選定済みの『電話番号』の name を利用して [0]/[1]/[2] 兄弟を探索
+            try:
+                current = field_mapping.get("電話番号")
+                if current and isinstance(current, dict):
+                    ei = current.get("score_details", {}).get("element_info", {})
+                    nm = (ei.get("name") or "").lower()
+                    if nm and ("tel" in nm or "phone" in nm):
+                        # 最後の [index] を見付けて 0/1/2 セットを構築
+                        arr = re.findall(r"\[(\d+)\]", nm)
+                        if arr:
+                            base = re.sub(r"\[\d+\]$", "", nm)  # 末尾の [n] を除去
+                            targets = [f"{base}[{i}]" for i in (0, 1, 2)]
+                            locators = []
+                            for t in targets:
+                                try:
+                                    loc = self.page.locator(f"input[name='{t}']")
+                                    count = await loc.count()
+                                    if count > 0:
+                                        locators.append(loc.first)
+                                except Exception:
+                                    locators.append(None)
+                            if len(locators) == 3 and all(locators):
+                                candidates = {1: locators[0], 2: locators[1], 3: locators[2]}
+            except Exception:
+                candidates = None
+            if not candidates:
+                return
         # 統合『電話番号』が候補のいずれかを指していれば降格
         # 統合『電話番号』は分割が確定した時点で削除（重複入力防止）
         field_mapping.pop("電話番号", None)
@@ -457,6 +524,60 @@ class FieldMapper:
             except Exception:
                 pass
             field_mapping[fname] = info
+
+    async def _remap_prefecture_to_select_if_available(
+        self, classified_elements, field_mapping
+    ) -> None:
+        """都道府県のマッピングが input に誤って割当てられた場合、
+        近傍の select（都道府県名を十分数含む）へ差し替える汎用安全補正。
+        """
+        target = "都道府県"
+        if target not in field_mapping:
+            return
+        try:
+            cur = field_mapping.get(target) or {}
+            tag = (cur.get("tag_name") or "").lower()
+        except Exception:
+            tag = ""
+        if tag == "select":
+            return  # 既にselectなら補正不要
+
+        # select候補の中から『都道府県』らしいものを選ぶ
+        selects = classified_elements.get("selects", []) or []
+        if not selects:
+            return
+        from config.manager import get_prefectures
+
+        pref_cfg = get_prefectures() or {}
+        names = pref_cfg.get("names", []) if isinstance(pref_cfg, dict) else []
+
+        best = (None, -1)  # (locator, hits)
+        for sel in selects:
+            try:
+                options = await sel.evaluate(
+                    "el => Array.from(el.options).map(o => (o.textContent||'').trim())"
+                )
+            except Exception:
+                options = []
+            if not options:
+                continue
+            low_opts = [str(o).lower() for o in options]
+            hits = sum(1 for n in names if str(n).lower() in low_opts)
+            if hits > best[1]:
+                best = (sel, hits)
+        sel, hits = best
+        if not sel or hits < 5:  # 十分な都道府県名を含まない select は採用しない
+            return
+
+        # 差し替え
+        patterns = self.field_patterns.get_pattern(target) or {}
+        score, details = await self.element_scorer.calculate_element_score(sel, patterns, target)
+        info = await self._create_enhanced_element_info(sel, details, [])
+        try:
+            info["source"] = "safety_remap"
+        except Exception:
+            pass
+        field_mapping[target] = info
 
     async def _find_best_element(
         self,
@@ -710,39 +831,58 @@ class FieldMapper:
             return
 
         patterns = self.field_patterns.get_pattern(target_field) or {}
-        strict_tokens = {
+        # 優先度を二層化: 主要語群を強優先、備考/ご要望は二次優先
+        primary_tokens = {
             "お問い合わせ",
             "本文",
             "メッセージ",
-            "ご要望",
             "ご質問",
-            "備考",
+            "お問い合わせ内容",
+            "ご相談",
         }
+        secondary_tokens = {"備考", "ご要望"}
+        # 本文候補から除外すべきコンテキスト（代表: その他ご要望/任意/自由記入）
+        exclude_tokens = {"その他", "その他の", "その他ご要望", "任意", "自由記入", "自由入力"}
 
         # 1) textarea 優先（従来ロジック）
         textarea_candidates = classified_elements.get("textareas", []) or []
-        best = (None, 0, None, [])
-        for el in textarea_candidates:
-            if id(el) in used_elements:
-                continue
-            el_bounds = (
-                self._element_bounds_cache.get(str(el))
-                if hasattr(self, "_element_bounds_cache")
-                else None
-            )
-            contexts = await self.context_text_extractor.extract_context_for_element(
-                el, el_bounds
-            )
-            best_txt = (
-                self.context_text_extractor.get_best_context_text(contexts) or ""
-            ).lower()
-            if not any(tok in best_txt for tok in strict_tokens):
-                continue
-            score, details = await self.element_scorer.calculate_element_score(
-                el, patterns, target_field
-            )
-            if score > best[1]:
-                best = (el, score, details, contexts)
+
+        def _ctx_has(tokens: set[str], txt: str) -> bool:
+            return any(tok in txt for tok in tokens)
+
+        async def _pick_textarea_by_tokens(tokens: set[str]):
+            best_local = (None, 0, None, [])
+            for el in textarea_candidates:
+                if id(el) in used_elements:
+                    continue
+                el_bounds = (
+                    self._element_bounds_cache.get(str(el))
+                    if hasattr(self, "_element_bounds_cache")
+                    else None
+                )
+                contexts = await self.context_text_extractor.extract_context_for_element(
+                    el, el_bounds
+                )
+                best_txt = (
+                    self.context_text_extractor.get_best_context_text(contexts) or ""
+                ).lower()
+                # 除外トークンを含む場合は本文として扱わない
+                if _ctx_has(exclude_tokens, best_txt):
+                    continue
+                if not _ctx_has(tokens, best_txt):
+                    continue
+                score, details = await self.element_scorer.calculate_element_score(
+                    el, patterns, target_field
+                )
+                if score > best_local[1]:
+                    best_local = (el, score, details, contexts)
+            return best_local
+
+        # 1-a) 主要語で選定
+        best = await _pick_textarea_by_tokens(primary_tokens)
+        # 1-b) 見つからない場合のみ、二次語群で選定（除外語が混じるケースは弾く）
+        if not best[0]:
+            best = await _pick_textarea_by_tokens(secondary_tokens)
 
         el, score, details, contexts = best
         if el and score >= 60:
@@ -798,8 +938,14 @@ class FieldMapper:
             best_txt = (
                 self.context_text_extractor.get_best_context_text(contexts) or ""
             ).lower()
-            if not any(tok in best_txt for tok in strict_tokens):
+            # 除外語が含まれていれば本文対象外
+            if _ctx_has(exclude_tokens, best_txt):
                 continue
+
+            # 主要語優先で判定、無ければ二次語群
+            if not (_ctx_has(primary_tokens, best_txt) or _ctx_has(secondary_tokens, best_txt)):
+                continue
+
             # 文脈の強さ + 属性ヒントの双方がある場合のみ採点・救済対象
             if not attr_hint:
                 continue
