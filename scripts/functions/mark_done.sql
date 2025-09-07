@@ -1,4 +1,6 @@
 -- 送信結果を記録し、キューを更新（原子的）
+drop function if exists public.mark_done(date,bigint,bigint,boolean,text,jsonb,boolean,timestamp with time zone);
+
 create or replace function public.mark_done(
   p_target_date date,
   p_targeting_id bigint,
