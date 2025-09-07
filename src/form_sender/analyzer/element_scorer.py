@@ -2106,8 +2106,42 @@ class ElementScorer:
             if extended_mark:
                 return True
 
-            # 祖先クラスのヒントのみがあり、明示マーカー（ラベル/コンテキスト）が無い場合は False（安全側）
+            # 祖先クラスのヒントのみがあるケースを限定的に許可
+            # 例: <div class="required"> ... <input> ... </div>
+            # 多くの日本語サイトでは CSS の疑似要素で『必須』が描画され、テキストはDOMに現れない。
+            # そのため、近傍テキストに『必須』が無くても、祖先クラスのみで必須表示されるケースを拾う。
+            # ただし、誤検出を避けるため以下の条件で採用する：
+            # - 深さ制限内（<=3）の最も近い祖先に required 系クラスがある
+            # - その祖先のテキストに『任意/optional』等の否定マーカーが含まれない
+            # - 祖先の class に captcha/login/token 等の認証系シグナルが含まれない
             if ancestor_required_hint:
+                try:
+                    ancestor_required_confirmed = await element.evaluate(
+                        """
+                        el => {
+                          const REQ = ['required','require','mandatory','must','necessary','必須','wpcf7-validates-as-required'];
+                          const NEG = ['任意','optional'];
+                          const EXCL = ['captcha','image_auth','token','otp','verification','login','signin','auth','password'];
+                          let p = el.parentElement; let depth = 0;
+                          while (p && depth < 3) {
+                            const cls = (p.getAttribute('class') || '').toLowerCase();
+                            if (REQ.some(t => cls.includes(t))) {
+                              if (EXCL.some(t => cls.includes(t))) return false;
+                              const txt = ((p.innerText || p.textContent || '') + '').toLowerCase();
+                              if (NEG.some(t => txt.includes(t))) return false;
+                              return true;
+                            }
+                            p = p.parentElement; depth++;
+                          }
+                          return false;
+                        }
+                    """
+                    )
+                except Exception:
+                    ancestor_required_confirmed = False
+                if ancestor_required_confirmed:
+                    return True
+                # 条件に合致しなければ非必須扱い
                 return False
 
             return False
