@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Dict, List, Any
 
 from playwright.async_api import Page
@@ -23,26 +24,24 @@ class FormPreProcessor:
         self.FIRST_NAME_TOKENS = ['firstname', 'first_name', 'first-name', 'first', 'given-name', 'given_name', 'forename', 'mei', '名']
         # カナ/ふりがな/ひらがな等の指標（含む要素は分割姓名検出から除外）
         self.KANA_HIRA_INDICATORS = ['kana', 'katakana', 'furigana', 'フリガナ', 'カタカナ', 'ひらがな', 'hiragana']
+        # 事前コンパイル（ホットパス最適化）
+        self._kana_hira_boundary_re = re.compile(r'(^|[_\-])(kana|furigana|hiragana)($|[_\-])', re.IGNORECASE)
+        self._katakana_boundary_re = re.compile(r'(^|[_\-])katakana($|[_\-])', re.IGNORECASE)
+        
+        # 推定グリッドの係数（マジックナンバー排除）
+        self.ESTIMATED_ROW_HEIGHT = 50
+        self.ESTIMATED_CELL_WIDTH = 100
         
     def _contains_kana_hira_indicator(self, blob: str) -> bool:
-        """カナ/ふりがな指標の厳密判定（語境界/区切り対応）。
-
-        - 英字トークン 'kana'/'furigana'/'hiragana' は、先頭/末尾または '_' '-' 区切りでのみ一致。
-        - 'katakana' は独立トークンとして判定（'_katakana', 'katakana_', '-katakana' 等）。
-        - 日本語は単純包含で十分に固有（'フリガナ','カタカナ','ひらがな'）。
-        - 例: 'kanata' はマッチしない（誤検出防止）。
-        """
-        import re
-        s = blob or ''
-        s = s.lower()
-        # 英字トークン（区切り一致）
-        if re.search(r'(^|[_\-])(kana|furigana|hiragana)($|[_\-])', s):
+        """カナ/ふりがな指標の厳密判定（語境界/区切り対応・事前コンパイル済み）。"""
+        s = (blob or '')
+        sl = s.lower()
+        if self._kana_hira_boundary_re.search(sl):
             return True
-        if re.search(r'(^|[_\-])katakana($|[_\-])', s):
+        if self._katakana_boundary_re.search(sl):
             return True
-        # 日本語トークン（固有語として包含で判断）
         for jp in ['フリガナ', 'カタカナ', 'ひらがな']:
-            if jp in blob:
+            if jp in s:
                 return True
         return False
 
@@ -88,6 +87,8 @@ class FormPreProcessor:
         
         # 厳密な分割姓名（漢字）検出: カナ/ひらがなを除外し、姓/名が別要素で存在する場合のみ True
         unified_info['has_name_split_fields'] = self._detect_split_name_fields_kanji_only(structured_elements)
+        # カナ/ひらがな分割の存在可否（統合カナ/ひらがなの誤占有を防ぐ）
+        unified_info['has_name_kana_split_fields'] = self._detect_split_name_kana_fields(structured_elements)
         has_name_split_fields = unified_info['has_name_split_fields']
         
         for el in structured_elements:
@@ -96,7 +97,9 @@ class FormPreProcessor:
                 info_key = f"has_{key}"
                 if not unified_info[info_key]:
                     # Skip unified fullname/kana/hiragana detection if split name fields are present
-                    if key in ('fullname', 'kana_unified', 'hiragana_unified') and has_name_split_fields:
+                    if key in ('fullname', 'kana_unified', 'hiragana_unified') and (
+                        has_name_split_fields or unified_info.get('has_name_kana_split_fields')
+                    ):
                         continue
                     
                     if any(p in text for p in pats):
@@ -105,6 +108,33 @@ class FormPreProcessor:
                         logger.info(f"Unified {key} field detected: {el.name or el.id}")
                         break 
         return unified_info
+
+    def _detect_split_name_kana_fields(self, structured_elements: List[FormElement]) -> bool:
+        """カナ/ひらがなの分割姓名（セイ/メイ）が存在するかを判定。
+
+        - name/id/placeholder/label にカナ/ふりがな指標が含まれること
+        - かつ『セイ/姓』系と『メイ/名』系のシグナルが別要素に存在すること
+        """
+        last_like = []
+        first_like = []
+        for el in structured_elements:
+            blob = ' '.join([
+                (el.name or ''), (el.id or ''), (el.class_name or ''), (el.placeholder or ''),
+                (el.label_text or ''), (el.associated_text or '')
+            ])
+            if not blob:
+                continue
+            if not self._contains_kana_hira_indicator(blob):
+                continue
+            s = blob
+            # カタカナ/日本語の代表的な表記に対応
+            if any(tok in s for tok in ['セイ', '姓']):
+                last_like.append(el)
+            if any(tok in s for tok in ['メイ', '名']):
+                first_like.append(el)
+        if not last_like or not first_like:
+            return False
+        return len({id(x) for x in last_like}.union({id(y) for y in first_like})) >= 2
 
     def _detect_split_name_fields_kanji_only(self, structured_elements: List[FormElement]) -> bool:
         """漢字の分割姓名が存在するか厳密に判定する。

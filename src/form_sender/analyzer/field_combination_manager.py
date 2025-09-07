@@ -251,6 +251,9 @@ class FieldCombinationManager:
             '姓ひらがな': 'last_name_hiragana',
             '名ひらがな': 'first_name_hiragana',
             '企業URL': 'website_url',
+            '部署名': 'department',
+            '役職': 'position',
+            '性別': 'gender',
         }
         if field_name in jp_to_client:
             return client_info.get(jp_to_client[field_name], '')

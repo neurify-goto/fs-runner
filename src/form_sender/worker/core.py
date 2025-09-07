@@ -907,7 +907,7 @@ class FormSenderWorker:
         # 最後のフォールバック：input type別
         type_selectors = {
             "text": 'input[type="text"]:not([name]):not([id])',
-            "email": 'input[type="email"]',
+            "email": 'input[type="email"], input[type="mail"]',
             "tel": 'input[type="tel"]',
             "textarea": "textarea:not([name]):not([id])",
             "select": "select:not([name]):not([id])",
