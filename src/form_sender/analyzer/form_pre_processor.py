@@ -314,10 +314,16 @@ class FormPreProcessor:
                     primary_type = 'other_form'
                     top_score = scores['other_form']
 
-            # auth_form は最優先で非対象扱い
-            if scores['auth_form'] >= max(scores['contact_form'], scores['newsletter_form'], scores['search_form'], scores['order_form'], scores['feedback_form'], scores['other_form']):
+            # auth_form は「正の証拠」がある場合のみ切り替える
+            # 0点同点（全カテゴリ0）のケースでは auth にしない
+            auth_score = scores['auth_form']
+            others_max = max(
+                scores['contact_form'], scores['newsletter_form'], scores['search_form'],
+                scores['order_form'], scores['feedback_form'], scores['other_form']
+            )
+            if auth_score > 0 and auth_score >= others_max:
                 primary_type = 'auth_form'
-                top_score = scores['auth_form']
+                top_score = auth_score
 
             # 信頼度（0-1に正規化の簡易版）
             confidence = min(1.0, max(0.0, top_score / 5.0))
