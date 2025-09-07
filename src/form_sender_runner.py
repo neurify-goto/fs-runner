@@ -87,7 +87,97 @@ _SUCC_CACHE: Dict[str, Any] = {}
 # 失敗分類の軽量キャッシュ（同一メッセージの連続多発時の負荷抑制）
 _CLASSIFY_CACHE: Dict[str, Any] = {}
 CLASSIFY_CACHE_MAX_SIZE = 256
-CLASSIFY_CACHE_TTL_SEC = 600  # 10分で自然失効
+CLASSIFY_CACHE_TTL_SEC = 600  # 10分で自然失効（設定で上書き可）
+
+
+def _get_classify_cache_limits() -> (int, int):
+    """config/worker_config.json の runner から制限値を取得（無ければデフォルト）。"""
+    try:
+        cfg = get_worker_config().get('runner', {})
+        max_size = int(cfg.get('classify_cache_max_size', CLASSIFY_CACHE_MAX_SIZE))
+        ttl = int(cfg.get('classify_cache_ttl_sec', CLASSIFY_CACHE_TTL_SEC))
+        return max(16, max_size), max(60, ttl)
+    except Exception:
+        return CLASSIFY_CACHE_MAX_SIZE, CLASSIFY_CACHE_TTL_SEC
+
+
+def _prune_classify_cache(now_ts: float) -> None:
+    """TTL とサイズに基づいて簡易的にキャッシュを整理。"""
+    try:
+        max_size, ttl = _get_classify_cache_limits()
+        # TTL 期限切れを最大16件だけ掃除（O(1)に近い軽掃除）
+        removed = 0
+        for k in list(_CLASSIFY_CACHE.keys()):
+            ent = _CLASSIFY_CACHE.get(k)
+            if not isinstance(ent, dict):
+                _CLASSIFY_CACHE.pop(k, None)
+                removed += 1
+            elif now_ts - ent.get('ts', 0) > ttl:
+                _CLASSIFY_CACHE.pop(k, None)
+                removed += 1
+            if removed >= 16:
+                break
+        # サイズ超過なら古い順に削除
+        while len(_CLASSIFY_CACHE) > max_size:
+            try:
+                _CLASSIFY_CACHE.pop(next(iter(_CLASSIFY_CACHE)))
+            except StopIteration:
+                break
+    except Exception:
+        # キャッシュ管理失敗は無視
+        pass
+
+
+def _classify_failure_detail(err_msg: Optional[str], add_data: Optional[Dict[str, Any]], error_type: Optional[str]) -> (Optional[Dict[str, Any]], Optional[bool]):
+    """失敗詳細を分類し、classify_detail と bot_protection補助フラグを返す。"""
+    try:
+        http_status = None
+        page_content = ''
+        is_bot_ctx = False
+        if isinstance(add_data, dict):
+            ctx = add_data.get('classify_context') or {}
+            if isinstance(ctx, dict):
+                http_status = ctx.get('http_status')
+                page_content = ctx.get('page_content_snippet', '')
+                is_bot_ctx = bool(ctx.get('is_bot_detected'))
+
+        # 軽量キャッシュ
+        em = (err_msg or '')[:160]
+        pc = (page_content or '')[:160]
+        raw_key = f"{em}|{http_status}|{error_type or ''}|{pc}"
+        cache_key = hashlib.sha1(raw_key.encode('utf-8', errors='ignore')).hexdigest()
+
+        now_ts = _time.time()
+        ent = _CLASSIFY_CACHE.get(cache_key)
+        max_size, ttl = _get_classify_cache_limits()
+        if ent and isinstance(ent, dict) and (now_ts - ent.get('ts', 0) <= ttl):
+            detail = ent.get('detail')
+        else:
+            detail = ErrorClassifier.classify_detail(
+                error_message=err_msg or '',
+                page_content=page_content or '',
+                http_status=http_status,
+                context={'error_type_hint': error_type} if error_type else None,
+            )
+            _CLASSIFY_CACHE[cache_key] = {'detail': detail, 'ts': now_ts}
+            _prune_classify_cache(now_ts)
+
+        # bot 補助判定
+        bot_flag = None
+        try:
+            code = detail.get('code') if isinstance(detail, dict) else None
+            if code in {'BOT_DETECTED', 'WAF_CHALLENGE'} or is_bot_ctx:
+                bot_flag = True
+        except Exception:
+            pass
+
+        return detail, bot_flag
+    except RuntimeError as e:
+        logger.warning(f"detail classification failed: {e}")
+        return None, None
+    except Exception as e:
+        logger.debug(f"unexpected classification error: {e}")
+        return None, None
 
 def _get_success_count_today_jst(supabase, targeting_id: int, target_date: date) -> int:
     """当日(JST)成功数をUTC境界で集計"""
@@ -284,66 +374,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     # 失敗時は詳細分類を生成（HTTP/WAF/検証 等）
     classify_detail = None
     if not is_success:
-        try:
-            # WorkerResult/dataclass 互換: error_message/追加文脈の取得
-            err_msg = None
-            add_data = None
-            if hasattr(result, 'error_message'):
-                err_msg = getattr(result, 'error_message')
-                add_data = getattr(result, 'additional_data', None)
-            elif isinstance(result, dict):
-                err_msg = result.get('error_message')
-                add_data = result.get('additional_data')
-
-            http_status = None
-            page_content = ''
-            if isinstance(add_data, dict):
-                ctx = add_data.get('classify_context') or {}
-                http_status = ctx.get('http_status') if isinstance(ctx, dict) else None
-                # page_content はログ非出力ポリシーのため最小限のみ参照
-                page_content = ctx.get('page_content_snippet', '') if isinstance(ctx, dict) else ''
-            # ErrorClassifier で詳細分類を実行（軽量キャッシュ使用）
-            em = (err_msg or '')[:160]
-            pc = (page_content or '')[:160]
-            raw_key = f"{em}|{http_status}|{error_type or ''}|{pc}"
-            cache_key = hashlib.sha1(raw_key.encode('utf-8', errors='ignore')).hexdigest()
-
-            ent = _CLASSIFY_CACHE.get(cache_key)
-            now_ts = _time.time()
-            if ent and isinstance(ent, dict) and (now_ts - ent.get('ts', 0) <= CLASSIFY_CACHE_TTL_SEC):
-                classify_detail = ent.get('detail')
-            else:
-                classify_detail = ErrorClassifier.classify_detail(
-                    error_message=err_msg or '',
-                    page_content=page_content or '',
-                    http_status=http_status,
-                    context={'error_type_hint': error_type} if error_type else None,
-                )
-                # キャッシュ登録（上限・TTL管理）
-                try:
-                    if len(_CLASSIFY_CACHE) >= CLASSIFY_CACHE_MAX_SIZE:
-                        # 先頭要素（最古）を1件だけ削除
-                        try:
-                            _CLASSIFY_CACHE.pop(next(iter(_CLASSIFY_CACHE)))
-                        except StopIteration:
-                            pass
-                    _CLASSIFY_CACHE[cache_key] = {'detail': classify_detail, 'ts': now_ts}
-                except Exception:
-                    # キャッシュは副次機能なので失敗は無視
-                    pass
-            # Bot/WAF 判定の補強
-            if classify_detail and isinstance(classify_detail, dict):
-                code = classify_detail.get('code')
-                if code in {'BOT_DETECTED', 'WAF_CHALLENGE'}:
-                    bp = True
-        except RuntimeError as _classify_err:
-            # 分類ロジック内の想定エラーはWarning
-            logger.warning(f"detail classification failed: {_classify_err}")
-            classify_detail = None
-        except Exception as _classify_err:
-            # 想定外はDebugに降格し継続
-            logger.debug(f"unexpected classification error: {_classify_err}")
-            classify_detail = None
+        # WorkerResult/dataclass 互換: error_message/追加文脈の取得
+        err_msg = getattr(result, 'error_message', None) if not isinstance(result, dict) else result.get('error_message')
+        add_data = getattr(result, 'additional_data', None) if not isinstance(result, dict) else result.get('additional_data')
+        classify_detail, bot_flag = _classify_failure_detail(err_msg, add_data, error_type)
+        if bot_flag:
+            bp = True
 
     # 4) finalize via RPC（固定 company_id の場合も submissions 記録目的で呼ぶ。send_queue更新は0件でも問題なし）
     try:
