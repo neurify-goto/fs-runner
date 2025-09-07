@@ -12,6 +12,55 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+def _passes_kana_like(field_name: str, ei: Dict[str, Any], best_txt: str) -> bool:
+    """カナ/ひらがな系フィールドの安全ガード。
+
+    汎用方針:
+    - 属性(name/id/class/placeholder) もしくはラベル/見出し(best_txt)のいずれかに
+      カナ/ふりがな指標が存在しない場合は不採用。
+    - 明確な非対象語（性別/sex/gender）が含まれる場合は不採用。
+
+    これにより、必須ブーストにより type=text の汎用入力へ誤って割当てられる
+    事象を抑止する。
+    """
+    attrs = _attrs_blob(ei)
+    neg_tokens = ["性別", "sex", "gender"]
+    if any(t in attrs for t in neg_tokens) or any(t in best_txt for t in neg_tokens):
+        return False
+
+    kana_tokens = [
+        "kana",
+        "katakana",
+        "furigana",
+        "カナ",
+        "カタカナ",
+        "フリガナ",
+        "ふりがな",
+        # 氏名カナで用いられやすい表記
+        "セイ",
+        "メイ",
+    ]
+    hira_tokens = [
+        "hiragana",
+        "ひらがな",
+    ]
+
+    # フィールド種別に応じた指標セット
+    if field_name in {"統合氏名カナ", "姓カナ", "名カナ"}:
+        indicators = kana_tokens
+    elif field_name in {"姓ひらがな", "名ひらがな"}:
+        # ふりがな（カタカナ）のケースも現実には混在するため、
+        # ひらがな専用トークンに加えて『ふりがな』も許容
+        indicators = hira_tokens + ["ふりがな", "フリガナ"]
+    else:
+        return True  # 対象外フィールド
+
+    has_indicator = any(t.lower() in attrs for t in indicators) or any(
+        t.lower() in best_txt for t in indicators
+    )
+    return bool(has_indicator)
+
+
 def _best_context_text(best_context: Optional[List], ctx_extractor) -> str:
     try:
         return (ctx_extractor.get_best_context_text(best_context) or "").lower()
@@ -120,5 +169,20 @@ def passes_safeguard(
         return _passes_postal(ei, best_txt)
     if field_name == "都道府県":
         return _passes_prefecture(ei, best_txt)
+    if field_name == "役職":
+        # 役職/職位/position/job title のいずれかの指標が属性/ラベルに必要
+        attrs = _attrs_blob(ei)
+        pos_tokens = [
+            "役職", "職位", "position", "job title", "title", "役割", "ポジション"
+        ]
+        neg_ctx_tokens = ["知ったきっかけ", "きっかけ", "how did you hear", "referrer"]
+        if any(t in attrs for t in pos_tokens) or any(t in best_txt for t in pos_tokens):
+            if not any(t in best_txt for t in neg_ctx_tokens):
+                return True
+        return False
+
+    # カナ/ひらがな系の安全ガード
+    if field_name in {"統合氏名カナ", "姓カナ", "名カナ", "姓ひらがな", "名ひらがな"}:
+        return _passes_kana_like(field_name, ei, best_txt)
 
     return True

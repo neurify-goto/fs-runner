@@ -88,6 +88,8 @@ class FormPreProcessor:
         
         # 厳密な分割姓名（漢字）検出: カナ/ひらがなを除外し、姓/名が別要素で存在する場合のみ True
         unified_info['has_name_split_fields'] = self._detect_split_name_fields_kanji_only(structured_elements)
+        # カナ/ひらがな分割の存在可否（統合カナ/ひらがなの誤占有を防ぐ）
+        unified_info['has_name_kana_split_fields'] = self._detect_split_name_kana_fields(structured_elements)
         has_name_split_fields = unified_info['has_name_split_fields']
         
         for el in structured_elements:
@@ -96,7 +98,9 @@ class FormPreProcessor:
                 info_key = f"has_{key}"
                 if not unified_info[info_key]:
                     # Skip unified fullname/kana/hiragana detection if split name fields are present
-                    if key in ('fullname', 'kana_unified', 'hiragana_unified') and has_name_split_fields:
+                    if key in ('fullname', 'kana_unified', 'hiragana_unified') and (
+                        has_name_split_fields or unified_info.get('has_name_kana_split_fields')
+                    ):
                         continue
                     
                     if any(p in text for p in pats):
@@ -105,6 +109,33 @@ class FormPreProcessor:
                         logger.info(f"Unified {key} field detected: {el.name or el.id}")
                         break 
         return unified_info
+
+    def _detect_split_name_kana_fields(self, structured_elements: List[FormElement]) -> bool:
+        """カナ/ひらがなの分割姓名（セイ/メイ）が存在するかを判定。
+
+        - name/id/placeholder/label にカナ/ふりがな指標が含まれること
+        - かつ『セイ/姓』系と『メイ/名』系のシグナルが別要素に存在すること
+        """
+        last_like = []
+        first_like = []
+        for el in structured_elements:
+            blob = ' '.join([
+                (el.name or ''), (el.id or ''), (el.class_name or ''), (el.placeholder or ''),
+                (el.label_text or ''), (el.associated_text or '')
+            ])
+            if not blob:
+                continue
+            if not self._contains_kana_hira_indicator(blob):
+                continue
+            s = blob
+            # カタカナ/日本語の代表的な表記に対応
+            if any(tok in s for tok in ['セイ', '姓']):
+                last_like.append(el)
+            if any(tok in s for tok in ['メイ', '名']):
+                first_like.append(el)
+        if not last_like or not first_like:
+            return False
+        return len({id(x) for x in last_like}.union({id(y) for y in first_like})) >= 2
 
     def _detect_split_name_fields_kanji_only(self, structured_elements: List[FormElement]) -> bool:
         """漢字の分割姓名が存在するか厳密に判定する。

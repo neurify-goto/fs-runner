@@ -186,6 +186,17 @@ class InputValueAssigner:
                     if full:
                         assign["value"] = full
                         logger.info("Patched incomplete email local-part to full address")
+            # メール確認フィールド（copy_from）の値も最新のメールに合わせて再同期
+            for k, v in list(input_assignments.items()):
+                try:
+                    if isinstance(v, dict) and v.get("auto_action") == "copy_from":
+                        src = v.get("copy_from_field", "メールアドレス")
+                        src_val = input_assignments.get(src, {}).get("value", "")
+                        if src_val:
+                            v["value"] = src_val
+                            logger.info(f"Synced value for '{k}' from '{src}' after email patch")
+                except Exception:
+                    continue
         except (KeyError, AttributeError, TypeError) as e:
             logger.debug(f"email patch skipped: {e}")
         # 共通の取り違えを補正（例: sei/mei の入れ違い、sei_kana/mei_kanaの入れ違い）

@@ -71,6 +71,21 @@ class FieldMapper:
             ) or self._should_skip_field_for_form_type(field_name):
                 continue
 
+            # 追加: カナ分割（セイ/メイ）が存在する場合は『統合氏名カナ』を先行スキップ
+            try:
+                if field_name == "統合氏名カナ" and await self._has_kana_split_candidates(
+                    classified_elements
+                ):
+                    try:
+                        logger.info(
+                            "Skip '統合氏名カナ' due to detected split candidates in DOM"
+                        )
+                    except Exception:
+                        pass
+                    continue
+            except Exception:
+                pass
+
             target_element_types = self._determine_target_element_types(field_patterns)
 
             # 汎用改善: 『お問い合わせ本文』は textarea が存在する場合は textarea のみを候補に限定
@@ -299,6 +314,58 @@ class FieldMapper:
             classified_elements, field_mapping, used_elements
         )
         return field_mapping
+
+    async def _has_kana_split_candidates(self, classified_elements: Dict[str, List[Locator]]) -> bool:
+        """DOMに『セイ/メイ』系の分割かな入力が存在するか簡易検出。
+
+        属性(name/id/class/placeholder)に以下の双方が見つかれば True:
+        - カナ/ふりがな指標（kana/katakana/furigana/カナ/カタカナ/フリガナ/ひらがな）
+        - 『セイ/姓』に相当するトークン、及び『メイ/名』に相当するトークン
+        """
+        try:
+            text_inputs = classified_elements.get("text_inputs", []) or []
+            if len(text_inputs) < 2:
+                return False
+            last_found = False
+            first_found = False
+            for el in text_inputs[:40]:  # 上限で軽量化
+                try:
+                    ei = await self.element_scorer._get_element_info_quick(el)
+                except Exception:
+                    continue
+                blob = " ".join(
+                    [
+                        (ei.get("name") or ""),
+                        (ei.get("id") or ""),
+                        (ei.get("class") or ""),
+                        (ei.get("placeholder") or ""),
+                    ]
+                )
+                if not blob:
+                    continue
+                has_kana = any(
+                    t in blob
+                    for t in [
+                        "kana",
+                        "katakana",
+                        "furigana",
+                        "カナ",
+                        "カタカナ",
+                        "フリガナ",
+                        "ひらがな",
+                    ]
+                )
+                if not has_kana:
+                    continue
+                last_found = last_found or any(t in blob for t in ["セイ", "姓", "sei", "lastname", "family"])
+                first_found = first_found or any(
+                    t in blob for t in ["メイ", "名", "mei", "firstname", "given"]
+                )
+                if last_found and first_found:
+                    return True
+            return False
+        except Exception:
+            return False
 
     async def _promote_phone_triplets(self, classified_elements, field_mapping):
         """tel1/tel2/tel3 形式の3分割電話欄を検出し、
@@ -854,6 +921,23 @@ class FieldMapper:
         if not el:
             return
         threshold = max(60, int(self.settings.get("email_fallback_min_score", 60)))
+        # 追加の安全ガード: 郵便番号の文脈/属性検証
+        try:
+            from .mapping_safeguards import passes_safeguard as _passes
+
+            if not _passes(
+                target_field,
+                details,
+                contexts,
+                self.context_text_extractor,
+                patterns,
+                self.settings,
+            ):
+                return
+        except Exception:
+            # ガード判定で例外が起きても安全側に倒す（採用しない）
+            return
+
         if score >= threshold:
             info = await self._create_enhanced_element_info(el, details, contexts)
             try:
@@ -895,7 +979,10 @@ class FieldMapper:
             target_types.add("text_inputs")
 
         # tag による候補
-        if "input" in pattern_tags:
+        # 入力タイプが明示されている場合はそれに従う。'input' だからといって
+        # 無条件に text_inputs を候補に含めると、性別など本来 radio/select である
+        # フィールドが input[type=text] に誤って昇格する温床になる。
+        if "input" in pattern_tags and "text" in pattern_types:
             target_types.add("text_inputs")
         if "textarea" in pattern_tags:
             target_types.add("textareas")
@@ -943,6 +1030,17 @@ class FieldMapper:
             try:
                 logger.info(
                     "Skip '統合氏名' due to detected split name fields (prefer 分割: 姓/名)"
+                )
+            except Exception:
+                pass
+            return True
+        # 追加: カナの分割（セイ/メイ）が存在する場合は『統合氏名カナ』をスキップ
+        if field_name == "統合氏名カナ" and self.unified_field_info.get(
+            "has_name_kana_split_fields"
+        ):
+            try:
+                logger.info(
+                    "Skip '統合氏名カナ' due to detected split kana fields (prefer 分割: 姓カナ/名カナ)"
                 )
             except Exception:
                 pass

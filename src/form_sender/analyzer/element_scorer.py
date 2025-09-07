@@ -356,6 +356,37 @@ class ElementScorer:
                 # ただし、コンテキストにカナ関連の言葉があるかは後で判定するため、ここでは強制除外しない
                 pass
 
+            # 追加の分割判定: 『姓カナ/名カナ』『姓ひらがな/名ひらがな』の取り違え抑止
+            try:
+                blob_attr = " ".join([
+                    element_info.get("name", "") or "",
+                    element_info.get("id", "") or "",
+                    element_info.get("class", "") or "",
+                    element_info.get("placeholder", "") or "",
+                ])
+                # セイ/メイの強い手掛かり（カタカナ表記）
+                has_sei_hint = any(tok in blob_attr for tok in ["セイ", "姓", "sei", "lastname"])
+                has_mei_hint = any(tok in blob_attr for tok in ["メイ", "名", "mei", "firstname"])
+
+                if field_name in {"姓カナ", "姓ひらがな"} and has_mei_hint and not has_sei_hint:
+                    score_details["total_score"] = -999
+                    score_details["excluded"] = True
+                    score_details["exclusion_reason"] = "mei_hint_for_last_name_field"
+                    return -999, score_details
+                if field_name in {"名カナ", "名ひらがな"} and has_sei_hint and not has_mei_hint:
+                    score_details["total_score"] = -999
+                    score_details["excluded"] = True
+                    score_details["exclusion_reason"] = "sei_hint_for_first_name_field"
+                    return -999, score_details
+                # 統合カナが split(セイ/メイ)入力に割り当てられないように保護
+                if field_name == "統合氏名カナ" and (has_sei_hint or has_mei_hint):
+                    score_details["total_score"] = -999
+                    score_details["excluded"] = True
+                    score_details["exclusion_reason"] = "unified_kana_on_split_field"
+                    return -999, score_details
+            except Exception:
+                pass
+
             # 除外パターンのチェック（最初に実行して早期除外）
             if self._is_excluded_element(element_info, field_patterns):
                 logger.info(
