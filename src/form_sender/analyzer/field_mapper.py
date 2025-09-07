@@ -8,6 +8,7 @@ from .field_patterns import FieldPatterns
 from .duplicate_prevention import DuplicatePreventionManager
 from config.manager import get_prefectures
 from .mapping_safeguards import passes_safeguard
+from .required_rescue import RequiredRescue
 from .candidate_filters import allow_candidate
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,23 @@ class FieldMapper:
         self.field_combination_manager = field_combination_manager
         self.unified_field_info: Dict[str, Any] = {}
         self.form_type_info: Dict[str, Any] = {}
+
+        # P1: 必須救済ハンドラの初期化
+        # _ensure_required_mappings から呼び出されるため、ここで生成しておく。
+        # 依存する関数参照（_create_enhanced_element_info / _generate_temp_field_value /
+        # _is_confirmation_field / _infer_logical_field_name_for_required）
+        # はインスタンスメソッドとして既存実装済み。
+        self._required_rescue = RequiredRescue(
+            element_scorer=self.element_scorer,
+            context_text_extractor=self.context_text_extractor,
+            field_patterns=self.field_patterns,
+            settings=self.settings,
+            duplicate_prevention=self.duplicate_prevention,
+            create_enhanced_element_info=self._create_enhanced_element_info,
+            generate_temp_field_value=self._generate_temp_field_value,
+            is_confirmation_field_func=self._is_confirmation_field,
+            infer_logical_name_func=self._infer_logical_field_name_for_required,
+        )
 
     async def execute_enhanced_field_mapping(
         self,
