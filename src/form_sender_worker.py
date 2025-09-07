@@ -45,11 +45,14 @@ if os.getenv('GITHUB_ACTIONS', '').lower() == 'true':
     logging.getLogger("urllib3").setLevel(logging.ERROR)     # HTTP通信ログを完全抑制
     logging.getLogger("requests").setLevel(logging.ERROR)    # Requestsライブラリログを完全抑制
     logging.getLogger("supabase").setLevel(logging.WARNING)  # Supabaseクライアントログを抑制
-    
+
     # ルートロガーレベルもGitHub Actions環境では警告以上のみ
     logging.getLogger().setLevel(logging.WARNING)
-    
-    print("INFO: GitHub Actions environment detected - Enhanced security logging enabled")
+
+    # import時に余計なprintは出さない
+    logging.getLogger(__name__).info(
+        "GitHub Actions environment detected - Enhanced security logging enabled"
+    )
 
 # サニタイゼーション機能を有効化
 logger = setup_sanitized_logging(__name__)
