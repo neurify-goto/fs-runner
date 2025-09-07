@@ -39,7 +39,8 @@ from supabase import create_client
 # フォーム解析関連
 from form_sender.analyzer.rule_based_analyzer import RuleBasedAnalyzer
 from form_sender.utils.cookie_handler import CookieConsentHandler
-from tests.data.test_client_data import (
+# マッピング検証では公開可能な擬似データを使用する
+from tests.fixtures.sample_client_data import (
     CLIENT_DATA,
     TARGETING_DATA,
     create_test_client_config,
@@ -485,6 +486,30 @@ class FieldMappingAnalyzer:
     ) -> Optional[Dict[str, Any]]:
         """テスト用form_urlを1件取得（指定IDまたはランダム選択）"""
         try:
+            # 設定読み込み（存在しない場合はデフォルト）
+            def _load_threshold_config() -> Dict[str, Any]:
+                cfg_path = Path(__file__).parent.parent / "config" / "test_field_mapping.json"
+                defaults = {
+                    "min_company_id": 1,
+                    "max_company_id": 536156,
+                    "max_retries": 10,
+                    "form_url_scheme": "http%",
+                }
+                try:
+                    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    return {**defaults, **{k: v for k, v in data.items() if k in defaults}}
+                except FileNotFoundError:
+                    logger.info(
+                        "Config not found: config/test_field_mapping.json (using defaults)"
+                    )
+                    return defaults
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to load config/test_field_mapping.json: {e} (using defaults)"
+                    )
+                    return defaults
+
+            cfg = _load_threshold_config()
             if company_id:
                 logger.info(
                     f"Fetching specific company (ID: {company_id}) from database...",
@@ -513,30 +538,60 @@ class FieldMappingAnalyzer:
                 logger.info("✅ Specific company selected:")
 
             else:
-                logger.info("Fetching random test form URL from database...")
-
-                # ランダムなIDを生成（1-500000の範囲）
-                random_id = random.randint(1, 500000)
-                logger.info(f"Using random ID threshold: {random_id}")
-
-                # form_urlを持つ企業をランダムに1件取得
-                # mailtoやjavascriptスキームを除外し、実ページのみ選択
-                response = (
-                    self.supabase_client.table("companies")
-                    .select("id, company_name, form_url, instruction_json, company_url")
-                    .neq("form_url", None)
-                    .ilike("form_url", "http%")
-                    .gt("id", random_id)
-                    .limit(1)
-                    .execute()
+                logger.info(
+                    "Fetching test form URL via threshold search (no SQL RANDOM)..."
                 )
 
-                if not response.data:
-                    logger.warning("No companies with form_url found")
+                min_id = int(cfg.get("min_company_id", 1))
+                max_id = int(cfg.get("max_company_id", 536156))
+                max_retries = int(cfg.get("max_retries", 10))
+                scheme = str(cfg.get("form_url_scheme", "http%"))
+
+                # 安全ガード
+                if min_id < 1:
+                    min_id = 1
+                if max_id < min_id:
+                    max_id = min_id
+
+                company = None
+                for attempt in range(1, max_retries + 1):
+                    threshold = random.randint(min_id, max_id)
+                    logger.info(
+                        f"Attempt {attempt}/{max_retries} with threshold >= {threshold}"
+                    )
+
+                    # 条件: form_url が指定スキーマ始まり、id >= threshold の中で最小の id を 1 件
+                    response = (
+                        self.supabase_client.table("companies")
+                        .select(
+                            "id, company_name, form_url, instruction_json, company_url"
+                        )
+                        .neq("form_url", None)
+                        .ilike("form_url", scheme)
+                        .gte("id", threshold)
+                        .order("id", desc=False)
+                        .limit(1)
+                        .execute()
+                    )
+
+                    if response.data:
+                        company = response.data[0]
+                        break
+
+                    logger.info(
+                        "No match found for this threshold, retrying with a new threshold..."
+                    )
+
+                if not company:
+                    logger.error(
+                        "Failed to find any company with http form_url after retries"
+                    )
                     return None
 
-                company = response.data[0]
-                logger.info("✅ Random test company selected:", extra={"summary": True})
+                logger.info(
+                    "✅ Test company selected via threshold search",
+                    extra={"summary": True},
+                )
 
             logger.info(
                 f"🎯 Target company_id: {company['id']}", extra={"summary": True}
