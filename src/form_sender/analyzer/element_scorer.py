@@ -2043,8 +2043,11 @@ class ElementScorer:
                         if (!node) return false;
                         const txt = (node.innerText || node.textContent || '').trim();
                         const cls = (node.getAttribute && (node.getAttribute('class') || '').toLowerCase()) || '';
-                        return cls.includes('require') || cls.includes('required') ||
-                               txt === '*' || txt === '＊' || txt.includes('必須');
+                        if (cls.includes('require') || cls.includes('required')) return true;
+                        if (txt === '*' || txt === '＊' || txt.includes('必須')) return true;
+                        // 『※』は注記と紛れるため短文(<=10文字)に限定
+                        if (txt.includes('※') && txt.length <= 10) return true;
+                        return false;
                       };
                       let p = el.parentElement; let depth = 0;
                       while (p && depth < 2) { // 直近の親までに限定（セクション跨ぎの誤検出防止）
@@ -2122,7 +2125,10 @@ class ElementScorer:
                         try {
                           const txt = (node.innerText || node.textContent || '').trim();
                           if (!txt) return false;
-                          return MARKS.some(m => txt.includes(m));
+                          if (MARKS.some(m => txt.includes(m))) return true;
+                          // 『※』は短文（<=10文字）のときのみ必須と判断
+                          if (txt.includes('※') && txt.length <= 10) return true;
+                          return false;
                         } catch { return false; }
                       };
                       const parent = el.parentElement;
