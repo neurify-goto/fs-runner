@@ -30,9 +30,13 @@ class DuplicatePreventionManager:
         self.assignments: Dict[str, FieldAssignment] = {}
         self.value_registry: Dict[str, List[str]] = {}  # {値: [フィールド名のリスト]}
         self.email_confirmation_patterns = [
-            'email_confirm', 'mail_confirm', 'email_confirmation', 
+            # 代表的な英語/日本語表現
+            'email_confirm', 'mail_confirm', 'email_confirmation',
             'confirm_email', 'confirm_mail', 'メール確認', '確認用メール',
-            'email_check', 'mail_check', 're_email', 're_mail'
+            'email_check', 'mail_check', 're_email', 're_mail',
+            # 本システムの自動生成ラベル（救済/自動処理）
+            'auto_email_confirm',
+            # 一般的な2番目シグナル（mail2/email2 など）は element 側で拾うためここでは最小限
         ]
         
         # フィールド優先順位（重複解決用）- 電話番号系重複防止強化

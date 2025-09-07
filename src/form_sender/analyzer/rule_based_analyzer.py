@@ -467,15 +467,25 @@ class RuleBasedAnalyzer:
             if "統合氏名カナ" in self.field_mapping:
                 self.field_mapping.pop("統合氏名カナ", None)
 
-        # 統合カナがひらがな欄に割り当てられている場合、名ひらがなへ補正
+        # 統合カナがひらがな欄に割り当てられている場合でも、
+        # 単一の『ふりがな/ひらがな』入力しか存在しないフォームでは統合のまま維持する。
+        # （任意の一方へ強制的に割り当てると、今回のように『名ひらがな』扱いになり不整合が起きるため）
+        # 2つの分割（姓/名）ひらがなが検出できた場合のみ、既存の分割正規化ロジックに委ねる。
         uinfo = self.field_mapping.get("統合氏名カナ")
-        if (
-            uinfo
-            and _is_hiragana_like(uinfo)
-            and ("名ひらがな" not in self.field_mapping)
-        ):
-            self.field_mapping["名ひらがな"] = uinfo
-            self.field_mapping.pop("統合氏名カナ", None)
+        if uinfo and _is_hiragana_like(uinfo):
+            try:
+                # すでに分割が揃っている場合は統合を降格（上の統合カナの降格ブロックが担当）
+                has_split_hira = ("姓ひらがな" in self.field_mapping) and (
+                    "名ひらがな" in self.field_mapping
+                )
+                if has_split_hira:
+                    pass  # 何もしない（既存ロジックに委譲）
+                else:
+                    # 分割が揃っていない場合は統合のまま維持（降格しない）
+                    # → 以前は名ひらがなへ補正していたが、単一欄のケースで不適切だったため抑止
+                    pass
+            except Exception:
+                pass
 
         # 欠落補完: ひらがな分割欄が存在するのにマッピング漏れしている場合、DOMから直接補完
         try:

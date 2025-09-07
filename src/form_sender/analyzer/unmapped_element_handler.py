@@ -1274,18 +1274,47 @@ class UnmappedElementHandler:
         ]
         confirmation_ctx_tokens = ["確認", "確認用", "再入力", "再度", "もう一度"]
         blacklist = ["captcha", "image_auth", "spam-block", "token", "otp", "verification"]
+
+        # 既に確定している主メール欄（論理フィールド『メールアドレス』）の name/id を取得して、
+        # そのバリアント（例: "_<name>", "<name>2"）を確認欄として扱う汎用ヒューリスティクスを追加。
+        primary_name = ""
+        primary_id = ""
+        try:
+            primary_info = field_mapping.get("メールアドレス", {}) or {}
+            primary_name = (primary_info.get("name") or "").strip().lower()
+            primary_id = (primary_info.get("id") or "").strip().lower()
+        except Exception:
+            primary_name = ""
+            primary_id = ""
         for i, el in enumerate(candidates):
             if id(el) in mapped_element_ids:
                 continue
             info = await self.element_scorer._get_element_info(el)
             if not info.get("visible", True):
                 continue
+            name_raw = (info.get("name", "") or "").strip()
+            id_raw = (info.get("id", "") or "").strip()
             name_id_class = " ".join(
-                [info.get("name", ""), info.get("id", ""), info.get("class", ""), info.get("placeholder", "")]
+                [name_raw, id_raw, info.get("class", ""), info.get("placeholder", "")]
             ).lower()
             if any(b in name_id_class for b in blacklist):
                 continue
             attr_hit = any(p in name_id_class for p in confirmation_attr_patterns)
+
+            # バリアント規則:
+            # - 主メール name/id に対して、"_<name>" or "<name>2" や "<id>2" を確認欄とみなす
+            #   （例: F2M_FROM → _F2M_FROM, email → email2）
+            try:
+                nm = (name_raw or "").lower()
+                ide = (id_raw or "").lower()
+                if primary_name:
+                    if nm == f"_{primary_name}" or nm == f"{primary_name}2" or nm == f"{primary_name}_confirm":
+                        attr_hit = True
+                if not attr_hit and primary_id:
+                    if ide == f"_{primary_id}" or ide == f"{primary_id}2" or ide == f"{primary_id}_confirm":
+                        attr_hit = True
+            except Exception:
+                pass
             ctx_hit = False
             if not attr_hit:
                 try:
@@ -1298,7 +1327,9 @@ class UnmappedElementHandler:
                 continue
             selector = await self._generate_playwright_selector(el)
             required = await self.element_scorer._detect_required_status(el)
-            required = bool(required or ctx_hit)
+            # コンテキスト/属性で確認欄と判断できた場合は、実入力上の必須が検出できなくても
+            # 実用上の必須に準じて扱う（未入力だと送信拒否されるサイトが多いため）。
+            required = bool(required or ctx_hit or attr_hit)
             field_name = f"auto_email_confirm_{i+1}"
             handled[field_name] = {
                 "element": el,

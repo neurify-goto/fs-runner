@@ -1971,6 +1971,8 @@ class ElementScorer:
                 # Contact Form 7系
                 "wpcf7-validates-as-required",
             ]
+            # 自要素の class に強い必須トークンが含まれる場合のみ即時 True
+            # 祖先側の class は誤検出が多いため、後段の文脈判定と組み合わせて判断する
             if any(tok in class_lower for tok in required_class_tokens):
                 return True
 
@@ -1993,8 +1995,8 @@ class ElementScorer:
                 )
             except Exception:
                 ancestor_has_required = False
-            if ancestor_has_required:
-                return True
+            # 祖先の class による必須ヒントは即採用しない（コンテキストと併用して厳格化）
+            ancestor_required_hint = bool(ancestor_has_required)
 
             # 3) name属性に明示マーカー
             try:
@@ -2005,6 +2007,7 @@ class ElementScorer:
                 return True
 
             # 4) 近傍テキストのインジケータ（ContextTextExtractor活用）
+            #    祖先クラスのヒントがある場合でも、明示的な『必須』コンテキストが無ければ必須とみなさない
             if await self._detect_required_markers_with_context(element):
                 return True
 
@@ -2045,17 +2048,7 @@ class ElementScorer:
                       };
                       let p = el.parentElement; let depth = 0;
                       while (p && depth < 2) { // 直近の親までに限定（セクション跨ぎの誤検出防止）
-                        if (depth === 0) {
-                          // 兄弟方向にスキャン（直近の親の兄弟のみ）
-                          let sib = p.previousElementSibling; let s = 0;
-                          while (sib && s < 3) {
-                            if (hasMark(sib)) return true;
-                            const spans = sib.querySelectorAll('span,i,em,b,strong');
-                            for (const sp of spans) { if (hasMark(sp)) return true; }
-                            sib = sib.previousElementSibling; s++;
-                          }
-                        }
-                        // 親内の強調要素を走査
+                        // 親内の強調要素のみを走査（兄弟ブロックは走査しない：誤検出抑止）
                         const spans = p.querySelectorAll('span.require, span.required, i, em, b, strong');
                         for (const sp of spans) { if (hasMark(sp)) return true; }
                         p = p.parentElement; depth++;
@@ -2089,6 +2082,8 @@ class ElementScorer:
                 extended_mark = await element.evaluate(
                     """
                     el => {
+                      // フォールバックは誤検出が多いため、非常に限定的に適用：
+                      // 直近の親の直前の兄弟1件のみを確認し、『必須』等の明示があればTrue。
                       const MARKS = ['必須','required','Required','MANDATORY','Mandatory','Must'];
                       const hasReq = (node) => {
                         if (!node) return false;
@@ -2098,17 +2093,10 @@ class ElementScorer:
                           return MARKS.some(m => txt.includes(m));
                         } catch { return false; }
                       };
-                      let p = el.parentElement;
-                      for (let depth = 0; p && depth < 3; depth++) {
-                        let sib = p.previousElementSibling;
-                        let steps = 0;
-                        while (sib && steps < 3) {
-                          if (hasReq(sib)) return true;
-                          sib = sib.previousElementSibling;
-                          steps++;
-                        }
-                        p = p.parentElement;
-                      }
+                      const parent = el.parentElement;
+                      if (!parent) return false;
+                      const sib = parent.previousElementSibling;
+                      if (sib && hasReq(sib)) return true;
                       return false;
                     }
                 """
@@ -2117,6 +2105,10 @@ class ElementScorer:
                 extended_mark = False
             if extended_mark:
                 return True
+
+            # 祖先クラスのヒントのみがあり、明示マーカー（ラベル/コンテキスト）が無い場合は False（安全側）
+            if ancestor_required_hint:
+                return False
 
             return False
 
