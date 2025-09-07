@@ -863,9 +863,12 @@ class FieldMapper:
                         self.context_text_extractor.get_best_context_text(contexts)
                         or ""
                     ).lower()
-                    if not any(
+                    # ラベルに強い語、または属性ヒント（email/mail/@）のいずれかがあれば候補にする
+                    label_ok = any(
                         tok in best_txt for tok in [t.lower() for t in strict_tokens]
-                    ):
+                    )
+                    attr_ok = ("email" in blob or "mail" in blob or "@" in blob)
+                    if not (label_ok or attr_ok):
                         continue
                     # input[type=email] は基本的に候補に含める（上の確認用除外に既に通している）
                     # スコア計算

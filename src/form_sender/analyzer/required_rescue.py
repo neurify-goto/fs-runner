@@ -138,6 +138,7 @@ class RequiredRescue:
                                 addr_tokens = [
                                     "住所", "所在地", "address", "addr", "street", "city",
                                     "都道府県", "prefecture", "郵便", "zip", "postal",
+                                    "県", "市", "区", "丁目", "番地", "-", "ー", "－",
                                 ]
                                 if any(t in blob for t in addr_tokens):
                                     field_name = "住所"
