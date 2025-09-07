@@ -27,7 +27,7 @@ class ElementClassifier:
                 classified['selects'].append(el.locator)
             elif el.tag_name == 'input':
                 if el.element_type in ['', 'text']: classified['text_inputs'].append(el.locator)
-                elif el.element_type == 'email': classified['email_inputs'].append(el.locator)
+                elif el.element_type in ['email', 'mail']: classified['email_inputs'].append(el.locator)
                 elif el.element_type == 'tel': classified['tel_inputs'].append(el.locator)
                 elif el.element_type == 'number': classified['number_inputs'].append(el.locator)
                 elif el.element_type == 'url': classified['url_inputs'].append(el.locator)
