@@ -826,8 +826,8 @@ class FieldMapper:
         }
 
         candidates = []
-        # 優先: email_inputs、その後 text_inputs
-        for bucket in ["email_inputs", "text_inputs"]:
+        # 優先: email_inputs、その後 text_inputs/other_inputs（type="mail" 等の独自型を含む）
+        for bucket in ["email_inputs", "text_inputs", "other_inputs"]:
             for el in classified_elements.get(bucket, []) or []:
                 if id(el) in used_elements:
                     continue
@@ -1314,7 +1314,7 @@ class FieldMapper:
             "E-mail",
             "Eメール",
         ]
-        if tag == "input" and typ in ["", "text"]:
+        if tag == "input" and typ in ["", "text", "mail"]:
             if any(tok in ctx_text for tok in email_tokens) or any(
                 tok in name_id_cls for tok in ["email", "mail"]
             ):

@@ -123,8 +123,24 @@ class RequiredRescue:
                     try:
                         if field_name.startswith("auto_required_text_"):
                             ctx_texts = " ".join([(getattr(c, "text", "") or "") for c in (contexts or [])])
+                            # カナ救済
                             if any(t in ctx_texts for t in ["ふりがな", "フリガナ", "カナ", "かな"]):
                                 field_name = "統合氏名カナ"
+                            else:
+                                # 住所救済（placeholder/属性もヒントに）
+                                blob = " ".join([
+                                    (ei.get("name", "") or ""),
+                                    (ei.get("id", "") or ""),
+                                    (ei.get("class", "") or ""),
+                                    (ei.get("placeholder", "") or ""),
+                                    ctx_texts,
+                                ]).lower()
+                                addr_tokens = [
+                                    "住所", "所在地", "address", "addr", "street", "city",
+                                    "都道府県", "prefecture", "郵便", "zip", "postal",
+                                ]
+                                if any(t in blob for t in addr_tokens):
+                                    field_name = "住所"
                             else:
                                 if self._is_confirmation_field(ei, contexts) or any(
                                     t
