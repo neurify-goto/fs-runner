@@ -317,6 +317,18 @@ class IsolatedFormWorker:
                 if "bot" in error_message.lower() or "recaptcha" in error_message.lower():
                     result["bot_protection_detected"] = True
 
+                # 分類補助用の軽量コンテキストを付与
+                try:
+                    classify_ctx = {
+                        "stage": "company_processing",
+                        "is_timeout": bool(error_context.get("is_timeout")),
+                        "is_bot_detected": bool(error_context.get("is_bot_detected")),
+                        "primary_error_type": error_type,
+                    }
+                    result["additional_data"] = {"classify_context": classify_ctx}
+                except Exception:
+                    pass
+
                 # 復旧可能かチェック
                 if ErrorClassifier.is_recoverable_error(error_type, error_message):
                     if self.recovery_manager.can_attempt_recovery():
@@ -1464,8 +1476,49 @@ class IsolatedFormWorker:
                     "error_type": error_type,
                     "error_message": error_message,
                 }
-                # 追加: 追加入力/リトライのメタがあれば伝搬
-                if submit_result.get('additional_data'):
+                # Bot保護検出を伝搬
+                try:
+                    result_dict["bot_protection_detected"] = bool(submit_result.get("bot_protection_detected", False))
+                except Exception:
+                    pass
+
+                # 分類補助用の詳細コンテキストを付与
+                try:
+                    details = details or {}
+                    resp = details.get('response_analysis') or {}
+                    http_status = None
+                    # 優先: エラーレスポンス先頭のステータス
+                    try:
+                        errs = resp.get('error_responses') or []
+                        if errs and isinstance(errs, list):
+                            st = errs[0].get('status')
+                            if isinstance(st, int):
+                                http_status = st
+                    except Exception:
+                        http_status = None
+
+                    classify_ctx = {
+                        "stage": judgment.get('stage') if isinstance(judgment, dict) else None,
+                        "has_url_change": bool(has_url_change),
+                        "primary_error_type": primary_error,
+                        "has_error_responses": bool(resp.get('has_error_responses')) if isinstance(resp, dict) else None,
+                        "has_redirects": bool(resp.get('has_redirects')) if isinstance(resp, dict) else None,
+                        "http_status": http_status,
+                        # ページ本文は短いスニペットのみ（ログには出さない想定）
+                        "page_content_snippet": (page_content[:600] if isinstance(page_content, str) else ""),
+                    }
+
+                    # 既存 additional_data（例: retry メタ）とマージ
+                    add = submit_result.get('additional_data') if isinstance(submit_result, dict) else None
+                    if not isinstance(add, dict):
+                        add = {}
+                    add['classify_context'] = classify_ctx
+                    result_dict['additional_data'] = add
+                except Exception:
+                    pass
+
+                # 追加: 追加入力/リトライのメタがあれば（未設定時のみ）伝搬
+                if 'additional_data' not in result_dict and submit_result.get('additional_data'):
                     result_dict['additional_data'] = submit_result['additional_data']
                 return result_dict
         except Exception as e:

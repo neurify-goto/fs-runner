@@ -30,6 +30,7 @@ import time as _time
 
 from form_sender.worker.isolated_worker import IsolatedFormWorker
 from form_sender.security.log_sanitizer import setup_sanitized_logging
+from form_sender.utils.error_classifier import ErrorClassifier
 
 # 既存のクライアントデータローダーを再利用
 from form_sender_worker import _load_client_data_simple  # type: ignore
@@ -201,13 +202,21 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         logger.error(f"fetch company error ({company_id}): {e}")
         # mark failed quickly
         try:
+            # 代表コードで詳細分類を付与
+            classify_detail = {
+                'code': 'NOT_FOUND',
+                'category': 'HTTP',
+                'retryable': False,
+                'cooldown_seconds': 0,
+                'confidence': 1.0,
+            }
             supabase.rpc('mark_done', {
                 'p_target_date': str(target_date),
                 'p_targeting_id': targeting_id,
                 'p_company_id': company_id,
                 'p_success': False,
                 'p_error_type': 'NOT_FOUND',
-                'p_classify_detail': None,
+                'p_classify_detail': classify_detail,
                 'p_bot_protection': False,
                 'p_submitted_at': jst_now().isoformat()
             }).execute()
@@ -218,13 +227,20 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     # 3) process via worker
     if not company.get('form_url'):
         # 送信対象外を即確定
+        classify_detail = {
+            'code': 'NO_FORM_URL',
+            'category': 'CONFIG',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': 1.0,
+        }
         supabase.rpc('mark_done', {
             'p_target_date': str(target_date),
             'p_targeting_id': targeting_id,
             'p_company_id': company_id,
             'p_success': False,
             'p_error_type': 'NO_FORM_URL',
-            'p_classify_detail': None,
+            'p_classify_detail': classify_detail,
             'p_bot_protection': False,
             'p_submitted_at': jst_now().isoformat()
         }).execute()
@@ -246,7 +262,8 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         result = {
             'status': 'failed',
             'error_type': 'WORKER_ERROR',
-            'bot_protection_detected': False
+            'bot_protection_detected': False,
+            'error_message': str(e),
         }
 
     # WorkerResult dataclass → dict 互換
@@ -259,6 +276,43 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     error_type = getattr(result, 'error_type', None) if not is_success else None
     bp = getattr(result, 'bot_protection_detected', False)
 
+    # 失敗時は詳細分類を生成（HTTP/WAF/検証 等）
+    classify_detail = None
+    if not is_success:
+        try:
+            # WorkerResult/dataclass 互換: error_message/追加文脈の取得
+            err_msg = None
+            add_data = None
+            if hasattr(result, 'error_message'):
+                err_msg = getattr(result, 'error_message')
+                add_data = getattr(result, 'additional_data', None)
+            elif isinstance(result, dict):
+                err_msg = result.get('error_message')
+                add_data = result.get('additional_data')
+
+            http_status = None
+            page_content = ''
+            if isinstance(add_data, dict):
+                ctx = add_data.get('classify_context') or {}
+                http_status = ctx.get('http_status') if isinstance(ctx, dict) else None
+                # page_content はログ非出力ポリシーのため最小限のみ参照
+                page_content = ctx.get('page_content_snippet', '') if isinstance(ctx, dict) else ''
+            # ErrorClassifier で詳細分類を実行
+            classify_detail = ErrorClassifier.classify_detail(
+                error_message=err_msg or '',
+                page_content=page_content or '',
+                http_status=http_status,
+                context={'error_type_hint': error_type} if error_type else None,
+            )
+            # Bot/WAF 判定の補強
+            if classify_detail and isinstance(classify_detail, dict):
+                code = classify_detail.get('code')
+                if code in {'BOT_DETECTED', 'WAF_CHALLENGE'}:
+                    bp = True or bool(bp)
+        except Exception:
+            # 分類失敗は重大ではないため握り潰す
+            classify_detail = None
+
     # 4) finalize via RPC（固定 company_id の場合も submissions 記録目的で呼ぶ。send_queue更新は0件でも問題なし）
     try:
         supabase.rpc('mark_done', {
@@ -267,7 +321,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_company_id': company_id,
             'p_success': bool(is_success),
             'p_error_type': error_type,
-            'p_classify_detail': None,
+            'p_classify_detail': classify_detail,
             'p_bot_protection': bool(bp),
             'p_submitted_at': jst_now().isoformat()
         }).execute()
