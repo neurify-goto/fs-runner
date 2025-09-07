@@ -1420,17 +1420,24 @@ class FieldMapper:
         ]
         has_kana = any(t in name_id_cls for t in kana_tokens) or ("フリガナ" in ctx_text)
         has_hira = any(t in name_id_cls for t in hira_tokens) or ("ひらがな" in ctx_text)
-        is_last = any(t in name_id_cls for t in last_tokens) or any(
-            t in ctx_text for t in ["姓", "せい", "苗字"]
-        )
+        # 属性(first/last)の手掛かりを最優先に用い、文脈は補助として利用
+        attr_last = any(t in name_id_cls for t in last_tokens)
+        attr_first = any(t in name_id_cls for t in first_tokens)
+        ctx_last = any(t in ctx_text for t in ["姓", "せい", "苗字"])
+        ctx_first = any(t in ctx_text for t in ["名", "めい"])
+
+        # 両方の属性シグナルが無い場合のみ、文脈シグナルを採用（かつ相互排他的に）
+        if not (attr_last or attr_first):
+            is_last = ctx_last and not ctx_first
+            is_first_token_hit = ctx_first and not ctx_last
+        else:
+            is_last = attr_last
+            is_first_token_hit = attr_first
         # 非個人名（会社名/商品名/部署名/建物名…）の文脈では『名』の判定を抑止
         from .element_scorer import ElementScorer
 
         non_personal_ctx = bool(
             ElementScorer.NON_PERSONAL_NAME_PATTERN.search(ctx_text or "")
-        )
-        is_first_token_hit = any(t in name_id_cls for t in first_tokens) or any(
-            t in ctx_text for t in ["名", "めい"]
         )
         is_first = is_first_token_hit and not non_personal_ctx
         has_kanji = ("kanji" in name_id_cls) or ("漢字" in ctx_text)

@@ -1145,6 +1145,14 @@ class FieldMappingAnalyzer:
             # 次の兄弟要素をチェック
             next_sibling = element.next_sibling
             while next_sibling:
+                # <img alt="必須"> に対応
+                try:
+                    if getattr(next_sibling, 'name', '') == 'img':
+                        alt = (next_sibling.get('alt') or '').strip()
+                        if any(m in alt for m in ["必須", "Required", "Mandatory"]):
+                            return True
+                except Exception:
+                    pass
                 if hasattr(next_sibling, "get_text"):
                     text = next_sibling.get_text().strip()
                     # ラベル近傍では『※』が必須記号として使われることが多い。
@@ -1157,11 +1165,19 @@ class FieldMappingAnalyzer:
 
             # 親要素内の他の子要素もチェック
             if element.parent:
-                for sibling in element.parent.find_all(["span", "label", "div"]):
+                for sibling in element.parent.find_all(["span", "label", "div", "img"]):
                     if sibling != element:
-                        text = sibling.get_text().strip()
-                        if (any(marker in text for marker in ["必須", "Required", "Mandatory"]) or "※" in text) and len(text) <= 10:
-                            return True
+                        if getattr(sibling, 'name', '') == 'img':
+                            try:
+                                alt = (sibling.get('alt') or '').strip()
+                                if any(m in alt for m in ["必須", "Required", "Mandatory"]):
+                                    return True
+                            except Exception:
+                                pass
+                        else:
+                            text = sibling.get_text().strip()
+                            if (any(marker in text for marker in ["必須", "Required", "Mandatory"]) or "※" in text) and len(text) <= 10:
+                                return True
 
             # テーブルレイアウト対応: td内のinputに対して直前のthを確認
             try:
@@ -1176,6 +1192,14 @@ class FieldMappingAnalyzer:
                         th_text = prev.get_text().strip()
                         if any(marker in th_text for marker in ["必須", "Required", "Mandatory", "＊", "*", "※"]):
                             return True
+                        # th 内の画像 alt でも必須を検出
+                        try:
+                            for img in prev.find_all("img"):
+                                alt = (img.get('alt') or '').strip()
+                                if any(m in alt for m in ["必須", "Required", "Mandatory"]):
+                                    return True
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
