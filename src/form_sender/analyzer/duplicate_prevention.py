@@ -6,7 +6,7 @@
 """
 
 import logging
-from typing import Dict, List, Any, Optional, Set, Tuple
+from typing import Dict, List, Any, Set, Tuple
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)

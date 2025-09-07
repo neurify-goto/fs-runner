@@ -29,7 +29,7 @@ class AnalysisValidator:
             value = assignment.get('value', '')
             element_info = field_mapping.get(field_name, {})
             score = element_info.get('score', 0)
-            if not self.duplicate_prevention.register_field_assignment(field_name, value or f"_EMPTY_", score, element_info):
+            if not self.duplicate_prevention.register_field_assignment(field_name, value or "_EMPTY_", score, element_info):
                 validation_issues.append(f"Duplicate value rejected: {field_name}")
 
         is_valid, system_issues = self.duplicate_prevention.validate_assignments()

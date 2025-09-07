@@ -591,16 +591,7 @@ class UnmappedElementHandler:
                     continue
                 selector = await self._generate_playwright_selector(el)
                 field_name = f"auto_required_text_{idx}"
-                # 電話番号の分割欄（tel2/tel3）にはクライアントの該当パーツを投入（汎用・安全）
-                def _phone_part_value(name_id_cls: str) -> str:
-                    try:
-                        client = {}
-                        # client_data は handle_unmapped_elements から渡っていないため、ここでは空のまま
-                        # 本関数の既存仕様では default_value による単純入力のみを行う
-                        # ただし、後段の InputValueAssigner で上書きされうるため、ここではプレースホルダのまま
-                        return ''
-                    except Exception:
-                        return ''
+                # （不要なスタブ関数を削除：後段の割当/assigner で処理されるためここでは未使用）
                 # ここでは、電話番号2/3のケースは後段の split_phone 処理が入らない環境でも
                 # 空白ではなく空文字にしてバリデーション衝突を避ける（全角空白より安全）
                 auto_value = '　'

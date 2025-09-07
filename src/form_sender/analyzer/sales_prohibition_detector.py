@@ -5,11 +5,8 @@
 フォーム要素の境界制限を受けない独立したモジュール
 """
 
-import asyncio
 import logging
-import re
-from typing import Dict, List, Any, Optional
-from playwright.async_api import Page, Locator
+from typing import Dict, List, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)

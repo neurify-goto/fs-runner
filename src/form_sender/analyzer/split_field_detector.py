@@ -6,7 +6,7 @@
 """
 
 import logging
-from typing import Dict, List, Any, Optional, Tuple, Set
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -242,7 +242,7 @@ class SplitFieldDetector:
     
     def _identify_field_type(self, field_name: str, field_mapping: Dict[str, Any]) -> Optional[str]:
         """フィールドタイプを識別"""
-        field_name_lower = field_name.lower()
+        # field_name_lower は未使用のため削除（ロジックには影響なし）
 
         # 1) まずは明確に分かっている正規化済みのフィールド名で判定（最優先）
         #    - 姓/名（日本語）または last_name/first_name（英語）だけを『name』タイプとして扱う
@@ -392,7 +392,7 @@ class SplitFieldDetector:
             # 位置順にソート
             positions.sort(key=lambda x: x[0])
             sorted_fields = [pos[1] for pos in positions]
-            sorted_boxes = [pos[2] for pos in positions]
+            # sorted_boxes は現行ロジックでは未使用（隣接検証は参考のため無効化済み）
             
             # 2.（任意）物理／DOM 隣接は参考評価に留める（本要件では必須条件ではない）
             # adjacency_valid = self._validate_field_adjacency(sorted_fields, sorted_boxes, field_type)

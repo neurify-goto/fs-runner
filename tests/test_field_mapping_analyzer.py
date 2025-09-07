@@ -1824,9 +1824,9 @@ class FieldMappingAnalyzer:
 # 環境変数 `FM_TEST_TIMEOUT_SECONDS` で上書き可能（例: 300）
 import os as _os
 try:
-    DEFAULT_TEST_TIMEOUT_SECONDS = int(_os.getenv("FM_TEST_TIMEOUT_SECONDS", "240"))
+    DEFAULT_TEST_TIMEOUT_SECONDS = int(_os.getenv("FM_TEST_TIMEOUT_SECONDS", "60"))
 except Exception:
-    DEFAULT_TEST_TIMEOUT_SECONDS = 240
+    DEFAULT_TEST_TIMEOUT_SECONDS = 60
 
 
 async def main():

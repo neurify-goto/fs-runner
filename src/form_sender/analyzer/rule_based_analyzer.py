@@ -369,176 +369,19 @@ class RuleBasedAnalyzer:
             return {"success": False, "error": str(e)}
 
     def _prune_suspect_name_mappings(self) -> None:
+        from .name_postprocess import prune_suspect_name_mappings
+
         try:
-            if "統合氏名" not in self.field_mapping:
-                return
-            # 文脈上、個人名ではない可能性が高い語を追加（汎用）
-            negative_ctx_tokens = [
-                "住所",
-                "マンション名",
-                "建物名",
-                "ふりがな",
-                "フリガナ",
-                "カナ",
-                "かな",
-                "ひらがな",
-                "郵便",
-                "郵便番号",
-                "商品名",
-                "部署",
-                "部署名",
-            ]
-            negative_attr_tokens = ["kana", "furigana", "katakana", "hiragana"]
-            for k in ["姓", "名"]:
-                info = self.field_mapping.get(k)
-                if not info:
-                    continue
-                ctx = (info.get("best_context_text") or "").lower()
-                blob = " ".join(
-                    [
-                        str(info.get("name", "")).lower(),
-                        str(info.get("id", "")).lower(),
-                        str(info.get("class", "")).lower(),
-                        str(info.get("placeholder", "")).lower(),
-                    ]
-                )
-                if any(t.lower() in ctx for t in negative_ctx_tokens) or any(
-                    t in blob for t in negative_attr_tokens
-                ):
-                    self.field_mapping.pop(k, None)
-            # さらに安全弁: 『統合氏名』が確定しているのに、姓/名のスコアが低い場合は除去
-            try:
-                per_field = (
-                    self.mapper.settings.get("min_score_threshold_per_field", {}) or {}
-                )
-                min_name_score = int(per_field.get("名", 85))
-                min_last_score = int(per_field.get("姓", 85))
-            except Exception:
-                min_name_score = 85
-                min_last_score = 85
-            for k, th in [("姓", min_last_score), ("名", min_name_score)]:
-                info = self.field_mapping.get(k)
-                if info and int(info.get("score", 0)) < th:
-                    self.field_mapping.pop(k, None)
+            prune_suspect_name_mappings(self.field_mapping, self.mapper.settings)
         except Exception:
             pass
 
     async def _normalize_kana_hiragana_fields(self) -> None:
-        """『姓/名カナ』と『姓/名ひらがな』のマッピングを要素属性に基づいて正規化する。
+        from .name_postprocess import normalize_kana_hiragana_fields
 
-        目的:
-        - ふりがな/ひらがな欄が『姓カナ/名カナ』に誤って割り当てられるのを汎用的に修正
-        - 逆にカタカナ欄が『ひらがな』に割り当てられた場合も修正
-        - 分割ひらがなが揃っている場合は『統合氏名カナ』を抑制
-        """
-
-        def _is_hiragana_like(info: dict) -> bool:
-            blob = " ".join(
-                [
-                    str(info.get("name", "")),
-                    str(info.get("id", "")),
-                    str(info.get("class", "")),
-                    str(info.get("placeholder", "")),
-                ]
-            )
-            return any(k in blob for k in ["ひらがな", "ふりがな"]) and not any(
-                k in blob for k in ["カナ", "カタカナ", "フリガナ"]
-            )
-
-        def _is_katakana_like(info: dict) -> bool:
-            blob = " ".join(
-                [
-                    str(info.get("name", "")),
-                    str(info.get("id", "")),
-                    str(info.get("class", "")),
-                    str(info.get("placeholder", "")),
-                ]
-            )
-            return any(k in blob for k in ["カナ", "カタカナ", "フリガナ"])
-
-        for kana_field, hira_field in [
-            ("姓カナ", "姓ひらがな"),
-            ("名カナ", "名ひらがな"),
-        ]:
-            kinfo = self.field_mapping.get(kana_field)
-            hinfo = self.field_mapping.get(hira_field)
-            # 『姓カナ/名カナ』があるが、実体がひらがな欄 → リネーム
-            if kinfo and _is_hiragana_like(kinfo) and not hinfo:
-                self.field_mapping[hira_field] = kinfo
-                self.field_mapping.pop(kana_field, None)
-            # 『姓ひらがな/名ひらがな』があるが、実体がカタカナ欄 → リネーム
-            if hinfo and _is_katakana_like(hinfo) and not kinfo:
-                self.field_mapping[kana_field] = hinfo
-                self.field_mapping.pop(hira_field, None)
-
-        # 統合カナの降格: 分割ひらがなが揃っていれば統合カナは不要
-        if ("姓ひらがな" in self.field_mapping) and (
-            "名ひらがな" in self.field_mapping
-        ):
-            if "統合氏名カナ" in self.field_mapping:
-                self.field_mapping.pop("統合氏名カナ", None)
-
-        # 統合カナがひらがな欄に割り当てられている場合でも、
-        # 単一の『ふりがな/ひらがな』入力しか存在しないフォームでは統合のまま維持する。
-        # （任意の一方へ強制的に割り当てると、今回のように『名ひらがな』扱いになり不整合が起きるため）
-        # 2つの分割（姓/名）ひらがなが検出できた場合のみ、既存の分割正規化ロジックに委ねる。
-        uinfo = self.field_mapping.get("統合氏名カナ")
-        if uinfo and _is_hiragana_like(uinfo):
-            try:
-                # すでに分割が揃っている場合は統合を降格（上の統合カナの降格ブロックが担当）
-                has_split_hira = ("姓ひらがな" in self.field_mapping) and (
-                    "名ひらがな" in self.field_mapping
-                )
-                if has_split_hira:
-                    pass  # 何もしない（既存ロジックに委譲）
-                else:
-                    # 分割が揃っていない場合は統合のまま維持（降格しない）
-                    # → 以前は名ひらがなへ補正していたが、単一欄のケースで不適切だったため抑止
-                    pass
-            except Exception:
-                pass
-
-        # 欠落補完: ひらがな分割欄が存在するのにマッピング漏れしている場合、DOMから直接補完
-        try:
-            if self.form_structure and getattr(self.form_structure, "elements", None):
-                used_selectors = {
-                    (v or {}).get("selector", "")
-                    for v in self.field_mapping.values()
-                    if isinstance(v, dict)
-                }
-                for need, token in [("姓ひらがな", "姓"), ("名ひらがな", "名")]:
-                    if need in self.field_mapping:
-                        continue
-                    for fe in self.form_structure.elements:
-                        try:
-                            if (fe.tag_name or "").lower() != "input":
-                                continue
-                            if (fe.element_type or "").lower() not in ("text", ""):
-                                continue
-                            if not fe.is_visible:
-                                continue
-                            blob = " ".join(
-                                [
-                                    (fe.name or ""),
-                                    (fe.id or ""),
-                                    (fe.class_name or ""),
-                                    (fe.placeholder or ""),
-                                    (fe.label_text or ""),
-                                    (fe.associated_text or ""),
-                                ]
-                            )
-                            if ("ふりがな" in blob or "ひらがな" in blob) and (
-                                token in blob
-                            ):
-                                info = await self._get_element_details(fe.locator)
-                                if info.get("selector", "") not in used_selectors:
-                                    self.field_mapping[need] = info
-                                    used_selectors.add(info.get("selector", ""))
-                                    break
-                        except Exception:
-                            continue
-        except Exception:
-            pass
+        await normalize_kana_hiragana_fields(
+            self.field_mapping, self.form_structure, self._get_element_details
+        )
 
     async def _prepare_context_extraction(self):
         if getattr(self.form_structure, "form_bounds", None):
@@ -546,45 +389,12 @@ class RuleBasedAnalyzer:
             await self.context_text_extractor.build_form_context_index()
 
     def _fix_name_mapping_mismatch(self) -> None:
-        """姓/名（およびカナ）の selector が first/last で取り違えられている場合に field_mapping を是正。
+        from .name_postprocess import fix_name_mapping_mismatch
 
-        - 入力値側の補正だけでなく、マッピング自体も整合させることで後段処理の一貫性を担保する。
-        - 厳格な条件（相互に first/last を含む）に限定して実施。
-        """
-        def blob(key: str) -> str:
-            info = (self.field_mapping.get(key, {}) or {})
-            return " ".join(
-                [
-                    str(info.get("selector", "")),
-                    str(info.get("name", "")),
-                    str(info.get("id", "")),
-                    str(info.get("class", "")),
-                ]
-            ).lower()
-
-        def swap(a: str, b: str) -> None:
-            if (a in self.field_mapping) and (b in self.field_mapping):
-                self.field_mapping[a], self.field_mapping[b] = (
-                    self.field_mapping[b],
-                    self.field_mapping[a],
-                )
-                logger.info(f"Swapped field_mapping entries: {a} <-> {b}")
-
-        def mismatch(sei_blob: str, mei_blob: str) -> bool:
-            if not sei_blob or not mei_blob:
-                return False
-            return ("first" in sei_blob and "last" in mei_blob) or (
-                "mei" in sei_blob and "sei" in mei_blob
-            )
-
-        # 1) 漢字 姓/名
-        if mismatch(blob("姓"), blob("名")):
-            swap("姓", "名")
-        # 2) カナ 姓/名
-        if mismatch(blob("姓カナ"), blob("名カナ")) and (
-            "kana" in blob("姓カナ") and "kana" in blob("名カナ")
-        ):
-            swap("姓カナ", "名カナ")
+        try:
+            fix_name_mapping_mismatch(self.field_mapping)
+        except Exception:
+            pass
 
     def _detect_split_field_patterns(self, field_mapping: Dict[str, Any]):
         field_mappings_list = [
@@ -818,56 +628,9 @@ class RuleBasedAnalyzer:
         }
 
     async def _generate_playwright_selector(self, element: Locator) -> str:
-        """Playwright用の安定したCSSセレクタを生成
+        from .selector_utils import generate_stable_selector
 
-        重要: CSSの `[type="text"]` は属性が存在する場合のみ一致する。
-        `el.type` は属性がなくても "text" を返すため、誤セレクタとなる。
-        そのため、type属性は「属性が存在する場合にのみ」付与する。
-
-        優先順位:
-        - idがあれば `[id="..."]`（CSSの #id は先頭数字/特殊文字で無効になりうるため）
-        - nameがあれば `tag[name="..."]` (+ `[type="..."]` は属性存在時のみ)
-        - nameが無ければ、inputの場合でも `[type]` は使わずタグのみ（属性がある場合のみ `[type]`）
-        """
-        try:
-            info = await element.evaluate(
-                """
-                el => ({
-                  id: el.getAttribute('id') || '',
-                  name: el.getAttribute('name') || '',
-                  tagName: (el.tagName || '').toLowerCase(),
-                  // 属性としてのtype（存在しない場合は空文字）
-                  typeAttr: el.getAttribute('type') || ''
-                })
-                """
-            )
-            # ID優先（CSSのattribute selectorを使用してエスケープ不要にする）
-            el_id = info.get("id")
-            if el_id:
-                # 引用符とバックスラッシュを最小限エスケープ
-                esc = str(el_id).replace("\\", r"\\").replace('"', r"\"")
-                return f'[id="{esc}"]'
-
-            name = info.get("name")
-            tag = info.get("tagName", "input")
-            type_attr = info.get("typeAttr") if tag == "input" else ""
-
-            if name:
-                # name属性は attribute selector で安全に指定
-                esc_name = str(name).replace("\\", r"\\").replace('"', r"\"")
-                selector = f'{tag}[name="{esc_name}"]'
-                if type_attr:
-                    esc_type = str(type_attr).replace("\\", r"\\").replace('"', r"\"")
-                    selector += f'[type="{esc_type}"]'
-                return selector
-
-            # nameが無い場合：type属性があるinputのみ[type]を付与
-            if tag == "input" and type_attr:
-                esc_type2 = str(type_attr).replace("\\", r"\\").replace('"', r"\"")
-                return f'{tag}[type="{esc_type2}"]'
-            return tag
-        except Exception:
-            return "input"
+        return await generate_stable_selector(element)
 
     def _determine_input_type(self, element_info: Dict[str, Any]) -> str:
         tag_name = element_info.get("tag_name", "").lower()
