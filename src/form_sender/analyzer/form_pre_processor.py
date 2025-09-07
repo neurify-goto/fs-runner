@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Dict, List, Any
 
 from playwright.async_api import Page
@@ -23,26 +24,24 @@ class FormPreProcessor:
         self.FIRST_NAME_TOKENS = ['firstname', 'first_name', 'first-name', 'first', 'given-name', 'given_name', 'forename', 'mei', '名']
         # カナ/ふりがな/ひらがな等の指標（含む要素は分割姓名検出から除外）
         self.KANA_HIRA_INDICATORS = ['kana', 'katakana', 'furigana', 'フリガナ', 'カタカナ', 'ひらがな', 'hiragana']
+        # 事前コンパイル（ホットパス最適化）
+        self._kana_hira_boundary_re = re.compile(r'(^|[_\-])(kana|furigana|hiragana)($|[_\-])', re.IGNORECASE)
+        self._katakana_boundary_re = re.compile(r'(^|[_\-])katakana($|[_\-])', re.IGNORECASE)
+        
+        # 推定グリッドの係数（マジックナンバー排除）
+        self.ESTIMATED_ROW_HEIGHT = 50
+        self.ESTIMATED_CELL_WIDTH = 100
         
     def _contains_kana_hira_indicator(self, blob: str) -> bool:
-        """カナ/ふりがな指標の厳密判定（語境界/区切り対応）。
-
-        - 英字トークン 'kana'/'furigana'/'hiragana' は、先頭/末尾または '_' '-' 区切りでのみ一致。
-        - 'katakana' は独立トークンとして判定（'_katakana', 'katakana_', '-katakana' 等）。
-        - 日本語は単純包含で十分に固有（'フリガナ','カタカナ','ひらがな'）。
-        - 例: 'kanata' はマッチしない（誤検出防止）。
-        """
-        import re
-        s = blob or ''
-        s = s.lower()
-        # 英字トークン（区切り一致）
-        if re.search(r'(^|[_\-])(kana|furigana|hiragana)($|[_\-])', s):
+        """カナ/ふりがな指標の厳密判定（語境界/区切り対応・事前コンパイル済み）。"""
+        s = (blob or '')
+        sl = s.lower()
+        if self._kana_hira_boundary_re.search(sl):
             return True
-        if re.search(r'(^|[_\-])katakana($|[_\-])', s):
+        if self._katakana_boundary_re.search(sl):
             return True
-        # 日本語トークン（固有語として包含で判断）
         for jp in ['フリガナ', 'カタカナ', 'ひらがな']:
-            if jp in blob:
+            if jp in s:
                 return True
         return False
 

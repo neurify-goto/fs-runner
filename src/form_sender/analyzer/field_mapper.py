@@ -740,7 +740,11 @@ class FieldMapper:
                 ei = {}
             # name/id/class の属性に本文系語が含まれるか（誤検出抑止の補助）
             blob = " ".join(
-                [(ei.get("name") or ""), (ei.get("id") or ""), (ei.get("class") or "")]
+                [
+                    str(ei.get("name") or ""),
+                    str(ei.get("id") or ""),
+                    str(ei.get("class") or ""),
+                ]
             ).lower()
             attr_hint = any(
                 k in blob

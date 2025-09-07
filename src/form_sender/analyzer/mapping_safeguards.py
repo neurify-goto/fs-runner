@@ -72,10 +72,10 @@ def _attrs_blob(ei: Dict[str, Any]) -> str:
     try:
         return " ".join(
             [
-                (ei.get("name") or ""),
-                (ei.get("id") or ""),
-                (ei.get("class") or ""),
-                (ei.get("placeholder") or ""),
+                str(ei.get("name") or ""),
+                str(ei.get("id") or ""),
+                str(ei.get("class") or ""),
+                str(ei.get("placeholder") or ""),
             ]
         ).lower()
     except Exception:
