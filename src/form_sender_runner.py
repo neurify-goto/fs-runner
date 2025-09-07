@@ -27,6 +27,7 @@ from typing import Optional, Dict, Any, List
 from supabase import create_client
 import random
 import time as _time
+import hashlib
 
 from form_sender.worker.isolated_worker import IsolatedFormWorker
 from form_sender.security.log_sanitizer import setup_sanitized_logging
@@ -85,6 +86,8 @@ def _extract_max_daily_sends(client_data: Dict[str, Any]) -> Optional[int]:
 _SUCC_CACHE: Dict[str, Any] = {}
 # 失敗分類の軽量キャッシュ（同一メッセージの連続多発時の負荷抑制）
 _CLASSIFY_CACHE: Dict[str, Any] = {}
+CLASSIFY_CACHE_MAX_SIZE = 256
+CLASSIFY_CACHE_TTL_SEC = 600  # 10分で自然失効
 
 def _get_success_count_today_jst(supabase, targeting_id: int, target_date: date) -> int:
     """当日(JST)成功数をUTC境界で集計"""
@@ -300,14 +303,15 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 # page_content はログ非出力ポリシーのため最小限のみ参照
                 page_content = ctx.get('page_content_snippet', '') if isinstance(ctx, dict) else ''
             # ErrorClassifier で詳細分類を実行（軽量キャッシュ使用）
-            cache_key = (
-                (err_msg or '')[:160],
-                http_status,
-                error_type or '',
-                (page_content or '')[:160],
-            )
-            if cache_key in _CLASSIFY_CACHE:
-                classify_detail = _CLASSIFY_CACHE[cache_key]
+            em = (err_msg or '')[:160]
+            pc = (page_content or '')[:160]
+            raw_key = f"{em}|{http_status}|{error_type or ''}|{pc}"
+            cache_key = hashlib.sha1(raw_key.encode('utf-8', errors='ignore')).hexdigest()
+
+            ent = _CLASSIFY_CACHE.get(cache_key)
+            now_ts = _time.time()
+            if ent and isinstance(ent, dict) and (now_ts - ent.get('ts', 0) <= CLASSIFY_CACHE_TTL_SEC):
+                classify_detail = ent.get('detail')
             else:
                 classify_detail = ErrorClassifier.classify_detail(
                     error_message=err_msg or '',
@@ -315,21 +319,30 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                     http_status=http_status,
                     context={'error_type_hint': error_type} if error_type else None,
                 )
-                # キャッシュサイズを256に抑制
-                if len(_CLASSIFY_CACHE) >= 256:
-                    try:
-                        _CLASSIFY_CACHE.pop(next(iter(_CLASSIFY_CACHE)))
-                    except Exception:
-                        _CLASSIFY_CACHE.clear()
-                _CLASSIFY_CACHE[cache_key] = classify_detail
+                # キャッシュ登録（上限・TTL管理）
+                try:
+                    if len(_CLASSIFY_CACHE) >= CLASSIFY_CACHE_MAX_SIZE:
+                        # 先頭要素（最古）を1件だけ削除
+                        try:
+                            _CLASSIFY_CACHE.pop(next(iter(_CLASSIFY_CACHE)))
+                        except StopIteration:
+                            pass
+                    _CLASSIFY_CACHE[cache_key] = {'detail': classify_detail, 'ts': now_ts}
+                except Exception:
+                    # キャッシュは副次機能なので失敗は無視
+                    pass
             # Bot/WAF 判定の補強
             if classify_detail and isinstance(classify_detail, dict):
                 code = classify_detail.get('code')
                 if code in {'BOT_DETECTED', 'WAF_CHALLENGE'}:
                     bp = True
+        except RuntimeError as _classify_err:
+            # 分類ロジック内の想定エラーはWarning
+            logger.warning(f"detail classification failed: {_classify_err}")
+            classify_detail = None
         except Exception as _classify_err:
-            # 分類失敗は重大ではないため握り潰す
-            logger.debug(f"detail classification failed: {_classify_err}")
+            # 想定外はDebugに降格し継続
+            logger.debug(f"unexpected classification error: {_classify_err}")
             classify_detail = None
 
     # 4) finalize via RPC（固定 company_id の場合も submissions 記録目的で呼ぶ。send_queue更新は0件でも問題なし）

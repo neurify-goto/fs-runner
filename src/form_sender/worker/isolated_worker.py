@@ -102,6 +102,26 @@ class IsolatedFormWorker:
         except Exception:
             self._content_sanitizer = None
 
+    def _determine_http_status(self, response_analysis: Dict[str, Any]) -> Optional[int]:
+        """HTTPステータスを優先順位で決定する: 429 > 403 > 5xx > その他（最後）"""
+        try:
+            errs = response_analysis.get('error_responses') or []
+            if not isinstance(errs, list) or not errs:
+                return None
+            statuses = [e.get('status') for e in errs if isinstance(e, dict) and isinstance(e.get('status'), int)]
+            if not statuses:
+                return None
+            if any(s == 429 for s in statuses):
+                return 429
+            if any(s == 403 for s in statuses):
+                return 403
+            for s in statuses:
+                if 500 <= s < 600:
+                    return s
+            return statuses[-1]
+        except Exception:
+            return None
+
     def _is_page_valid(self) -> bool:
         """ページが有効かどうかを確認する"""
         if not self.page:
@@ -1492,23 +1512,7 @@ class IsolatedFormWorker:
                 try:
                     details = details or {}
                     resp = details.get('response_analysis') or {}
-                    http_status = None
-                    # 優先: エラーレスポンス先頭のステータス
-                    try:
-                        errs = resp.get('error_responses') or []
-                        if isinstance(errs, list) and errs:
-                            # 優先順位: 429 > 403 > 5xx > その他 → 最終（最新）
-                            statuses = [e.get('status') for e in errs if isinstance(e, dict) and isinstance(e.get('status'), int)]
-                            if any(s == 429 for s in statuses):
-                                http_status = 429
-                            elif any(s == 403 for s in statuses):
-                                http_status = 403
-                            elif any(500 <= s < 600 for s in statuses):
-                                http_status = next((s for s in statuses if 500 <= s < 600), statuses[-1])
-                            else:
-                                http_status = statuses[-1]
-                    except Exception:
-                        http_status = None
+                    http_status = self._determine_http_status(resp)
 
                     classify_ctx = {
                         "stage": judgment.get('stage') if isinstance(judgment, dict) else None,
@@ -1519,7 +1523,7 @@ class IsolatedFormWorker:
                         "http_status": http_status,
                         # ページ本文は短いスニペットのみ（DB保存前にサニタイズし、ログには出さない）
                         "page_content_snippet": (
-                            (self._content_sanitizer.sanitize_string(page_content[:600]) if self._content_sanitizer else page_content[:600])
+                            (self._content_sanitizer.sanitize_string(page_content[:600]) if self._content_sanitizer else "")
                             if isinstance(page_content, str) else ""
                         ),
                     }
