@@ -105,9 +105,10 @@ def _prune_classify_cache(now_ts: float) -> None:
     """TTL とサイズに基づいて簡易的にキャッシュを整理。"""
     try:
         max_size, ttl = _get_classify_cache_limits()
-        # TTL 期限切れを最大16件だけ掃除（O(1)に近い軽掃除）
+        # TTL 期限切れを最大16件だけ掃除（イテレータで軽掃除）
+        import itertools
         removed = 0
-        for k in list(_CLASSIFY_CACHE.keys()):
+        for k in itertools.islice(_CLASSIFY_CACHE.keys(), 64):
             ent = _CLASSIFY_CACHE.get(k)
             if not isinstance(ent, dict):
                 _CLASSIFY_CACHE.pop(k, None)
