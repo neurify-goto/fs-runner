@@ -313,6 +313,10 @@ class FieldMapper:
         await self._fallback_map_email_field(
             classified_elements, field_mapping, used_elements
         )
+        # 追加救済: name/id が 'email' の入力を確実に採用（確認欄は除外）
+        await self._salvage_strict_email_by_attr(
+            classified_elements, field_mapping, used_elements
+        )
         await self._fallback_map_postal_field(
             classified_elements, field_mapping, used_elements
         )
@@ -968,6 +972,49 @@ class FieldMapper:
                 field_mapping[target_field] = info
                 used_elements.add(id(el))
                 logger.info(f"Fallback mapped '{target_field}' (score {score})")
+
+    async def _salvage_strict_email_by_attr(
+        self, classified_elements, field_mapping, used_elements
+    ):
+        """厳格属性に基づくメール救済。
+
+        - まだ『メールアドレス』が無い場合
+        - input の name/id が 'email' で、確認欄のシグナル（confirm/check）を含まない
+        """
+        target = "メールアドレス"
+        if target in field_mapping:
+            return
+        buckets = ["email_inputs", "text_inputs", "other_inputs"]
+        for b in buckets:
+            for el in classified_elements.get(b, []) or []:
+                if id(el) in used_elements:
+                    continue
+                try:
+                    ei = await self.element_scorer._get_element_info(el)
+                except Exception:
+                    ei = {}
+                nm = (ei.get("name") or "").lower()
+                ide = (ei.get("id") or "").lower()
+                cls = (ei.get("class") or "").lower()
+                if nm == "email" or ide == "email":
+                    blob = " ".join([nm, ide, cls])
+                    if any(k in blob for k in ["confirm", "確認", "check"]):
+                        continue
+                    info = await self._create_enhanced_element_info(
+                        el, {"element_info": ei, "total_score": 80}, []
+                    )
+                    try:
+                        info["source"] = "salvage_attr"
+                    except Exception:
+                        pass
+                    tmp = self._generate_temp_field_value(target)
+                    if self.duplicate_prevention.register_field_assignment(
+                        target, tmp, 80, info
+                    ):
+                        field_mapping[target] = info
+                        used_elements.add(id(el))
+                        logger.info("Salvaged 'メールアドレス' by strict name/id match = email")
+                        return
 
     async def _fallback_map_fullname_field(
         self, classified_elements, field_mapping, used_elements
