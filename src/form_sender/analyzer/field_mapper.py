@@ -87,6 +87,9 @@ class FieldMapper:
                 pass
 
             target_element_types = self._determine_target_element_types(field_patterns)
+            # メールは一部サイトで type="mail" 等の独自型を用いるため other_inputs も候補に含める
+            if field_name == "メールアドレス" and "other_inputs" not in target_element_types:
+                target_element_types.append("other_inputs")
 
             # 汎用改善: 『お問い合わせ本文』は textarea が存在する場合は textarea のみを候補に限定
             # 背景: 一部フォームで context が強い input[type="text"] が誤って本文に選ばれるケースがあるため、
@@ -1017,7 +1020,7 @@ class FieldMapper:
             if s > best[1]:
                 best = (el, s, details, contexts)
         el, score, details, contexts = best
-        if el and score >= max(65, int(self.settings.get("email_fallback_min_score", 60))):
+        if el and score >= max(55, int(self.settings.get("email_fallback_min_score", 60)) - 5):
             info = await self._create_enhanced_element_info(el, details, contexts)
             try:
                 info["source"] = "fallback"
