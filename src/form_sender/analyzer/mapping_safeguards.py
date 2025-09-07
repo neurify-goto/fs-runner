@@ -76,14 +76,24 @@ def _passes_postal(ei: Dict[str, Any], best_txt: str) -> bool:
 
 
 def _passes_prefecture(ei: Dict[str, Any], best_txt: str) -> bool:
+    """都道府県フィールドの安全ガード。
+
+    ポイント:
+    - 無条件許可はしない。
+    - select であっても、属性/ラベルに都道府県系トークンが無ければ不許可（オプション検証は候補フィルタ側で実施）。
+    - 非select の場合は、属性/コンテキストに強いトークンが必要。
+    """
     tag = (ei.get("tag_name") or "").lower()
     attrs_blob = _attrs_blob(ei)
-    if tag == "select":
-        return True  # 都道府県は select 優遇（元実装準拠）
-    # select でない場合は、強い都道府県語が必要
+
+    # 属性/ラベルに『都道府県』、または 'pref' 'prefecture' が含まれることを要求
+    pos_attr = ("都道府県" in attrs_blob) or ("prefecture" in attrs_blob) or ("pref" in attrs_blob)
     pos_ctx = any(t in best_txt for t in ["都道府県", "prefecture"])
-    pos_attr = "pref" in attrs_blob or "都道府県" in attrs_blob
-    return bool(pos_ctx or pos_attr)
+
+    if tag == "select":
+        return bool(pos_attr or pos_ctx)
+    # 非selectはより厳格（属性または強いラベル）
+    return bool(pos_attr or pos_ctx)
 
 
 def passes_safeguard(
@@ -112,4 +122,3 @@ def passes_safeguard(
         return _passes_prefecture(ei, best_txt)
 
     return True
-

@@ -14,6 +14,27 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
     - 性別×select の誤検出抑止: 男女表現が両方なければ除外
     """
     try:
+        # 都道府県: select の場合は option に都道府県名が一定数含まれることを要求
+        if field_name == "都道府県":
+            tag = (element_info.get("tag_name") or "").lower()
+            if tag == "select":
+                try:
+                    options = await element.evaluate(
+                        "el => Array.from(el.options).map(o => (o.textContent||'').trim())"
+                    )
+                except Exception:
+                    options = []
+                names = (get_prefectures() or {}).get("names", [])
+                hits = 0
+                low_opts = [str(o).lower() for o in options]
+                for n in names or []:
+                    if str(n).lower() in low_opts:
+                        hits += 1
+                        if hits >= 5:
+                            break
+                if hits < 5 and not any("都道府県" in (o or "") for o in options):
+                    return False
+
         if field_name == "住所":
             tag = (element_info.get("tag_name") or "").lower()
             if tag == "select":
@@ -53,4 +74,3 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
         pass
 
     return True
-
