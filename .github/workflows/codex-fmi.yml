@@ -1,0 +1,36 @@
+name: codex-fmi
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [codex-fmi]
+
+jobs:
+  run:
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 240
+    steps:
+      - name: Start Codex in target directory (heartbeat every 3 min)
+        shell: bash
+        working-directory: ${{ secrets.FS_RUNNER_DIR }}
+        timeout-minutes: 180
+        run: |
+          set -euo pipefail
+          # Codexをバックグラウンドで起動（出力は捨てる）
+          codex exec '`~/.codex/prompts/fmi.md`をよく読み込み、その指示に細部まで忠実に従って作業を実行してください。達成条件を完全に満たすまで作業を絶対にやめないこと。' </dev/null >/dev/null 2>&1 &
+          COD_PID=$!
+          START_TS=$(date +%s)
+          trap 'kill -TERM "$COD_PID" 2>/dev/null || true' INT TERM
+          echo "[heartbeat] Codex started (pid=$COD_PID)"
+          # 3分ごとに生存確認
+          while kill -0 "$COD_PID" 2>/dev/null; do
+            sleep 180
+            ELAPSED=$(( $(date +%s) - START_TS ))
+            # 進捗を最小限に表示
+            echo "[heartbeat] Codex running... elapsed=${ELAPSED}s (pid=$COD_PID)"
+          done
+          # 子プロセスの終了コードを反映
+          wait "$COD_PID"
+          EXIT_CODE=$?
+          echo "[heartbeat] Codex finished with exit code ${EXIT_CODE}"
+          exit ${EXIT_CODE}
