@@ -145,7 +145,9 @@
     "backoff_initial": 2,
     "backoff_max": 60,
     "success_count_cache_seconds": 30,
-    "backoff_jitter_ratio": 0.2
+    "backoff_jitter_ratio": 0.2,
+    "classify_cache_max_size": 256,
+    "classify_cache_ttl_sec": 600
   },
   "_comment_form_finder": "Form-Finder用マルチプロセス設定（軽量フォーム探索処理に最適化）",
   "_comment_form_finder_priority": "設定優先順位: form_finder_multi_process専用設定を使用、フォールバックは旧multi_process設定",

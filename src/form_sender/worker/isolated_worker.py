@@ -43,6 +43,7 @@ from ..utils.button_config import (
     get_fallback_selectors,
     get_exclude_keywords,
 )
+from ..security.log_sanitizer import LogSanitizer
 
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,31 @@ class IsolatedFormWorker:
         self.stats = {"processed": 0, "success": 0, "failed": 0, "errors": 0, "start_time": time.time()}
 
         logger.info(f"IsolatedFormWorker {worker_id} initialized")
+        # 文字列サニタイザ（機微情報抑止用）
+        try:
+            self._content_sanitizer = LogSanitizer()
+        except Exception:
+            self._content_sanitizer = None
+
+    def _determine_http_status(self, response_analysis: Dict[str, Any]) -> Optional[int]:
+        """HTTPステータスを優先順位で決定する: 429 > 403 > 5xx > その他（最後）"""
+        try:
+            errs = response_analysis.get('error_responses') or []
+            if not isinstance(errs, list) or not errs:
+                return None
+            statuses = [e.get('status') for e in errs if isinstance(e, dict) and isinstance(e.get('status'), int)]
+            if not statuses:
+                return None
+            if any(s == 429 for s in statuses):
+                return 429
+            if any(s == 403 for s in statuses):
+                return 403
+            for s in statuses:
+                if 500 <= s < 600:
+                    return s
+            return statuses[-1]
+        except Exception:
+            return None
 
     def _is_page_valid(self) -> bool:
         """ページが有効かどうかを確認する"""
@@ -316,6 +342,18 @@ class IsolatedFormWorker:
                 # Bot検知の場合
                 if "bot" in error_message.lower() or "recaptcha" in error_message.lower():
                     result["bot_protection_detected"] = True
+
+                # 分類補助用の軽量コンテキストを付与
+                try:
+                    classify_ctx = {
+                        "stage": "company_processing",
+                        "is_timeout": bool(error_context.get("is_timeout")),
+                        "is_bot_detected": bool(error_context.get("is_bot_detected")),
+                        "primary_error_type": error_type,
+                    }
+                    result["additional_data"] = {"classify_context": classify_ctx}
+                except Exception:
+                    pass
 
                 # 復旧可能かチェック
                 if ErrorClassifier.is_recoverable_error(error_type, error_message):
@@ -1464,9 +1502,42 @@ class IsolatedFormWorker:
                     "error_type": error_type,
                     "error_message": error_message,
                 }
-                # 追加: 追加入力/リトライのメタがあれば伝搬
-                if submit_result.get('additional_data'):
-                    result_dict['additional_data'] = submit_result['additional_data']
+                # Bot保護検出を伝搬
+                try:
+                    result_dict["bot_protection_detected"] = bool(submit_result.get("bot_protection_detected", False))
+                except Exception:
+                    pass
+
+                # 分類補助用の詳細コンテキストを付与
+                try:
+                    details = details or {}
+                    resp = details.get('response_analysis') or {}
+                    http_status = self._determine_http_status(resp)
+
+                    classify_ctx = {
+                        "stage": judgment.get('stage') if isinstance(judgment, dict) else None,
+                        "has_url_change": bool(has_url_change),
+                        "primary_error_type": primary_error,
+                        "has_error_responses": bool(resp.get('has_error_responses')) if isinstance(resp, dict) else None,
+                        "has_redirects": bool(resp.get('has_redirects')) if isinstance(resp, dict) else None,
+                        "http_status": http_status,
+                        # ページ本文は短いスニペットのみ（DB保存前にサニタイズし、ログには出さない）
+                        "page_content_snippet": (
+                            (self._content_sanitizer.sanitize_string(page_content[:600]) if self._content_sanitizer else "")
+                            if isinstance(page_content, str) else ""
+                        ),
+                    }
+
+                    # 既存 additional_data（例: retry メタ）と安全にマージ
+                    add: Dict[str, Any] = {}
+                    if isinstance(submit_result, dict) and isinstance(submit_result.get('additional_data'), dict):
+                        add.update(submit_result['additional_data'])
+                    # classify_context は必ず保持
+                    add['classify_context'] = classify_ctx
+                    result_dict['additional_data'] = add
+                except Exception:
+                    pass
+
                 return result_dict
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Form submission execution error: {e}")

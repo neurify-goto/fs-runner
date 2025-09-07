@@ -27,9 +27,11 @@ from typing import Optional, Dict, Any, List
 from supabase import create_client
 import random
 import time as _time
+import hashlib
 
 from form_sender.worker.isolated_worker import IsolatedFormWorker
 from form_sender.security.log_sanitizer import setup_sanitized_logging
+from form_sender.utils.error_classifier import ErrorClassifier
 
 # 既存のクライアントデータローダーを再利用
 from form_sender_worker import _load_client_data_simple  # type: ignore
@@ -82,6 +84,101 @@ def _extract_max_daily_sends(client_data: Dict[str, Any]) -> Optional[int]:
         return None
 
 _SUCC_CACHE: Dict[str, Any] = {}
+# 失敗分類の軽量キャッシュ（同一メッセージの連続多発時の負荷抑制）
+_CLASSIFY_CACHE: Dict[str, Any] = {}
+CLASSIFY_CACHE_MAX_SIZE = 256
+CLASSIFY_CACHE_TTL_SEC = 600  # 10分で自然失効（設定で上書き可）
+
+
+def _get_classify_cache_limits() -> (int, int):
+    """config/worker_config.json の runner から制限値を取得（無ければデフォルト）。"""
+    try:
+        cfg = get_worker_config().get('runner', {})
+        max_size = int(cfg.get('classify_cache_max_size', CLASSIFY_CACHE_MAX_SIZE))
+        ttl = int(cfg.get('classify_cache_ttl_sec', CLASSIFY_CACHE_TTL_SEC))
+        return max(16, max_size), max(60, ttl)
+    except Exception:
+        return CLASSIFY_CACHE_MAX_SIZE, CLASSIFY_CACHE_TTL_SEC
+
+
+def _prune_classify_cache(now_ts: float) -> None:
+    """TTL とサイズに基づいて簡易的にキャッシュを整理。"""
+    try:
+        max_size, ttl = _get_classify_cache_limits()
+        # TTL 期限切れを最大16件だけ掃除（イテレータで軽掃除）
+        import itertools
+        removed = 0
+        for k in itertools.islice(_CLASSIFY_CACHE.keys(), 64):
+            ent = _CLASSIFY_CACHE.get(k)
+            if not isinstance(ent, dict):
+                _CLASSIFY_CACHE.pop(k, None)
+                removed += 1
+            elif now_ts - ent.get('ts', 0) > ttl:
+                _CLASSIFY_CACHE.pop(k, None)
+                removed += 1
+            if removed >= 16:
+                break
+        # サイズ超過なら古い順に削除
+        while len(_CLASSIFY_CACHE) > max_size:
+            try:
+                _CLASSIFY_CACHE.pop(next(iter(_CLASSIFY_CACHE)))
+            except StopIteration:
+                break
+    except Exception:
+        # キャッシュ管理失敗は無視
+        pass
+
+
+def _classify_failure_detail(err_msg: Optional[str], add_data: Optional[Dict[str, Any]], error_type: Optional[str]) -> (Optional[Dict[str, Any]], Optional[bool]):
+    """失敗詳細を分類し、classify_detail と bot_protection補助フラグを返す。"""
+    try:
+        http_status = None
+        page_content = ''
+        is_bot_ctx = False
+        if isinstance(add_data, dict):
+            ctx = add_data.get('classify_context') or {}
+            if isinstance(ctx, dict):
+                http_status = ctx.get('http_status')
+                page_content = ctx.get('page_content_snippet', '')
+                is_bot_ctx = bool(ctx.get('is_bot_detected'))
+
+        # 軽量キャッシュ
+        em = (err_msg or '')[:160]
+        pc = (page_content or '')[:160]
+        raw_key = f"{em}|{http_status}|{error_type or ''}|{pc}"
+        cache_key = hashlib.sha1(raw_key.encode('utf-8', errors='ignore')).hexdigest()
+
+        now_ts = _time.time()
+        ent = _CLASSIFY_CACHE.get(cache_key)
+        max_size, ttl = _get_classify_cache_limits()
+        if ent and isinstance(ent, dict) and (now_ts - ent.get('ts', 0) <= ttl):
+            detail = ent.get('detail')
+        else:
+            detail = ErrorClassifier.classify_detail(
+                error_message=err_msg or '',
+                page_content=page_content or '',
+                http_status=http_status,
+                context={'error_type_hint': error_type} if error_type else None,
+            )
+            _CLASSIFY_CACHE[cache_key] = {'detail': detail, 'ts': now_ts}
+            _prune_classify_cache(now_ts)
+
+        # bot 補助判定
+        bot_flag = None
+        try:
+            code = detail.get('code') if isinstance(detail, dict) else None
+            if code in {'BOT_DETECTED', 'WAF_CHALLENGE'} or is_bot_ctx:
+                bot_flag = True
+        except Exception:
+            pass
+
+        return detail, bot_flag
+    except RuntimeError as e:
+        logger.warning(f"detail classification failed: {e}")
+        return None, None
+    except Exception as e:
+        logger.debug(f"unexpected classification error: {e}")
+        return None, None
 
 def _get_success_count_today_jst(supabase, targeting_id: int, target_date: date) -> int:
     """当日(JST)成功数をUTC境界で集計"""
@@ -201,13 +298,21 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         logger.error(f"fetch company error ({company_id}): {e}")
         # mark failed quickly
         try:
+            # 代表コードで詳細分類を付与
+            classify_detail = {
+                'code': 'NOT_FOUND',
+                'category': 'HTTP',
+                'retryable': False,
+                'cooldown_seconds': 0,
+                'confidence': 1.0,
+            }
             supabase.rpc('mark_done', {
                 'p_target_date': str(target_date),
                 'p_targeting_id': targeting_id,
                 'p_company_id': company_id,
                 'p_success': False,
                 'p_error_type': 'NOT_FOUND',
-                'p_classify_detail': None,
+                'p_classify_detail': classify_detail,
                 'p_bot_protection': False,
                 'p_submitted_at': jst_now().isoformat()
             }).execute()
@@ -218,13 +323,20 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     # 3) process via worker
     if not company.get('form_url'):
         # 送信対象外を即確定
+        classify_detail = {
+            'code': 'NO_FORM_URL',
+            'category': 'CONFIG',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': 1.0,
+        }
         supabase.rpc('mark_done', {
             'p_target_date': str(target_date),
             'p_targeting_id': targeting_id,
             'p_company_id': company_id,
             'p_success': False,
             'p_error_type': 'NO_FORM_URL',
-            'p_classify_detail': None,
+            'p_classify_detail': classify_detail,
             'p_bot_protection': False,
             'p_submitted_at': jst_now().isoformat()
         }).execute()
@@ -246,7 +358,8 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         result = {
             'status': 'failed',
             'error_type': 'WORKER_ERROR',
-            'bot_protection_detected': False
+            'bot_protection_detected': False,
+            'error_message': str(e),
         }
 
     # WorkerResult dataclass → dict 互換
@@ -259,6 +372,16 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     error_type = getattr(result, 'error_type', None) if not is_success else None
     bp = getattr(result, 'bot_protection_detected', False)
 
+    # 失敗時は詳細分類を生成（HTTP/WAF/検証 等）
+    classify_detail = None
+    if not is_success:
+        # WorkerResult/dataclass 互換: error_message/追加文脈の取得
+        err_msg = getattr(result, 'error_message', None) if not isinstance(result, dict) else result.get('error_message')
+        add_data = getattr(result, 'additional_data', None) if not isinstance(result, dict) else result.get('additional_data')
+        classify_detail, bot_flag = _classify_failure_detail(err_msg, add_data, error_type)
+        if bot_flag:
+            bp = True
+
     # 4) finalize via RPC（固定 company_id の場合も submissions 記録目的で呼ぶ。send_queue更新は0件でも問題なし）
     try:
         supabase.rpc('mark_done', {
@@ -267,7 +390,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_company_id': company_id,
             'p_success': bool(is_success),
             'p_error_type': error_type,
-            'p_classify_detail': None,
+            'p_classify_detail': classify_detail,
             'p_bot_protection': bool(bp),
             'p_submitted_at': jst_now().isoformat()
         }).execute()
