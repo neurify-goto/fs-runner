@@ -7,6 +7,7 @@ from .context_text_extractor import ContextTextExtractor
 from .field_combination_manager import FieldCombinationManager
 from .form_structure_analyzer import FormStructure
 from config.manager import get_prefectures
+from ..utils.privacy_consent_handler import PrivacyConsentHandler
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,17 @@ class UnmappedElementHandler:
                 auto_handled.update(promoted_pref)
         except Exception as e:
             logger.debug(f"Promote prefecture select skipped: {e}")
+
+        # 汎用昇格: 部署名フィールド（text）。未マッピングなら field_mapping に昇格。
+        try:
+            promoted_dept = await self._promote_department_field(
+                (classified_elements.get("text_inputs", []) or []),
+                field_mapping,
+            )
+            if promoted_dept:
+                auto_handled.update(promoted_dept)
+        except Exception as e:
+            logger.debug(f"Promote department text skipped: {e}")
 
         email_conf = await self._auto_handle_email_confirmation(
             classified_elements.get("email_inputs", [])
@@ -1046,6 +1058,76 @@ class UnmappedElementHandler:
                 logger.debug(f"prefecture text promotion failed: {e}")
         return handled
 
+    async def _promote_department_field(
+        self,
+        text_inputs: List[Locator],
+        field_mapping: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """text要素から『部署名』らしいものを汎用判定し、未マッピングなら昇格する。
+
+        判定基準（汎用）:
+        - tag が input[type=text]
+        - name/id/class/placeholder もしくはラベル/周辺テキストに以下の語を含む
+          * 部署, 部署名, department
+        - 既に field_mapping に『部署名』がある場合は処理しない
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        if "部署名" in field_mapping:
+            return handled
+        tokens_attr = ["部署", "部署名", "department"]
+        tokens_ctx = ["部署", "部署名"]
+        for el in text_inputs:
+            try:
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get("visible", True):
+                    continue
+                if (info.get("type", "").lower() or "") not in ("text", ""):
+                    continue
+                blob = " ".join(
+                    [
+                        (info.get("name", "") or "").lower(),
+                        (info.get("id", "") or "").lower(),
+                        (info.get("class", "") or "").lower(),
+                        (info.get("placeholder", "") or "").lower(),
+                    ]
+                )
+                attr_hit = any(t in blob for t in [s.lower() for s in tokens_attr])
+                ctx_hit = False
+                if not attr_hit:
+                    try:
+                        contexts = await self.context_text_extractor.extract_context_for_element(
+                            el
+                        )
+                        texts = " ".join(
+                            [(c.text or "").lower() for c in (contexts or [])]
+                        )
+                        ctx_hit = any(t in texts for t in [s.lower() for s in tokens_ctx])
+                    except Exception:
+                        ctx_hit = False
+                if not (attr_hit or ctx_hit):
+                    continue
+                selector = await self._generate_playwright_selector(el)
+                required = await self.element_scorer._detect_required_status(el)
+                field_mapping["部署名"] = {
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": "input",
+                    "type": "text",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "text",
+                    "default_value": "",
+                    "required": required,
+                    "visible": info.get("visible", True),
+                    "enabled": info.get("enabled", True),
+                    "score": 0,
+                }
+                handled["部署名"] = field_mapping["部署名"]
+                break
+            except Exception as e:
+                logger.debug(f"department promotion failed: {e}")
+        return handled
+
     async def _auto_handle_checkboxes(
         self, checkboxes: List[Locator], mapped_element_ids: set
     ) -> Dict[str, Dict[str, Any]]:
@@ -1127,40 +1209,47 @@ class UnmappedElementHandler:
                             "確認の上",
                             "に同意",
                         ]
+
+                        lower_priv = [t.lower() for t in privacy_tokens_primary]
+                        lower_agree = [t.lower() for t in agree_tokens]
+
                         for cb, info in items:
-                            contexts = await self.context_text_extractor.extract_context_for_element(
-                                cb
-                            )
-                            # すべてのコンテキストを連結して広く判定（best のみだと取りこぼしが出る）
+                            # 1) 既存の軽量コンテキスト抽出で判定
+                            contexts = await self.context_text_extractor.extract_context_for_element(cb)
                             texts = []
                             try:
                                 texts = [
-                                    c.text
-                                    for c in (contexts or [])
-                                    if getattr(c, "text", None)
+                                    c.text for c in (contexts or []) if getattr(c, "text", None)
                                 ]
                             except Exception:
                                 texts = []
                             best = (
-                                self.context_text_extractor.get_best_context_text(
-                                    contexts
-                                )
-                                or ""
+                                self.context_text_extractor.get_best_context_text(contexts) or ""
                             )
                             blob = (" ".join(texts + [best])).lower()
-                            if any(
-                                tok in blob
-                                for tok in [t.lower() for t in privacy_tokens_primary]
+                            if any(tok in blob for tok in lower_priv) and (
+                                any(tok in blob for tok in lower_agree) or len(items) == 1
                             ):
-                                if (
-                                    any(
-                                        tok in blob
-                                        for tok in [t.lower() for t in agree_tokens]
-                                    )
-                                    or len(items) == 1
+                                is_privacy_group = True
+                                break
+
+                            # 2) フォールバック: PrivacyConsentHandler のラベル探索＋周辺テキスト抽出を利用
+                            try:
+                                form_scope = cb.locator("xpath=ancestor::form[1]")
+                                scope = (
+                                    form_scope if await form_scope.count() else self.page.locator("body")
+                                )
+                                label = await PrivacyConsentHandler._find_label_for_checkbox(scope, cb)
+                                rich_text = await PrivacyConsentHandler._collect_context_text(cb, label)
+                                rich = (rich_text or "").lower()
+                                if any(tok in rich for tok in lower_priv) and (
+                                    any(tok in rich for tok in lower_agree) or len(items) == 1
                                 ):
                                     is_privacy_group = True
                                     break
+                            except Exception:
+                                # 失敗しても継続
+                                pass
                     except Exception:
                         is_privacy_group = False
 
@@ -1601,6 +1690,41 @@ class UnmappedElementHandler:
                     pre_idx = -1
                 texts = [d.get("text", "") for d in opt_data]
                 values = [d.get("value", "") for d in opt_data]
+
+                # 問い合わせ種別系セレクト（ご用件/お問い合わせ内容/目的/purpose/inquiry/category/subject）は
+                # 非必須でも安全側で選択（既定が特定カテゴリだと誤った送信内容になるため）。
+                try:
+                    name_id_cls = " ".join(
+                        [
+                            (element_info.get("name", "") or ""),
+                            (element_info.get("id", "") or ""),
+                            (element_info.get("class", "") or ""),
+                        ]
+                    ).lower()
+                    contexts = await self.context_text_extractor.extract_context_for_element(select)
+                    best_ctx = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
+                except Exception:
+                    name_id_cls = ""
+                    best_ctx = ""
+                inquiry_tokens_attr = [
+                    "purpose",
+                    "inquiry",
+                    "category",
+                    "subject",
+                    "topic",
+                ]
+                inquiry_tokens_ctx = [
+                    "お問い合わせ内容",
+                    "ご用件",
+                    "お問い合わせ種別",
+                    "種別",
+                    "お問い合わせ",
+                ]
+                is_inquiry_type = any(t in name_id_cls for t in inquiry_tokens_attr) or any(
+                    t in best_ctx for t in inquiry_tokens_ctx
+                )
+                if is_inquiry_type:
+                    required = True
                 if not required:
                     try:
                         pre_text = (
@@ -1696,6 +1820,16 @@ class UnmappedElementHandler:
                             if cand:
                                 idx = cand[-1]
                                 break
+                elif is_inquiry_type:
+                    # 問い合わせ種別は『その他』等の中立値を優先
+                    pri = ["その他", "other"]
+                    cand = [
+                        k
+                        for k, tx in enumerate(texts)
+                        if any(p.lower() in (tx or "").lower() for p in pri)
+                    ]
+                    if cand:
+                        idx = cand[0]
                 if idx is None:
                     idx = self._choose_priority_index(texts, pri1, pri2)
 

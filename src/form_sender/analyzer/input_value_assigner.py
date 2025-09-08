@@ -343,7 +343,7 @@ class InputValueAssigner:
             except Exception:
                 pass
 
-        # auto_required_text_* が電話番号相当である場合の救済（必須検出由来の匿名テキスト欄）
+        # auto_required_text_* が電話番号/住所相当である場合の救済（必須検出由来の匿名テキスト欄）
         if field_name.startswith("auto_required_text_"):
             try:
                 blob = " ".join(
@@ -361,6 +361,56 @@ class InputValueAssigner:
                         "電話番号", "single", client_data
                     )
                     return _format_phone(phv or value)
+                # 住所（市区町村/番地・建物など）の簡易判定
+                client = (
+                    client_data.get("client")
+                    if isinstance(client_data, dict) and "client" in client_data
+                    else client_data
+                )
+                city_hints = ["市区町村", "市区", "city", "郡", "区", "町", "town", "丁目"]
+                detail_hints = [
+                    "番地",
+                    "丁目",
+                    "建物",
+                    "building",
+                    "マンション",
+                    "ビル",
+                    "部屋",
+                    "room",
+                    "apt",
+                    "apartment",
+                    "号室",
+                    "詳細",
+                    # 属性名・英語表記による分割住所ヒント
+                    "addr2",
+                    "addr_2",
+                    "addr",
+                    "address2",
+                    "address_2",
+                    "address-line2",
+                    "addressline2",
+                    "line2",
+                    "line_2",
+                    "street2",
+                    "street",
+                ]
+                # None 安全化ユーティリティ
+                def _nz(x: Any) -> str:
+                    try:
+                        return "" if x is None else str(x)
+                    except Exception:
+                        return ""
+
+                if any(h.lower() in blob for h in city_hints):
+                    a2 = _nz((client or {}).get("address_2"))
+                    a3 = _nz((client or {}).get("address_3"))
+                    composed = (a2 + a3).strip()
+                    return composed if composed else value
+                if any(h.lower() in blob for h in detail_hints):
+                    a4 = _nz((client or {}).get("address_4"))
+                    a5 = _nz((client or {}).get("address_5"))
+                    composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
+                    return composed if composed else value
             except Exception:
                 pass
 
@@ -369,6 +419,19 @@ class InputValueAssigner:
                 "電話番号", "single", client_data
             )
             return _format_phone(phv or value)
+
+        # 部署名はクライアントデータから直接割当
+        if field_name == "部署名":
+            try:
+                client = (
+                    client_data.get("client")
+                    if isinstance(client_data, dict) and "client" in client_data
+                    else client_data
+                )
+                dep = str((client or {}).get("department", "") or "").strip()
+                return dep
+            except Exception:
+                return value
 
         if field_name == "都道府県":
             return self._handle_prefecture_assignment(field_info, client_data)
@@ -514,7 +577,7 @@ class InputValueAssigner:
             ]
             blob = " ".join([p for p in parts if p]).lower()
 
-            city_tokens = ["市区町村", "市区", "city", "区", "町", "town", "丁目"]
+            city_tokens = ["市区町村", "市区", "郡", "市", "city", "区", "町", "town", "丁目"]
             detail_tokens = [
                 "番地",
                 "丁目",
@@ -528,6 +591,18 @@ class InputValueAssigner:
                 "apartment",
                 "号室",
                 "詳細",
+                # 属性名・英語表記による分割住所ヒント（addr/address2/line2 等）
+                "addr2",
+                "addr_2",
+                "addr",
+                "address2",
+                "address_2",
+                "address-line2",
+                "addressline2",
+                "line2",
+                "line_2",
+                "street2",
+                "street",
             ]
             pref_tokens = ["都道府県", "prefecture", "県", "都", "府"]
 
