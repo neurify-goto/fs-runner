@@ -96,6 +96,19 @@ jobs:
         esac
         echo "NUM_WORKERS=$NUM_WORKERS" >> $GITHUB_ENV
 
+        # シャードIDを計算（Repository Dispatch の並列起動時）。send_queue作成時の既定shards=8に準拠
+        if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+          RI="${{ github.event.client_payload.run_index || '' }}"
+          if [ -n "$RI" ]; then
+            SHARDS="${{ github.event.client_payload.shards || 8 }}"
+            if ! echo "$SHARDS" | grep -Eq '^[0-9]+$' || [ "$SHARDS" -le 0 ]; then SHARDS=8; fi
+            # run_indexは1始まりとして扱う
+            SI=$(( (RI - 1) % SHARDS ))
+            echo "Computed SHARD_ID=$SI from run_index=$RI / shards=$SHARDS"
+            echo "SHARD_ID=$SI" >> $GITHUB_ENV
+          fi
+        fi
+
     - name: Run Form Sender Runner (Queue-driven workers)
       id: worker
       run: |
@@ -104,16 +117,20 @@ jobs:
         echo "Worker configuration loaded"
         if [ "${{ env.TEST_MODE }}" = "true" ]; then
           echo "Executing in TEST MODE"
+          if [ -n "${SHARD_ID}" ]; then SHARD_ARG="--shard-id ${SHARD_ID}"; else SHARD_ARG=""; fi
           python src/form_sender_runner.py \
             --targeting-id "${{ env.TARGETING_ID }}" \
             --config-file "/tmp/client_config_*.json" \
-            --num-workers "${NUM_WORKERS}"
+            --num-workers "${NUM_WORKERS}" \
+            ${SHARD_ARG}
         else
           echo "Executing in PRODUCTION MODE"
+          if [ -n "${SHARD_ID}" ]; then SHARD_ARG="--shard-id ${SHARD_ID}"; else SHARD_ARG=""; fi
           python src/form_sender_runner.py \
             --targeting-id "${{ env.TARGETING_ID }}" \
             --config-file "/tmp/client_config_*.json" \
-            --num-workers "${NUM_WORKERS}"
+            --num-workers "${NUM_WORKERS}" \
+            ${SHARD_ARG}
         fi
       env:
         PYTHONPATH: ${{ github.workspace }}/src
