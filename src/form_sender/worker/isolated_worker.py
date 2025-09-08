@@ -28,6 +28,7 @@ from config.manager import (
 )
 from config.manager import get_privacy_consent_config
 from ..detection.bot_detector import BotDetectionSystem
+from ..detection.constants import BOT_DETECTION_KEYWORDS
 from ..detection.pattern_matcher import FormDetectionPatternMatcher
 from ..template.company_processor import CompanyPlaceholderAnalyzer
 from ..control.recovery_manager import AutoRecoveryManager
@@ -431,10 +432,10 @@ class IsolatedFormWorker:
                     
                     # 最終試行でも失敗した場合
                     if attempt >= max_retries:
-                        error_context = {
+                    error_context = {
                             'error_message': error_msg, 'error_location': 'page_access',
                             'page_url': form_url, 'is_timeout': 'timeout' in error_msg.lower(),
-                            'is_bot_detected': any(k in error_msg.lower() for k in ['recaptcha', 'cloudflare', 'bot'])
+                            'is_bot_detected': any(k in error_msg.lower() for k in BOT_DETECTION_KEYWORDS)
                         }
                         error_type = ErrorClassifier.classify_error_type(error_context)
                         return {
@@ -814,12 +815,12 @@ class IsolatedFormWorker:
                             merged_text = (button_text or button_value or "").strip()
                             if merged_text:
                                 low = merged_text.lower()
-                                if any(x in low for x in [k.lower() for k in get_exclude_keywords()]):
-                                    logger.debug(
-                                        f"Worker {self.worker_id}: Excluded button by keyword: '{merged_text[:20]}'"
-                                    )
-                                    # 次の候補へ
-                                    continue
+                        if any(x in low for x in [k.lower() for k in get_exclude_keywords()]):
+                            logger.debug(
+                                f"Worker {self.worker_id}: Excluded button by keyword: '{merged_text[:20]}'"
+                            )
+                            # 次の候補へ
+                            continue
 
                             # ボタンタイプを判定（確認ボタンか送信ボタンか）
                             element_text = merged_text
@@ -853,15 +854,20 @@ class IsolatedFormWorker:
                 # 付加情報: 可能ならページ内容を短く取得（Bot検出補助）
                 page_snippet = ""
                 try:
-                    html = await asyncio.wait_for(getattr(self, '_dom_context', self.page).content(), timeout=5)
-                    page_snippet = html[:1000]
-                except Exception:
-                    pass
+                    dom_ctx = getattr(self, '_dom_context', self.page)
+                    # 大きなページでも安全に先頭のみ取得（ブラウザ側で切り詰め）
+                    page_snippet = await asyncio.wait_for(
+                        dom_ctx.evaluate("document.documentElement.outerHTML.slice(0, 1000)"),
+                        timeout=5,
+                    )
+                except Exception as e:
+                    logger.debug(f"Worker {self.worker_id}: page snippet acquisition skipped: {e}")
 
                 # Bot保護（reCAPTCHA/Cloudflare等）の厳格検知を一度試す
                 try:
                     is_bot_detected, bot_type = await self.bot_detector.detect_bot_protection(getattr(self, '_dom_context', self.page))
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Worker {self.worker_id}: Bot detection failed during no-submit path: {e}")
                     is_bot_detected, bot_type = (False, None)
 
                 if is_bot_detected:

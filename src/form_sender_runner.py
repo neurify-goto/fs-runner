@@ -481,7 +481,9 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # Bot保護が検出されている場合は error_type を BOT_DETECTED に寄せる（優先）
         if not is_success:
             try:
-                if bp and (not error_type or error_type not in {"BOT_DETECTED", "WAF_CHALLENGE"}):
+                if bp and (
+                    not error_type or (isinstance(error_type, str) and error_type not in {"BOT_DETECTED", "WAF_CHALLENGE"})
+                ):
                     error_type = "BOT_DETECTED"
             except Exception:
                 pass
