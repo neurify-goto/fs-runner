@@ -432,15 +432,20 @@ class IsolatedFormWorker:
                     
                     # 最終試行でも失敗した場合
                     if attempt >= max_retries:
-                    error_context = {
-                            'error_message': error_msg, 'error_location': 'page_access',
-                            'page_url': form_url, 'is_timeout': 'timeout' in error_msg.lower(),
-                            'is_bot_detected': any(k in error_msg.lower() for k in BOT_DETECTION_KEYWORDS)
+                        error_context = {
+                            'error_message': error_msg,
+                            'error_location': 'page_access',
+                            'page_url': form_url,
+                            'is_timeout': 'timeout' in error_msg.lower(),
+                            'is_bot_detected': any(k in error_msg.lower() for k in BOT_DETECTION_KEYWORDS),
                         }
                         error_type = ErrorClassifier.classify_error_type(error_context)
                         return {
-                            "error": True, "record_id": record_id, "status": "failed",
-                            "error_type": error_type, "error_message": f"Failed after {max_retries + 1} attempts: {error_msg}",
+                            "error": True,
+                            "record_id": record_id,
+                            "status": "failed",
+                            "error_type": error_type,
+                            "error_message": f"Failed after {max_retries + 1} attempts: {error_msg}",
                             "instruction_valid_updated": ErrorClassifier.should_update_instruction_valid(error_type),
                         }
 
@@ -815,12 +820,12 @@ class IsolatedFormWorker:
                             merged_text = (button_text or button_value or "").strip()
                             if merged_text:
                                 low = merged_text.lower()
-                        if any(x in low for x in [k.lower() for k in get_exclude_keywords()]):
-                            logger.debug(
-                                f"Worker {self.worker_id}: Excluded button by keyword: '{merged_text[:20]}'"
-                            )
-                            # 次の候補へ
-                            continue
+                                if any(x in low for x in [k.lower() for k in get_exclude_keywords()]):
+                                    logger.debug(
+                                        f"Worker {self.worker_id}: Excluded button by keyword: '{merged_text[:20]}'"
+                                    )
+                                    # 次の候補へ
+                                    continue
 
                             # ボタンタイプを判定（確認ボタンか送信ボタンか）
                             element_text = merged_text
