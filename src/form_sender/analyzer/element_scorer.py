@@ -1398,6 +1398,11 @@ class ElementScorer:
                 return -80
 
         # 特別ガード: メールアドレスの文脈に『電話』『tel』『お電話』『phone』が含まれる場合は負スコア
+        # 特別ガード: 氏名(カナ以外)に『カナ/ふりがな/ひらがな』が含まれる場合は除外（誤割当抑止）
+        if field_name in {"姓", "名", "統合氏名"}:
+            kana_like = ["カナ", "ｶﾅ", "カタカナ", "ﾌﾘｶﾞﾅ", "フリガナ", "ふりがな", "ひらがな", "furigana", "kana", "hiragana", "katakana"]
+            if any(k.lower() in context_lower for k in kana_like):
+                return -80
         if field_name == "メールアドレス":
             if any(
                 k in context_lower

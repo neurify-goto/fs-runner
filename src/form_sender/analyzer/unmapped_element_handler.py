@@ -50,31 +50,47 @@ class UnmappedElementHandler:
 
         max_depth = int(self.settings.get('radio_required_max_container_depth', 6))
         sib_depth = int(self.settings.get('radio_required_max_sibling_depth', 2))
-        js = f"""
+        js = """
             (el) => {{
               const MARKERS = ['*','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］'];
+              const CLASS_HINTS = ['must','required','require','need','mandatory','必須'];
               const hasMarker = (node) => {{
                 if (!node) return false;
                 const txt = (node.innerText || node.textContent || '').trim();
+                const cls = (node.getAttribute && ((node.getAttribute('class')||'').toLowerCase())) || '';
                 if (!txt) return false;
-                return MARKERS.some(m => txt.includes(m));
+                if (MARKERS.some(m => txt.includes(m))) return true;
+                if (cls && CLASS_HINTS.some(k => cls.includes(k))) return true;
+                return false;
               }};
               let p = el; let depth = 0;
               while (p && depth < {max_depth}) {{
                 const tag = (p.tagName || '').toLowerCase();
-                if (['p','div','li','fieldset','dd'].includes(tag)) {{
+                if (['p','div','li','fieldset','dd','td','ul'].includes(tag)) {{
                   if (hasMarker(p)) return true;
                   let sib = p.previousElementSibling; let sdepth = 0;
                   while (sib && sdepth < {sib_depth}) {{
                     if (hasMarker(sib)) return true;
                     sib = sib.previousElementSibling; sdepth++;
                   }}
+                  // テーブル構造: td/dd に対する直前の th/dt を確認
+                  if (tag === 'td' || tag === 'dd') {{
+                    let ps = p.previousElementSibling;
+                    while (ps) {{
+                      const stag = (ps.tagName || '').toLowerCase();
+                      if ((tag === 'td' && stag === 'th') || (tag === 'dd' && stag === 'dt')) {{
+                        if (hasMarker(ps)) return true;
+                        break;
+                      }}
+                      ps = ps.previousElementSibling;
+                    }}
+                  }}
                 }}
                 p = p.parentElement; depth++;
               }}
               return false;
             }}
-        """
+        """.format(max_depth=max_depth, sib_depth=sib_depth)
         try:
             found = bool(await first_radio.evaluate(js))
         except Exception as e:
@@ -524,6 +540,12 @@ class UnmappedElementHandler:
                 el, info = triples_all[idx]
                 selector = await self._generate_playwright_selector(el)
                 required = await self.element_scorer._detect_required_status(el)
+                if not required:
+                    try:
+                        # 電話番号グループの見出し側必須表示（th/dt/見出し）を検出
+                        required = await self._detect_group_required_via_container(el)
+                    except Exception:
+                        required = False
                 handled[f'auto_phone_part_{idx}'] = {
                     'element': el,
                     'selector': selector,
@@ -838,6 +860,12 @@ class UnmappedElementHandler:
                     ):
                         group_required = True
                         break
+                # コンテナ側の必須マーカー検出（DT/DD, TH/TD, 見出しなど）
+                if not group_required:
+                    try:
+                        group_required = await self._detect_group_required_via_container(items[0][0])
+                    except Exception as e:
+                        logger.debug(f"Container required detection error for checkbox group '{group_key}': {e}")
                 # 追加: プライバシー/規約同意の文脈検出（name/id/classに現れないケースの補完）
                 is_privacy_group = False
                 if not group_required:
@@ -925,6 +953,72 @@ class UnmappedElementHandler:
         mapped_element_ids: set,
         client_data: Optional[Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
+        async def _extract_radio_option_text(radio: Locator) -> str:
+            """ラジオボタン個別の選択肢テキストを抽出（汎用・安全）。
+
+            優先順:
+            1) <label for="id"> のテキスト
+            2) input が囲まれている <label> のテキスト
+            3) 直後/直前のテキストノード or インライン要素（span/i/b/strong/em）
+            4) 空の場合のみ空文字
+            """
+            try:
+                text = await radio.evaluate(
+                    """
+                    (el) => {
+                      const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+                      const getText = (n) => norm(n && (n.innerText || n.textContent || ''));
+                      // 1) label[for]
+                      const id = el.getAttribute('id');
+                      if (id) {
+                        const lbl = document.querySelector(`label[for="${id}"]`);
+                        if (lbl) {
+                          const t = getText(lbl);
+                          if (t) return t;
+                        }
+                      }
+                      // 2) 親階層で直近の <label>
+                      let p = el;
+                      let depth = 0;
+                      while (p && depth < 3) {
+                        if ((p.tagName || '').toLowerCase() === 'label') {
+                          const t = getText(p);
+                          if (t) return t;
+                          break;
+                        }
+                        // 子1要素のみを持つ薄いラッパーはスキップ
+                        const nextP = p.parentElement;
+                        if (!nextP) break;
+                        p = nextP; depth++;
+                      }
+                      // 3) 直後/直前のテキストノードやインライン要素
+                      const isInline = (n) => {
+                        const tag = (n.tagName || '').toLowerCase();
+                        return ['span','i','b','strong','em','small'].includes(tag);
+                      };
+                      let sib = el.nextSibling;
+                      while (sib && !(sib.nodeType === 3 || (sib.nodeType === 1 && isInline(sib)))) {
+                        sib = sib.nextSibling;
+                      }
+                      if (sib) {
+                        const t = norm(sib.nodeType === 3 ? sib.textContent : getText(sib));
+                        if (t) return t;
+                      }
+                      sib = el.previousSibling;
+                      while (sib && !(sib.nodeType === 3 || (sib.nodeType === 1 && isInline(sib)))) {
+                        sib = sib.previousSibling;
+                      }
+                      if (sib) {
+                        const t = norm(sib.nodeType === 3 ? sib.textContent : getText(sib));
+                        if (t) return t;
+                      }
+                      return '';
+                    }
+                    """
+                )
+                return str(text or '').strip()
+            except Exception:
+                return ''
         handled: Dict[str, Dict[str, Any]] = {}
         radio_groups = {}
         for radio in radios:
@@ -998,18 +1092,18 @@ class UnmappedElementHandler:
 
             texts: List[str] = []
             for radio, info in radio_list:
-                contexts = (
-                    await self.context_text_extractor.extract_context_for_element(radio)
-                )
-                best = (
-                    self.context_text_extractor.get_best_context_text(contexts)
-                    if contexts
-                    else ""
-                )
-                val = info.get("value", "")
-                texts.append(
-                    (best or val or info.get("name", "") or info.get("id", "")).strip()
-                )
+                # ラジオ選択肢そのもののテキストを優先的に取得
+                # （質問見出しなどのグループラベルは使用しない）
+                label_text = await _extract_radio_option_text(radio)
+                if not label_text:
+                    # ラベルが取れない場合は value/name/id をフォールバック
+                    fallback = (
+                        info.get("value", "")
+                        or info.get("name", "")
+                        or info.get("id", "")
+                    )
+                    label_text = str(fallback or "").strip()
+                texts.append(label_text)
 
             # クライアント性別が判明している場合は最優先で一致候補を選択
             idx = None
