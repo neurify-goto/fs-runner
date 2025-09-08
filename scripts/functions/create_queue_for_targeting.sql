@@ -20,9 +20,7 @@ declare
   v_ng_ids bigint[];
   v_limit integer := 10000; -- 一律上限（最大投入件数）
   v_need integer := 0;      -- 追加で投入すべき不足分
-  v_total integer := 0;     -- 合計投入件数（観測用: 今回挿入数）
-  v_existing_count integer := 0;          -- 既存キュー件数（当日/同targeting）
-  v_total_after_stage1 integer := 0;      -- 1段目投入後の総件数
+  v_current_total integer := 0;           -- 1段目投入後の現在総数（当日/同targeting）
   v_total_final integer := 0;             -- 最終総件数
   v_base_priority integer := 0;           -- 2段目付与用の基準priority
   v_shards integer := 8;                  -- shardsの検証/補正後の値
@@ -54,18 +52,17 @@ begin
     v_shards := 8;
   end if;
 
+  -- Stage1:『過去送信履歴なし（同targetingで submissions が1件も無い）』の新規候補のみ
   v_sql :=
     'with candidates as (
        select c.id
        from public.companies c
-       left join public.submissions s
-         on s.targeting_id = $2
-        and s.company_id = c.id
-        and s.submitted_at >= ($1::timestamp AT TIME ZONE ''Asia/Tokyo'')
-        and s.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
+       left join public.submissions s_hist
+         on s_hist.targeting_id = $2
+        and s_hist.company_id = c.id
        where c.form_url is not null
          and coalesce(c.prohibition_detected, false) = false
-         and s.id is null';
+         and s_hist.id is null';
 
   -- targeting_sql は事前にGAS側でサニタイズ・整形済みを前提（WHERE句断片）
   if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
@@ -89,18 +86,16 @@ begin
   execute v_sql using p_target_date, p_targeting_id, v_ng_ids, v_limit, v_shards;
   get diagnostics v_ins = row_count;
 
-  -- 現在の既存件数を計測（1段目投入後を含む）
-  select count(*) into v_existing_count
+  -- 1段目投入後の現在総数を計測
+  select count(*) into v_current_total
     from public.send_queue
    where target_date_jst = p_target_date
      and targeting_id    = p_targeting_id;
 
-  v_total_after_stage1 := v_existing_count; -- 既に1段目分を含む総数
-
   -- 追加要件(改): 総数が上限(10000)に満たない場合のみ、
   -- 「過去に送信試行はあるが成功履歴がないもの」で不足分を補充
-  if coalesce(v_total_after_stage1, 0) < v_limit then
-    v_need := v_limit - coalesce(v_total_after_stage1, 0);
+  if coalesce(v_current_total, 0) < v_limit then
+    v_need := v_limit - coalesce(v_current_total, 0);
 
     v_sql :=
       'with hist as (
@@ -143,7 +138,7 @@ begin
         from candidates
       on conflict (target_date_jst, targeting_id, company_id) do nothing;';
 
-    -- 2段目の基準priorityを一度だけ取得（既存+1段目を含む最大値）
+    -- 2段目の基準priorityを一度だけ取得（現在総数ベースの最大値）
     select coalesce(max(priority), 0) into v_base_priority
       from public.send_queue
      where target_date_jst = p_target_date
@@ -161,8 +156,8 @@ begin
      and targeting_id    = p_targeting_id;
 
   -- 観測用 NOTICE（件数内訳）
-  raise notice 'create_queue_for_targeting: date=%, targeting_id=%, existing(before stage2)=%, stage1_inserted=%, stage2_inserted=%, total_final=%',
-    p_target_date, p_targeting_id, v_total_after_stage1, (v_ins - coalesce(v_ins2,0)), coalesce(v_ins2,0), v_total_final;
+  raise notice 'create_queue_for_targeting: date=%, targeting_id=%, current_total_before_stage2=%, stage1_inserted=%, stage2_inserted=%, total_final=%',
+    p_target_date, p_targeting_id, v_current_total, (v_ins - coalesce(v_ins2,0)), coalesce(v_ins2,0), v_total_final;
 
   return v_ins;
 end;
