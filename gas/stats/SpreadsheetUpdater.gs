@@ -315,7 +315,7 @@ function setupStatsLogSheet() {
     for (let hour = 0; hour < 24; hour++) {
       for (let minute = 0; minute < 60; minute++) {
         const timeStr = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
-        allData.push([timeStr, '', '', '', '', '', '', '']); // 時刻 + 空の統計データ
+        allData.push([timeStr, '', '', '', '']); // 時刻 + 4項目の空データ
       }
     }
     

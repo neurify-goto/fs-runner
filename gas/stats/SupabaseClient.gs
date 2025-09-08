@@ -90,9 +90,6 @@ function getCompaniesStats() {
       withCompanyUrl: parseInt(rpcResult.with_company_url_count) || 0,
       formNotExplored: parseInt(rpcResult.form_not_explored_count) || 0,
       withFormUrl: parseInt(rpcResult.with_form_url_count) || 0
-      // formNotAnalyzed: parseInt(rpcResult.form_not_analyzed_count) || 0,
-      // formAnalyzed: parseInt(rpcResult.form_analyzed_count) || 0,
-      // validInstruction: parseInt(rpcResult.valid_instruction_count) || 0
     };
     
     console.log(`統計情報取得完了（RPC版）: 処理時間 ${processingTime}ms`);
