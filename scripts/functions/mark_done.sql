@@ -1,5 +1,7 @@
 -- 送信結果を記録し、キューを更新（原子的）
+-- 旧シグネチャ（p_field_mappingなし）と新シグネチャを明示的にDROPして多重定義を排除
 drop function if exists public.mark_done(date,bigint,bigint,boolean,text,jsonb,boolean,timestamp with time zone);
+drop function if exists public.mark_done(date,bigint,bigint,boolean,text,jsonb,jsonb,boolean,timestamp with time zone);
 
 create or replace function public.mark_done(
   p_target_date date,
@@ -8,6 +10,7 @@ create or replace function public.mark_done(
   p_success boolean,
   p_error_type text,
   p_classify_detail jsonb,
+  p_field_mapping jsonb,
   p_bot_protection boolean,
   p_submitted_at timestamptz
 )
@@ -19,9 +22,9 @@ declare
 begin
   -- submissions へ記録（JST時刻は呼び出し側から受け取る）
   insert into public.submissions(
-    targeting_id, company_id, success, error_type, classify_detail, submitted_at
+    targeting_id, company_id, success, error_type, classify_detail, field_mapping, submitted_at
   ) values (
-    p_targeting_id, p_company_id, p_success, p_error_type, p_classify_detail, p_submitted_at
+    p_targeting_id, p_company_id, p_success, p_error_type, p_classify_detail, p_field_mapping, p_submitted_at
   );
 
   -- companies の bot_protection を反映（true のみ）

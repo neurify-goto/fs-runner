@@ -591,6 +591,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 'p_success': False,
                 'p_error_type': 'NOT_FOUND',
                 'p_classify_detail': classify_detail,
+                'p_field_mapping': None,
                 'p_bot_protection': False,
                 'p_submitted_at': jst_now().isoformat()
             }).execute()
@@ -623,6 +624,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_success': False,
             'p_error_type': 'NO_FORM_URL',
             'p_classify_detail': classify_detail,
+            'p_field_mapping': None,
             'p_bot_protection': False,
             'p_submitted_at': jst_now().isoformat()
         }).execute()
@@ -699,6 +701,16 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
 
     # 4) finalize via RPC（固定 company_id の場合も submissions 記録目的で呼ぶ。send_queue更新は0件でも問題なし）
     try:
+        # 営業禁止検出時: companies.prohibition_detected=true を反映
+        try:
+            if (not is_success) and isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
+                try:
+                    supabase.table('companies').update({'prohibition_detected': True}).eq('id', company_id).execute()
+                except Exception as ue:
+                    logger.warning(f"companies.prohibition_detected update failed (company_id={company_id}, suppressed): {ue}")
+        except Exception:
+            pass
+
         # Bot保護が検出されている場合は error_type を BOT_DETECTED に寄せる（優先）
         if not is_success:
             try:
@@ -708,6 +720,23 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                     error_type = "BOT_DETECTED"
             except Exception:
                 pass
+
+        # submissions.field_mapping へ書き込むマッピング結果を決定
+        field_mapping_to_store = None
+        try:
+            if not (isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED'):
+                ar = getattr(worker, '_current_analysis_result', None)
+                if isinstance(ar, dict):
+                    fm = ar.get('field_mapping')
+                    if isinstance(fm, dict):
+                        try:
+                            json.dumps(fm, ensure_ascii=False)
+                            field_mapping_to_store = fm
+                        except Exception:
+                            field_mapping_to_store = None
+        except Exception:
+            field_mapping_to_store = None
+
         supabase.rpc('mark_done', {
             'p_target_date': str(target_date),
             'p_targeting_id': targeting_id,
@@ -715,6 +744,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_success': bool(is_success),
             'p_error_type': error_type,
             'p_classify_detail': classify_detail,
+            'p_field_mapping': field_mapping_to_store,
             'p_bot_protection': bool(bp),
             'p_submitted_at': jst_now().isoformat()
         }).execute()
