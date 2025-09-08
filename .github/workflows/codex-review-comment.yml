@@ -1,0 +1,32 @@
+name: Codex Review Comment
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+
+jobs:
+  comment-codex-review:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Comment to PR
+        # セキュリティ: アクションはタグではなくコミットSHAでピン留め
+        # v7 のコミット（2025-09-08 時点）。必要に応じて更新してください。
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            // トリガーは pull_request_target を採用：
+            // - フォークPRでもベースリポの権限で安全に実行（コメント投稿のみ）
+            // - 外部コードのcheckout/実行は行わないためリスク低
+            const pr = context.payload.pull_request;
+            if (!pr || !pr.number) {
+              core.setFailed('Invalid pull_request payload');
+              return;
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: '@codex Review'
+            });
