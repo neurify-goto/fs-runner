@@ -27,7 +27,7 @@ begin
       and s.id is null
     order by sq.priority, sq.id
     limit p_limit
-    for update skip locked
+    for update of sq skip locked
   ), upd as (
     update public.send_queue sq
     set status = 'assigned', assigned_by = p_run_id, assigned_at = now()
