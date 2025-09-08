@@ -13,13 +13,16 @@ as $$
 begin
   return query
   with to_claim as (
-    select id
-    from public.send_queue
-    where target_date_jst = p_target_date
-      and targeting_id = p_targeting_id
-      and status = 'pending'
-      and (p_shard_id is null or shard_id = p_shard_id)
-    order by priority, id
+    select sq.id
+    from public.send_queue sq
+    left join public.submissions s
+      on s.targeting_id = p_targeting_id and s.company_id = sq.company_id
+    where sq.target_date_jst = p_target_date
+      and sq.targeting_id = p_targeting_id
+      and sq.status = 'pending'
+      and (p_shard_id is null or sq.shard_id = p_shard_id)
+      and s.id is null
+    order by sq.priority, sq.id
     limit p_limit
     for update skip locked
   ), upd as (
