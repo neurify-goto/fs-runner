@@ -2109,6 +2109,7 @@ class ElementScorer:
             # 『※』は注記用途が多く誤検出の原因になるため除外
             required_markers = [
                 "*",
+                "※",
                 "必須",
                 "Required",
                 "Mandatory",
@@ -2229,6 +2230,7 @@ class ElementScorer:
             required_markers = [
                 "*",
                 "＊",
+                "※",
                 "必須",
                 "Required",
                 "Mandatory",
@@ -2319,6 +2321,7 @@ class ElementScorer:
             required_markers = [
                 "*",
                 "＊",
+                "※",
                 "必須",
                 "Required",
                 "Mandatory",

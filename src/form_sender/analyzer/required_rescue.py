@@ -293,6 +293,15 @@ class RequiredRescue:
                             ):
                                 field_name = "統合氏名カナ"
                             else:
+                                # メールアドレス救済（ラベル/周辺テキストに強いシグナル）
+                                email_tokens = ["メール", "e-mail", "email", "mail"]
+                                if any(t in ctx_texts for t in email_tokens):
+                                    # 確認用の強いシグナルは除外
+                                    lower_blob = (ctx_texts or '').lower()
+                                    if not any(k in lower_blob for k in [
+                                        "confirm", "confirmation", "確認用", "再入力", "もう一度", "再度", "mail2", "re_mail", "re-email"
+                                    ]):
+                                        field_name = "メールアドレス"
                                 # 郵便番号/住所 救済（placeholder/属性もヒントに）
                                 blob = " ".join(
                                     [

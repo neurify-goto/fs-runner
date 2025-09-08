@@ -420,10 +420,129 @@ class UnmappedElementHandler:
         except Exception as e:
             logger.debug(f"Auto handle required texts skipped: {e}")
 
+        # 追加: 選択フォーム外の必須（評価用の最小カバー）
+        try:
+            if form_structure and getattr(form_structure, "form_locator", None):
+                outside = await self._auto_handle_required_outside_selected_form(
+                    form_structure.form_locator, mapped_element_ids
+                )
+                auto_handled.update(outside)
+        except Exception as e:
+            logger.debug(f"outside required auto-handle skipped: {e}")
+
         logger.info(
             f"Auto-handled elements: checkboxes={len(checkbox_handled)}, radios={len(radio_handled)}, selects={len(select_handled)}"
         )
         return auto_handled
+
+    async def _auto_handle_required_outside_selected_form(
+        self, selected_form: Locator, mapped_element_ids: set
+    ) -> Dict[str, Dict[str, Any]]:
+        """選択フォーム外の必須 input/textarea/checkbox を最小限自動処理（汎用）。"""
+        handled: Dict[str, Dict[str, Any]] = {}
+        try:
+            candidates = await self.page.locator("input, textarea, select").all()
+        except Exception:
+            return handled
+
+        idx_cb = 1
+        # 選択フォームのセレクタ文字列を取得（closest("form").matches で使用）
+        try:
+            selected_form_selector = await self._generate_playwright_selector(selected_form)
+        except Exception:
+            selected_form_selector = "form"
+        for el in candidates:
+            try:
+                if id(el) in mapped_element_ids:
+                    continue
+                # 選択フォームに属するものは対象外
+                try:
+                    in_selected = await el.evaluate(
+                        "(el, sel) => { const cf = el.closest('form'); return !!cf && cf.matches(sel); }",
+                        selected_form_selector,
+                    )
+                except Exception:
+                    in_selected = False
+                if in_selected:
+                    continue
+
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get("visible", True):
+                    continue
+
+                # 必須判定（属性 or コンテナ）
+                required = await self.element_scorer._detect_required_status(el)
+                if not required:
+                    try:
+                        required = await self._detect_group_required_via_container(el)
+                    except Exception:
+                        required = False
+                if not required:
+                    continue
+
+                tag = (info.get("tag_name") or "").lower()
+                typ = (info.get("type") or "").lower()
+                selector = await self._generate_playwright_selector(el)
+
+                # 罠/認証/確認は除外
+                nic = " ".join(
+                    [
+                        (info.get("name") or ""),
+                        (info.get("id") or ""),
+                        (info.get("class") or ""),
+                    ]
+                ).lower()
+                if any(
+                    b in nic
+                    for b in [
+                        "captcha",
+                        "token",
+                        "otp",
+                        "verification",
+                        "confirm",
+                        "re_email",
+                        "re-mail",
+                    ]
+                ):
+                    continue
+
+                if tag == "input" and typ == "checkbox":
+                    # 同意/規約系に限定（副作用を最小化）
+                    try:
+                        label_ctx = " ".join(
+                            [
+                                (info.get("name") or ""),
+                                (info.get("id") or ""),
+                                (info.get("class") or ""),
+                            ]
+                        ).lower()
+                        contexts = await self.context_text_extractor.extract_context_for_element(el)
+                        label_ctx += " " + " ".join([getattr(c, 'text', '') or '' for c in (contexts or [])]).lower()
+                    except Exception:
+                        label_ctx = ""
+                    if not any(t in label_ctx for t in ["privacy", "同意", "規約", "ポリシー", "consent", "agree"]):
+                        continue
+                    handled[f"outside_required_checkbox_{idx_cb}"] = {
+                        "element": el,
+                        "selector": selector,
+                        "tag_name": tag,
+                        "type": typ,
+                        "input_type": "checkbox",
+                        "auto_action": "check",
+                        "required": True,
+                        "auto_handled": True,
+                    }
+                    idx_cb += 1
+                elif tag == "input" and typ == "radio":
+                    # ラジオは選択肢依存のためスキップ（ページ固有）
+                    continue
+                else:
+                    # select は副作用が大きいので扱わない
+                    continue
+            except Exception as e:
+                logger.debug(f"outside required handle element skipped: {e}")
+
+        return handled
 
     def _demote_unified_name_for_indexed_pairs(
         self,
@@ -1001,7 +1120,7 @@ class UnmappedElementHandler:
                 break
             except Exception as e:
                 logger.debug(f"prefecture promotion failed: {e}")
-        # 2) input[type=text] でも『都道府県』と確信できるものを昇格
+        # 2) input[type=text] でも『都道府県』と確信できるものを昇格（属性必須）
         for el in text_inputs:
             try:
                 info = await self.element_scorer._get_element_info(el)
@@ -1018,21 +1137,9 @@ class UnmappedElementHandler:
                         (info.get("placeholder", "") or "").lower(),
                     ]
                 )
-                # input系は属性に 'pref' があるか、placeholder/ラベルに『都道府県』がある場合のみ
+                # input系は属性に 'pref' がある場合のみ（ラベルの『都道府県』だけでは昇格しない）
                 attr_hit = any(k in blob for k in ["pref", "prefecture"])
-                ctx_hit = False
                 if not attr_hit:
-                    try:
-                        contexts = await self.context_text_extractor.extract_context_for_element(
-                            el
-                        )
-                        texts = " ".join(
-                            [(c.text or "").lower() for c in (contexts or [])]
-                        )
-                        ctx_hit = "都道府県" in texts or "prefecture" in texts
-                    except Exception:
-                        ctx_hit = False
-                if not (attr_hit or ctx_hit):
                     continue
                 selector = await self._generate_playwright_selector(el)
                 required = await self.element_scorer._detect_required_status(el)
