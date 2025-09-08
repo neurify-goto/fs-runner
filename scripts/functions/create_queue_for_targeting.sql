@@ -25,9 +25,12 @@ declare
   v_base_priority integer := 0;           -- 2段目付与用の基準priority
   v_shards integer := 8;                  -- shardsの検証/補正後の値
 begin
-  -- 実行時間が長めになるケース（複合条件 + 上限1万件）に備えて、局所的にstatement_timeoutを緩和
-  -- Supabaseのデフォルトは短めのため、当関数内のみ60秒へ延長
-  perform set_config('statement_timeout', '60000', true);  -- milliseconds
+  -- 実行時間が長めになるケース（複合条件 + 上限1万件）に備えて、局所的に statement_timeout を緩和
+  -- 既存の 60 秒設定では intermittently timeout が発生していたため、当関数内のみ 180 秒へ延長
+  -- 備考: GAS 側の UrlFetch 実行上限やワークフローフローを考慮し、過度に長くしすぎないバランス値
+  perform set_config('statement_timeout', '180000', true);  -- milliseconds (3 minutes)
+  -- 競合ロックによる待ちを短くするために lock_timeout も軽く設定（待ちすぎで statement_timeout に達しないように）
+  perform set_config('lock_timeout', '10000', true);        -- milliseconds (10 seconds)
 
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く

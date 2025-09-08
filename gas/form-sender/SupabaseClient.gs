@@ -14,23 +14,42 @@ function getSupabaseConfig_() {
 function callRpc_(fnName, payload) {
   const { base, key } = getSupabaseConfig_();
   const url = base.replace(/\/$/, '') + '/rest/v1/rpc/' + fnName;
-  const res = UrlFetchApp.fetch(url, {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload || {}),
-    muteHttpExceptions: true,
-    headers: {
-      'apikey': key,
-      'Authorization': 'Bearer ' + key,
-      'Prefer': 'return=representation'
+
+  // 軽いリトライ（DB側の一時的な過負荷・statement_timeout回避用）
+  // 3回まで指数バックオフ（1s, 2s, 4s）。GAS全体の実行上限を考慮して控えめに設定
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload || {}),
+      muteHttpExceptions: true,
+      headers: {
+        'apikey': key,
+        'Authorization': 'Bearer ' + key,
+        'Prefer': 'return=representation'
+      }
+    });
+    const code = res.getResponseCode();
+    const text = res.getContentText();
+    if (code >= 200 && code < 300) {
+      try { return JSON.parse(text || 'null'); } catch (e) { return null; }
     }
-  });
-  const code = res.getResponseCode();
-  const text = res.getContentText();
-  if (code >= 200 && code < 300) {
-    try { return JSON.parse(text || 'null'); } catch (e) { return null; }
+
+    // 5xx かつ statement_timeout に類するメッセージのみリトライ対象
+    const lower = (text || '').toLowerCase();
+    const isRetryable = (code >= 500 && code < 600) && (
+      lower.includes('statement timeout') ||
+      lower.includes('canceling statement') ||
+      lower.includes('57014')
+    );
+    if (attempt < maxAttempts && isRetryable) {
+      const backoffMs = Math.pow(2, attempt - 1) * 1000; // 1s,2s,4s
+      Utilities.sleep(backoffMs);
+      continue;
+    }
+    throw new Error('Supabase RPC error ' + code + ': ' + text);
   }
-  throw new Error('Supabase RPC error ' + code + ': ' + text);
 }
 
 /** リセット */
