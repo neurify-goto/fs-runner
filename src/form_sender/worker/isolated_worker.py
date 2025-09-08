@@ -1453,58 +1453,103 @@ class IsolatedFormWorker:
                 logger.warning(f"Worker {self.worker_id}: SuccessJudge pre-initialize failed on confirmation: {e}")
 
             async def _find_button_by_keyword(keyword: str):
-                # 1) role=button (アクセシブルネーム)
+                """最終送信ボタン探索（同一 form 内優先 + 除外語フィルタ）"""
+                async def _is_excluded(el) -> bool:
+                    try:
+                        text_parts = []
+                        try:
+                            t = await el.inner_text()
+                            if t:
+                                text_parts.append(t)
+                        except Exception:
+                            pass
+                        try:
+                            v = await el.get_attribute("value")
+                            if v:
+                                text_parts.append(v)
+                        except Exception:
+                            pass
+                        try:
+                            a = await el.get_attribute("aria-label")
+                            if a:
+                                text_parts.append(a)
+                        except Exception:
+                            pass
+                        txt = " ".join(text_parts).lower()
+                        excludes = [s.lower() for s in get_exclude_keywords()]
+                        return any(x in txt for x in excludes)
+                    except Exception:
+                        return False
+
+                # 1) form スコープ内の role=button（アクセシブルネーム）
                 try:
-                    loc = dom_ctx.get_by_role("button", name=re.compile(keyword, re.IGNORECASE))
+                    form_loc = dom_ctx.locator("form")
+                    loc = form_loc.get_by_role("button", name=re.compile(keyword, re.IGNORECASE))
                     if await loc.count():
                         el = loc.first
-                        if await el.is_visible():
-                            return el, f"role=button[name~={keyword}]"
+                        if await el.is_visible() and not await _is_excluded(el):
+                            return el, f"form>>role=button[name~={keyword}]"
                 except Exception as e:
-                    logger.debug(f"Worker {self.worker_id}: role search failed: {e}")
-                # 2) button/input かつテキスト一致
+                    logger.debug(f"Worker {self.worker_id}: role(form) search failed: {e}")
+
+                # 2) form 内の button/input でテキスト一致
                 selectors = [
-                    f'button[type="submit"]:has-text("{keyword}")',
-                    f'button:has-text("{keyword}")',
-                    f'input[type="submit"][value*="{keyword}"]',
-                    f'input[value*="{keyword}"]',
+                    f'form button[type="submit"]:has-text("{keyword}")',
+                    f'form button:has-text("{keyword}")',
+                    f'form input[type="submit"][value*="{keyword}"]',
+                    f'form input[value*="{keyword}"]',
                 ]
                 for selector in selectors:
                     try:
                         el = await dom_ctx.query_selector(selector)
-                        if el and await el.is_visible():
+                        if el and await el.is_visible() and not await _is_excluded(el):
                             return el, selector
                     except Exception as e:
-                        logger.debug(f"Worker {self.worker_id}: selector search failed: {selector} / {e}")
+                        logger.debug(f"Worker {self.worker_id}: selector(form) search failed: {selector} / {e}")
                         continue
-                # 3) anchor/role/aria
+
+                # 3) form 内の anchor role=button
                 selectors2 = [
-                    f'a[role="button"]:has-text("{keyword}")',
-                    f'[role="button"]:has-text("{keyword}")',
-                    f'a.button:has-text("{keyword}")',
-                    f'[aria-label*="{keyword}"]',
+                    f'form a[role="button"]:has-text("{keyword}")',
+                    f'form [role="button"]:has-text("{keyword}")',
                 ]
                 for selector in selectors2:
                     try:
                         el = await dom_ctx.query_selector(selector)
-                        if el and await el.is_visible():
+                        if el and await el.is_visible() and not await _is_excluded(el):
                             return el, selector
                     except Exception as e:
-                        logger.debug(f"Worker {self.worker_id}: anchor/aria search failed: {selector} / {e}")
+                        logger.debug(f"Worker {self.worker_id}: selector2(form) search failed: {selector} / {e}")
                         continue
-                # 4) 画像ボタン/onclick
+
+                # 4) フォールバック: グローバル role=button だが、closest('form') がある場合のみ
+                try:
+                    loc2 = dom_ctx.get_by_role("button", name=re.compile(keyword, re.IGNORECASE))
+                    if await loc2.count():
+                        el = loc2.first
+                        try:
+                            within_form = await el.evaluate("el => !!el.closest('form')")
+                        except Exception:
+                            within_form = False
+                        if within_form and await el.is_visible() and not await _is_excluded(el):
+                            return el, f"role=button[name~={keyword}] (within_form)"
+                except Exception as e:
+                    logger.debug(f"Worker {self.worker_id}: role(global) fallback failed: {e}")
+
+                # 5) 画像ボタン/onclick（form 内のみに限定）
                 selectors3 = [
-                    f'input[type="image"][alt*="{keyword}"]',
-                    f'button[onclick*="submit"]:has-text("{keyword}")',
+                    f'form input[type="image"][alt*="{keyword}"]',
+                    f'form button[onclick*="submit"]:has-text("{keyword}")',
                 ]
                 for selector in selectors3:
                     try:
                         el = await dom_ctx.query_selector(selector)
-                        if el and await el.is_visible():
+                        if el and await el.is_visible() and not await _is_excluded(el):
                             return el, selector
                     except Exception as e:
-                        logger.debug(f"Worker {self.worker_id}: image/onclick search failed: {selector} / {e}")
+                        logger.debug(f"Worker {self.worker_id}: image/onclick(form) search failed: {selector} / {e}")
                         continue
+
                 return None, None
 
             found = None
