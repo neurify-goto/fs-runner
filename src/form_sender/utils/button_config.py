@@ -43,6 +43,33 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
             "チェック",
             "check",
         ],
+        # 確認ページ上の「最終送信」向けキーワード（広め）
+        # 目的: 企業サイトで多用される業務語彙（応募/申込/エントリー等）や
+        #       UI文言（「この内容で送信」「確認して送信」）を取りこぼさないための既定セット。
+        # 運用で増減しやすいため、コード側のハードコードは避け、設定で管理する。
+        "final": [
+            "送信する",
+            "この内容で送信",
+            "確認して送信",
+            "応募",
+            "応募する",
+            "申込",
+            "申し込み",
+            "申込み",
+            "エントリー",
+            "エントリーする",
+            "お問い合わせ送信",
+            "登録する",
+            "確定する",
+            "決定する",
+            "注文する",
+            "送信",
+            "submit",
+            "send",
+            "完了",
+            "決定",
+            "確定",
+        ],
     },
     "fallback_selectors": {
         "primary": [
@@ -122,4 +149,3 @@ def get_exclude_keywords() -> List[str]:
 def get_fallback_selectors() -> Dict[str, List[str]]:
     cfg = load_button_config()
     return cfg.get("fallback_selectors", _DEFAULT_CONFIG["fallback_selectors"])  # type: ignore
-

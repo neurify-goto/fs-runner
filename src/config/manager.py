@@ -18,7 +18,27 @@ class ConfigManager:
     def get_worker_config(self) -> Dict[str, Any]:
         """Worker設定を取得"""
         if self._worker_config is None:
-            self._worker_config = self._load_config("worker_config.json")
+            cfg = self._load_config("worker_config.json")
+            # 軽いバリデーション/正規化（安全側のフォールバック）
+            try:
+                fs = cfg.get("final_submit")
+                if isinstance(fs, dict):
+                    raw = fs.get("confirmation_extra_wait_ms", 2000)
+                    try:
+                        v = int(raw)
+                    except Exception:
+                        v = 2000
+                    # 0〜20000ms にクランプ（過剰待機抑止）
+                    if v < 0:
+                        v = 0
+                    if v > 20000:
+                        v = 20000
+                    fs["confirmation_extra_wait_ms"] = v
+                else:
+                    cfg["final_submit"] = {"confirmation_extra_wait_ms": 2000}
+            except Exception:
+                pass
+            self._worker_config = cfg
         return self._worker_config
     
     def get_retry_config(self) -> Dict[str, Any]:
