@@ -478,6 +478,15 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
 
     # 4) finalize via RPC（固定 company_id の場合も submissions 記録目的で呼ぶ。send_queue更新は0件でも問題なし）
     try:
+        # Bot保護が検出されている場合は error_type を BOT_DETECTED に寄せる（優先）
+        if not is_success:
+            try:
+                if bp and (
+                    not error_type or (isinstance(error_type, str) and error_type not in {"BOT_DETECTED", "WAF_CHALLENGE"})
+                ):
+                    error_type = "BOT_DETECTED"
+            except Exception:
+                pass
         supabase.rpc('mark_done', {
             'p_target_date': str(target_date),
             'p_targeting_id': targeting_id,

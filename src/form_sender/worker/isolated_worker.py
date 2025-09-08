@@ -28,6 +28,7 @@ from config.manager import (
 )
 from config.manager import get_privacy_consent_config
 from ..detection.bot_detector import BotDetectionSystem
+from ..detection.constants import BOT_DETECTION_KEYWORDS
 from ..detection.pattern_matcher import FormDetectionPatternMatcher
 from ..template.company_processor import CompanyPlaceholderAnalyzer
 from ..control.recovery_manager import AutoRecoveryManager
@@ -432,14 +433,19 @@ class IsolatedFormWorker:
                     # 最終試行でも失敗した場合
                     if attempt >= max_retries:
                         error_context = {
-                            'error_message': error_msg, 'error_location': 'page_access',
-                            'page_url': form_url, 'is_timeout': 'timeout' in error_msg.lower(),
-                            'is_bot_detected': any(k in error_msg.lower() for k in ['recaptcha', 'cloudflare', 'bot'])
+                            'error_message': error_msg,
+                            'error_location': 'page_access',
+                            'page_url': form_url,
+                            'is_timeout': 'timeout' in error_msg.lower(),
+                            'is_bot_detected': any(k in error_msg.lower() for k in BOT_DETECTION_KEYWORDS),
                         }
                         error_type = ErrorClassifier.classify_error_type(error_context)
                         return {
-                            "error": True, "record_id": record_id, "status": "failed",
-                            "error_type": error_type, "error_message": f"Failed after {max_retries + 1} attempts: {error_msg}",
+                            "error": True,
+                            "record_id": record_id,
+                            "status": "failed",
+                            "error_type": error_type,
+                            "error_message": f"Failed after {max_retries + 1} attempts: {error_msg}",
                             "instruction_valid_updated": ErrorClassifier.should_update_instruction_valid(error_type),
                         }
 
@@ -850,11 +856,41 @@ class IsolatedFormWorker:
             
             if not submit_element:
                 logger.warning(f"Worker {self.worker_id}: No submit button found with rule-based search")
+                # 付加情報: 可能ならページ内容を短く取得（Bot検出補助）
+                page_snippet = ""
+                try:
+                    dom_ctx = getattr(self, '_dom_context', self.page)
+                    # 大きなページでも安全に先頭のみ取得（ブラウザ側で切り詰め）
+                    page_snippet = await asyncio.wait_for(
+                        dom_ctx.evaluate("document.documentElement.outerHTML.slice(0, 1000)"),
+                        timeout=5,
+                    )
+                except Exception as e:
+                    logger.debug(f"Worker {self.worker_id}: page snippet acquisition skipped: {e}")
+
+                # Bot保護（reCAPTCHA/Cloudflare等）の厳格検知を一度試す
+                try:
+                    is_bot_detected, bot_type = await self.bot_detector.detect_bot_protection(getattr(self, '_dom_context', self.page))
+                except Exception as e:
+                    logger.debug(f"Worker {self.worker_id}: Bot detection failed during no-submit path: {e}")
+                    is_bot_detected, bot_type = (False, None)
+
+                if is_bot_detected:
+                    err = f"Bot protection detected (no submit found): {bot_type}" if bot_type else "Bot protection detected (no submit found)"
+                    return {
+                        "success": False,
+                        "error_message": err,
+                        "has_url_change": False,
+                        "page_content": page_snippet,
+                        "submit_selector": "",
+                        "bot_protection_detected": True,
+                    }
+
                 return {
                     "success": False,
                     "error_message": "Submit button not found",
                     "has_url_change": False,
-                    "page_content": "",
+                    "page_content": page_snippet,
                     "submit_selector": ""
                 }
             
@@ -1526,6 +1562,8 @@ class IsolatedFormWorker:
                             (self._content_sanitizer.sanitize_string(page_content[:600]) if self._content_sanitizer else "")
                             if isinstance(page_content, str) else ""
                         ),
+                        # 追加: Bot検出フラグを分類コンテキストに明示含める
+                        "is_bot_detected": bool(submit_result.get("bot_protection_detected", False)),
                     }
 
                     # 既存 additional_data（例: retry メタ）と安全にマージ

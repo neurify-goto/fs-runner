@@ -70,13 +70,9 @@ class SubmitButtonDetector:
                     try:
                         if not await el.is_visible():
                             continue
-                        # 有効性チェック（例外は黙殺して続行）
-                        try:
-                            if hasattr(el, "is_enabled") and not await el.is_enabled():
-                                # disabledは基本スキップ（後段でenable待ちするため検出のみは残しても良いが、ここでは品質重視で除外）
-                                continue
-                        except Exception:
-                            pass
+                        # 重要: disabledな送信ボタンは解析段階では除外しない
+                        # 実送信処理側で有効化待機やフォース有効化を行うため、
+                        # ここでは候補として確保しておく（検出精度向上）。
 
                         text = (await el.text_content()) or ""
                         value = (await el.get_attribute("value")) or ""
