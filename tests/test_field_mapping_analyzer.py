@@ -883,6 +883,27 @@ class FieldMappingAnalyzer:
                     logger.info(
                         f"📋 HubSpot elements: containers={hubspot_info['hbsptForms']}, inputs={hubspot_info['hsInputs']}, fieldsets={hubspot_info['hsFieldsets']}"
                     )
+        else:
+            # 追加戦略: form は存在するが input/textarea/select が 0 の場合、
+            # 動的生成を考慮して待機を試行する（例: 外部プラットフォーム埋め込み等）。
+            try:
+                inputs_total = await self.page.evaluate(
+                    "document.querySelectorAll('input, textarea, select').length"
+                )
+            except Exception:
+                inputs_total = 0
+            if int(inputs_total or 0) == 0:
+                logger.info(
+                    "Forms present but no inputs detected; waiting for dynamic content..."
+                )
+                success = await self._wait_for_dynamic_content()
+                if success:
+                    form_count = await self.page.evaluate(
+                        "document.querySelectorAll('form').length"
+                    )
+                    logger.info(
+                        f"📋 Elements found after dynamic waiting: forms={form_count}"
+                    )
         return form_count
 
     async def _extract_form_content_with_iframes(
@@ -893,8 +914,25 @@ class FieldMappingAnalyzer:
         form_content = self._extract_form_content(page_source)
 
         target_frame = None
-        if form_count == 0:  # メインページにformがない場合のみチェック
-            logger.info("🔍 No forms found in main page, checking iframes...")
+        # フォームが無い、またはフォームはあるが入力欄が0の場合は iframe も確認
+        need_iframe_check = False
+        if form_count == 0:
+            need_iframe_check = True
+        else:
+            try:
+                inputs_total = await self.page.evaluate(
+                    "document.querySelectorAll('input, textarea, select').length"
+                )
+            except Exception:
+                inputs_total = 0
+            if int(inputs_total or 0) == 0:
+                need_iframe_check = True
+
+        if need_iframe_check:
+            if form_count == 0:
+                logger.info("🔍 No forms found in main page, checking iframes...")
+            else:
+                logger.info("🔍 Forms exist but no inputs found; checking iframes...")
             iframe_content, target_frame = await self._analyze_iframes()
             if iframe_content:
                 form_content += "\n\n" + iframe_content
