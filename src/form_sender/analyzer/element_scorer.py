@@ -1891,7 +1891,8 @@ class ElementScorer:
                         if (cls.includes('require') || cls.includes('required')) return true;
                         if (txt === '*' || txt === '＊' || txt.includes('必須')) return true;
                         // 『※』は注記と紛れるため短文(<=10文字)に限定
-                        if (txt.includes('※') && txt.length <= 10) return true;
+                        // 『※』単独は注記の可能性が高いため無効。『※必須』等の組合せのみ許可
+                        if ((/※\s*必須/.test(txt))) return true;
                         return false;
                       };
                       let p = el.parentElement; let depth = 0;
@@ -1972,7 +1973,8 @@ class ElementScorer:
                           if (!txt) return false;
                           if (MARKS.some(m => txt.includes(m))) return true;
                           // 『※』は短文（<=10文字）のときのみ必須と判断
-                          if (txt.includes('※') && txt.length <= 10) return true;
+                          // 『※必須』のみ必須扱い（※単独は無効）
+                          if ((/※\s*必須/.test(txt))) return true;
                           return false;
                         } catch { return false; }
                       };
@@ -2012,7 +2014,8 @@ class ElementScorer:
                             const txt = (node.innerText || node.textContent || '').trim();
                             if (!txt) return false;
                             if (MARKS.some(m => txt.includes(m))) return true;
-                            if (txt.includes('※') && txt.length <= 10) return true;
+                            // 『※必須』のみ必須扱い（※単独は無効）
+                            if ((/※\s*必須/.test(txt))) return true;
                             return false;
                           };
                           for (const id of ids) {
@@ -2106,10 +2109,9 @@ class ElementScorer:
                 return False
 
             # 同じグループ内の非入力要素から必須マーカーを探す
-            # 『※』は注記用途が多く誤検出の原因になるため除外
+            # 『※』単独は注記用途が多く誤検出の原因になるため除外（『※必須』等は Context 判定側で許容）
             required_markers = [
                 "*",
-                "※",
                 "必須",
                 "Required",
                 "Mandatory",
@@ -2230,7 +2232,6 @@ class ElementScorer:
             required_markers = [
                 "*",
                 "＊",
-                "※",
                 "必須",
                 "Required",
                 "Mandatory",
@@ -2321,7 +2322,6 @@ class ElementScorer:
             required_markers = [
                 "*",
                 "＊",
-                "※",
                 "必須",
                 "Required",
                 "Mandatory",
