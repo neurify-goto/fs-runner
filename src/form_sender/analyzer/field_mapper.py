@@ -98,8 +98,8 @@ class FieldMapper:
                         logger.info(
                             "Skip '統合氏名カナ' due to detected split candidates in DOM"
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Skip unified kana log failed: {e}")
                     continue
             except Exception:
                 pass

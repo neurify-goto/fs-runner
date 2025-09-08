@@ -79,6 +79,11 @@ class ElementScorer:
         "hidden",
     }
 
+    # 罠フィールドの代表トークン（name/id/classに対して語単位で高速判定）
+    TRAP_TOKENS_SET = frozenset({
+        "honeypot", "honey", "trap", "botfield", "no-print", "noprint"
+    })
+
     # 長語のしきい値（class 部分一致を許可する長さ）
     # 根拠: 実フォーム観察で security-critical な長語（verification/password/authentication 等）が
     # 8文字以上に分布しており、false positive を最小化しつつ検出力を確保できる経験値。
