@@ -389,6 +389,39 @@ def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dic
         stage_name = judgment.get('stage_name') if isinstance(judgment.get('stage_name'), str) else None
         confidence = judgment.get('confidence') if isinstance(judgment.get('confidence'), (int, float)) else None
 
+        # 営業禁止検出に関する付加情報（件数/レベル/検出元）
+        try:
+            prohibition_phrases_count = None
+            # SuccessJudge 経由（details）
+            if isinstance(details.get('phrases_count'), (int, float)):
+                try:
+                    prohibition_phrases_count = int(details.get('phrases_count'))
+                except Exception:
+                    prohibition_phrases_count = None
+            # Worker 早期検出サマリー
+            if prohibition_phrases_count is None:
+                ps = add_data.get('prohibition_summary') if isinstance(add_data.get('prohibition_summary'), dict) else None
+                if ps and isinstance(ps.get('matches_count'), (int, float)):
+                    try:
+                        prohibition_phrases_count = int(ps.get('matches_count'))
+                    except Exception:
+                        prohibition_phrases_count = None
+            # 追加メタ（任意）
+            prohibition_detection_level = None
+            prohibition_detection_source = None
+            ps = add_data.get('prohibition_summary') if isinstance(add_data.get('prohibition_summary'), dict) else None
+            if ps:
+                if isinstance(ps.get('level'), str):
+                    prohibition_detection_level = ps.get('level')
+                if isinstance(ps.get('detection_source'), str):
+                    prohibition_detection_source = ps.get('detection_source')
+            if not prohibition_detection_source and isinstance(details.get('detection_method'), str):
+                prohibition_detection_source = details.get('detection_method')
+        except Exception:
+            prohibition_phrases_count = None
+            prohibition_detection_level = None
+            prohibition_detection_source = None
+
         evidence.update({
             'detected_success_words': success_words[:5] if success_words else [],
             'detected_failure_words': failure_words[:5] if failure_words else [],
@@ -399,6 +432,10 @@ def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dic
             'stage': stage,
             'stage_name': stage_name,
             'judge_confidence': confidence,
+            # 営業禁止件数など（存在時のみ利用側で参照）
+            'prohibition_phrases_count': prohibition_phrases_count,
+            'prohibition_detection_level': prohibition_detection_level,
+            'prohibition_detection_source': prohibition_detection_source,
         })
         return evidence
     except Exception:
