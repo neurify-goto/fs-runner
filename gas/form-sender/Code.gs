@@ -72,7 +72,9 @@ const CONFIG = {
   JST_OFFSET: 9 * 60 * 60 * 1000, // JST のオフセット（ミリ秒）
   // 1ワークフロー内で起動するPythonワーカー数（1〜4）
   // GitHub Actions で --num-workers に反映されます
-  WORKERS_PER_WORKFLOW: 4
+  WORKERS_PER_WORKFLOW: 4,
+  // 日本の祝日カレンダーID（Google 公式）
+  HOLIDAY_CALENDAR_ID: 'ja.japanese#holiday@group.v.calendar.google.com'
 };
 
 /**
@@ -89,6 +91,19 @@ function startFormSenderFromTrigger() {
       console.log(`実行済トリガー削除成功: ${deleteResult.message}`);
     } else if (!deleteResult.success) {
       console.warn('実行済トリガー削除で問題発生:', deleteResult.error);
+    }
+    
+    // 当日が非営業日（週末/祝日）の場合は処理をスキップし、次回のみ設定
+    const jstToday = new Date(new Date().getTime() + CONFIG.JST_OFFSET);
+    if (!isBusinessDayJst_(jstToday)) {
+      console.log('本日は週末または祝日のため、処理をスキップします（通常トリガー）');
+      const nextTriggerResult = createNextDayTrigger();
+      if (nextTriggerResult.success) {
+        console.log(`次回トリガー作成完了: ${nextTriggerResult.execute_at_jst}`);
+      } else {
+        console.error(`次回トリガー作成失敗: ${nextTriggerResult.error}`);
+      }
+      return { success: true, skipped: true, reason: 'non-business-day', next_trigger: nextTriggerResult };
     }
     
     // スプレッドシートからアクティブなターゲティング設定を取得
@@ -165,6 +180,50 @@ function startFormSenderFromTrigger() {
 }
 
 /**
+ * 日本の祝日・週末を考慮した営業日判定（JST基準）
+ * @param {Date} jstDate JST基準として扱うDate（本ファイルではJSTオフセット加算後のDateを渡す想定）
+ * @returns {boolean} 営業日であればtrue
+ */
+function isBusinessDayJst_(jstDate) {
+  try {
+    const dow = jstDate.getDay(); // 0=日,6=土（JSTにシフト済みのDateを想定）
+    if (dow === 0 || dow === 6) return false; // 週末
+    if (isJapanHolidayJst_(jstDate)) return false; // 祝日
+    return true;
+  } catch (e) {
+    console.error('isBusinessDayJst_ error:', e);
+    // 判定に失敗した場合は安全側（営業日ではないとみなす）
+    return false;
+  }
+}
+
+/**
+ * 日本の祝日判定（JST基準）
+ * - Google公式の「日本の祝日」カレンダーを参照
+ * - 当日（終日イベント）が存在すれば祝日とみなす
+ * @param {Date} jstDate JST基準として扱うDate
+ * @returns {boolean} 祝日であればtrue
+ */
+function isJapanHolidayJst_(jstDate) {
+  try {
+    const cal = CalendarApp.getCalendarById(CONFIG.HOLIDAY_CALENDAR_ID);
+    if (!cal) {
+      console.warn('日本の祝日カレンダーを取得できませんでした。祝日回避は無効になります。');
+      return false;
+    }
+    // getEventsForDay はスクリプトのタイムゾーンに依存するが、
+    // 本ファイル内ではJSTにシフトしたDateを渡すため、日付境界の問題は避けられる前提とする。
+    const events = cal.getEventsForDay(new Date(jstDate));
+    if (!events || events.length === 0) return false;
+    // 祝日は終日イベントとして登録されている想定
+    return events.some(function(ev) { return ev.isAllDayEvent(); });
+  } catch (e) {
+    console.error('isJapanHolidayJst_ error:', e);
+    return false;
+  }
+}
+
+/**
  * 7時専用トリガーから呼び出すメイン関数
  * - 当日7:00用の自分自身のトリガー（存在すれば）を削除
  * - 全アクティブtargetingを処理
@@ -174,6 +233,15 @@ function startFormSenderFromTriggerAt7() {
   console.log('時間トリガー(7:00)によりフォーム送信制御を開始します');
 
   try {
+    // 当日が非営業日（週末/祝日）の場合は処理せずに翌営業日の7:00へ再スケジュール
+    const jstToday = new Date(new Date().getTime() + CONFIG.JST_OFFSET);
+    if (!isBusinessDayJst_(jstToday)) {
+      console.log('本日は週末または祝日のため、処理をスキップします（7:00）');
+      const nextJst = getNextWeekdayExecutionTimeAt(7);
+      const next = createSpecificTimeTriggerFor('startFormSenderFromTriggerAt7', nextJst);
+      return { success: true, skipped: true, reason: 'non-business-day', next_trigger: next };
+    }
+
     // 7:00用の既存トリガーをクリーンアップ
     const del = deleteTriggersByHandler('startFormSenderFromTriggerAt7');
     if (!del.success) console.warn('7時トリガー削除で問題発生:', del.error);
@@ -227,6 +295,15 @@ function startFormSenderFromTriggerAt13() {
   console.log('時間トリガー(13:00)によりフォーム送信制御を開始します');
 
   try {
+    // 当日が非営業日（週末/祝日）の場合は処理せずに翌営業日の13:00へ再スケジュール
+    const jstToday = new Date(new Date().getTime() + CONFIG.JST_OFFSET);
+    if (!isBusinessDayJst_(jstToday)) {
+      console.log('本日は週末または祝日のため、処理をスキップします（13:00）');
+      const nextJst = getNextWeekdayExecutionTimeAt(13);
+      const next = createSpecificTimeTriggerFor('startFormSenderFromTriggerAt13', nextJst);
+      return { success: true, skipped: true, reason: 'non-business-day', next_trigger: next };
+    }
+
     // 13:00用の既存トリガーをクリーンアップ
     const del = deleteTriggersByHandler('startFormSenderFromTriggerAt13');
     if (!del.success) console.warn('13時トリガー削除で問題発生:', del.error);
@@ -500,6 +577,12 @@ function isWithinBusinessHours(targetingConfig) {
     const currentDayOfWeek = (jsDay === 0) ? 6 : jsDay - 1; // 日曜を6に、他は1つ減らす
     const allowedDays = targetingConfig.send_days_of_week || [0, 1, 2, 3, 4]; // デフォルト: 平日(月火水木金)
     
+    // 祝日チェック（祝日は非営業日扱い）
+    if (isJapanHolidayJst_(jstNow)) {
+      console.log('本日は日本の祝日のため非営業日扱い: 処理をスキップ');
+      return false;
+    }
+
     if (!allowedDays.includes(currentDayOfWeek)) {
       console.log(`営業日ではありません: 現在=${currentDayOfWeek}, 許可=${allowedDays}`);
       return false;
@@ -1500,42 +1583,30 @@ function createSpecificTimeTriggerFor(handlerFunction, executeDateTime) {
 function getNextExecutionTime() {
   const now = new Date();
   const jstNow = new Date(now.getTime() + CONFIG.JST_OFFSET);
-  
-  // 現在の曜日を取得（JavaScript getDay()準拠: 0=日, 1=月, 2=火, 3=水, 4=木, 5=金, 6=土）
-  const currentDayOfWeek = jstNow.getDay();
-  let hoursToAdd = 24; // デフォルトは24時間後
-  let skipReason = '';
-  
-  // 土日回避ロジック
-  if (currentDayOfWeek === 5) { // 金曜日の場合
-    hoursToAdd = 72; // 72時間後（月曜日）
-    skipReason = '金曜日のため土日をスキップして月曜日に設定';
-  } else if (currentDayOfWeek === 6) { // 土曜日の場合
-    hoursToAdd = 48; // 48時間後（月曜日）
-    skipReason = '土曜日のため日曜日をスキップして月曜日に設定';
-  } else {
-    skipReason = '平日のため翌日に設定';
+
+  // 基本方針: 「翌日 同時刻（分は00固定）」を起点に、祝日・週末を抜けるまで1日ずつ進める
+  let candidate = new Date(jstNow.getTime() + 24 * 60 * 60 * 1000);
+  candidate.setMinutes(0, 0, 0);
+
+  let pushedDays = 0;
+  while (!isBusinessDayJst_(candidate)) {
+    candidate = new Date(candidate.getTime() + 24 * 60 * 60 * 1000);
+    pushedDays += 1;
   }
-  
-  // 指定時間後の同時刻を計算
-  const nextExecution = new Date(jstNow.getTime() + (hoursToAdd * 60 * 60 * 1000));
-  
-  // 分を00に設定
-  nextExecution.setMinutes(0);
-  nextExecution.setSeconds(0);
-  nextExecution.setMilliseconds(0);
-  
-  // JST→UTCに変換
-  const nextExecutionUTC = new Date(nextExecution.getTime() - CONFIG.JST_OFFSET);
-  
-  // 曜日名を取得
+
+  const nextExecutionUTC = new Date(candidate.getTime() - CONFIG.JST_OFFSET);
+
   const dayNames = ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日'];
-  const currentDayName = dayNames[currentDayOfWeek];
-  const nextDayName = dayNames[nextExecution.getDay()];
-  
-  console.log(`次回実行時刻計算（土日回避）: 現在=${currentDayName} ${jstNow.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}, 次回=${nextDayName} ${nextExecution.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})} (${hoursToAdd}時間後)`);
-  console.log(`土日回避: ${skipReason}`);
-  
+  const currentDayName = dayNames[jstNow.getDay()];
+  const nextDayName = dayNames[candidate.getDay()];
+
+  const reason = pushedDays === 0
+    ? '翌日が営業日のためそのまま設定'
+    : `非営業日（週末/祝日）を ${pushedDays} 日スキップ`;
+
+  console.log(`次回実行時刻計算（祝日/週末回避）: 現在=${currentDayName} ${jstNow.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}, 次回=${nextDayName} ${candidate.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}`);
+  console.log(`回避理由: ${reason}`);
+
   return nextExecutionUTC;
 }
 
@@ -1655,25 +1726,25 @@ function deleteTriggersByHandler(handlerFunction) {
  */
 function getNextWeekdayExecutionTimeAt(hour) {
   const now = new Date();
-  // 現在時刻(UTC)→JSTに換算
   const jstNow = new Date(now.getTime() + CONFIG.JST_OFFSET);
 
-  // 翌日ベース
-  const jstTarget = new Date(jstNow); // clone
+  // 翌日・指定時刻(JST)から開始
+  const jstTarget = new Date(jstNow);
   jstTarget.setDate(jstTarget.getDate() + 1);
   jstTarget.setHours(hour, 0, 0, 0);
 
-  // 土日スキップ
-  // 0=日,1=月,2=火,3=水,4=木,5=金,6=土 (JS)
-  // jstTargetの曜日に応じて調整
-  let dow = jstTarget.getDay();
-  if (dow === 6) { // 土曜日 → 月曜まで+2日
-    jstTarget.setDate(jstTarget.getDate() + 2);
-  } else if (dow === 0) { // 日曜日 → 月曜まで+1日
+  // 祝日/週末を回避
+  let pushedDays = 0;
+  while (!isBusinessDayJst_(jstTarget)) {
     jstTarget.setDate(jstTarget.getDate() + 1);
+    pushedDays += 1;
   }
 
-  // 最終的にUTCへ戻す
+  if (pushedDays > 0) {
+    console.log(`次の営業日(${hour}:00)まで ${pushedDays} 日スキップ（週末/祝日回避）`);
+  }
+
+  // UTCへ戻す
   const utc = new Date(jstTarget.getTime() - CONFIG.JST_OFFSET);
   return utc;
 }
