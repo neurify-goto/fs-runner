@@ -163,11 +163,12 @@ class RuleBasedAnalyzer:
                 await self.pre_processor.perform_progressive_scroll()
 
             # --- Early Sales Prohibition Detection (before mapping) ---
+            early_prohibition = None
             try:
                 early_prohibition = await self.sales_prohibition_detector.detect_prohibition_text()
             except Exception as e:
-                logger.debug(f"Early prohibition detection skipped: {e}")
-                early_prohibition = {"has_prohibition": False}
+                logger.debug(f"Early prohibition detection failed (will fallback later): {e}")
+                early_prohibition = None  # 例外時は必ず遅延側で再検出する
 
             if bool(early_prohibition.get('has_prohibition')) or bool(early_prohibition.get('prohibition_detected')):
                 analysis_time = time.time() - analysis_start
@@ -369,7 +370,12 @@ class RuleBasedAnalyzer:
                 self.form_structure.form_locator if self.form_structure else None
             )
             # 遅い段階の禁止検出は基本的に不要だが、後方互換で残す
-            prohibition_result = early_prohibition if early_prohibition else await self.sales_prohibition_detector.detect_prohibition_text()
+            # 早期検出が例外で失敗した場合のみ、遅延側の検出を実行
+            prohibition_result = (
+                early_prohibition
+                if early_prohibition is not None
+                else await self.sales_prohibition_detector.detect_prohibition_text()
+            )
 
             analysis_time = time.time() - analysis_start
 
