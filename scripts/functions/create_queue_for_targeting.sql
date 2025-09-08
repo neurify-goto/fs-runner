@@ -32,16 +32,24 @@ begin
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
   if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
-    -- 危険キーワード/記号を禁止（大文字小文字無視）
-    -- 1) 区切り記号/コメント/ヌルバイト
-    if trim(p_targeting_sql) ~* '(;|--|/\*|\*/|\\x00)' then
-      raise exception 'Invalid targeting_sql: contains forbidden tokens';
-    end if;
-    -- 2) 危険なステートメント単語（単語境界で判定）
-    --    \m / \M は PostgreSQL の単語境界（ARE）
-    if trim(p_targeting_sql) ~* '(\m(insert|update|delete|drop|alter|create|grant|revoke|truncate|commit|rollback|with|union)\M)' then
-      raise exception 'Invalid targeting_sql: contains forbidden statements';
-    end if;
+    -- 危険キーワード/記号を禁止（大文字小文字無視）。最初にヒットしたパターンを抽出して例外メッセージに含める
+    declare
+      v_forbidden_token text;
+      v_forbidden_stmt  text;
+    begin
+      select (regexp_matches(trim(p_targeting_sql), '(;|--|/\*|\*/|\\x00)', 'i'))[1]
+        into v_forbidden_token;
+      if v_forbidden_token is not null then
+        raise exception 'Invalid targeting_sql contains forbidden token: %', v_forbidden_token;
+      end if;
+
+      -- 危険なステートメント単語（単語境界で判定）\m/\M はARE
+      select (regexp_matches(trim(p_targeting_sql), '(\m(insert|update|delete|drop|alter|create|grant|revoke|truncate|commit|rollback|with|union)\M)', 'i'))[1]
+        into v_forbidden_stmt;
+      if v_forbidden_stmt is not null then
+        raise exception 'Invalid targeting_sql contains forbidden statement: %', v_forbidden_stmt;
+      end if;
+    end;
   end if;
   -- NG社名リストを配列化（全角カンマを半角へ、空白除去）
   if p_ng_companies is null or length(trim(p_ng_companies)) = 0 then
