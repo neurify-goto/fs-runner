@@ -2,7 +2,7 @@ name: Codex Review Comment
 
 on:
   pull_request_target:
-    types: [opened, synchronize]
+    # types: [opened, synchronize]
 
 # GITHUB_TOKEN の既定権限が Read の環境でも明示的に昇格
 permissions:
