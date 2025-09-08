@@ -18,9 +18,8 @@ declare
   v_ins integer := 0;
   v_ins2 integer := 0;
   v_ng_ids bigint[];
-  v_limit integer := 10000; -- 一律上限
-  v_min_prefill integer := 1000; -- 目標プレフィル件数（要件: 最低1000件確保を目指す）
-  v_need integer := 0;
+  v_limit integer := 10000; -- 一律上限（最大投入件数）
+  v_need integer := 0;      -- 追加で投入すべき不足分
 begin
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
@@ -78,10 +77,10 @@ begin
   execute v_sql using p_target_date, p_targeting_id, v_ng_ids, v_limit, p_shards;
   get diagnostics v_ins = row_count;
 
-  -- 追加要件: 取得件数が1000件未満の場合、
-  -- 「過去に送信試行はあるが成功履歴がないもの」を追加で投入する
-  if coalesce(v_ins, 0) < v_min_prefill then
-    v_need := v_min_prefill - coalesce(v_ins, 0);
+  -- 追加要件(改): 1段目の投入件数が上限(10000)に満たない場合、
+  -- 「過去に送信試行はあるが成功履歴がないもの」で不足分を最大10000件まで補充
+  if coalesce(v_ins, 0) < v_limit then
+    v_need := v_limit - coalesce(v_ins, 0);
 
     v_sql :=
       'with hist as (
