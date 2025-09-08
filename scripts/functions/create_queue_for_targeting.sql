@@ -74,6 +74,7 @@ begin
         and s_hist.company_id = c.id
        where c.form_url is not null
          and coalesce(c.prohibition_detected, false) = false
+         and c.duplication is null
          and s_hist.id is null';
 
   -- targeting_sql は事前にGAS側でサニタイズ・整形済みを前提（WHERE句断片）
@@ -129,6 +130,7 @@ begin
              on h.company_id = c.id
           where c.form_url is not null
             and coalesce(c.prohibition_detected, false) = false
+            and c.duplication is null
             and s_today.id is null
             and coalesce(h.has_success, false) = false';
 
