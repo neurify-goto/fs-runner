@@ -519,11 +519,18 @@ class SuccessJudge:
             }
 
     async def _early_failure_gate(self) -> Optional[Dict[str, Any]]:
-        """URL判定前の早期失敗ゲート。
-        - Bot保護（reCAPTCHA/Cloudflare）
-        - 代表的なエラーメッセージ
-        - エラー要素の可視状態
-        を検出したら即失敗とする。検出なしの場合はNoneを返す。
+        """URL判定前の早期失敗ゲート（厳格化版）。
+        次のいずれかを満たす場合のみ早期失敗とする:
+        - Bot保護（reCAPTCHA/Cloudflare）の明確な検出
+        - 可視なエラー要素（.error, [aria-invalid="true"] など）が存在
+        - ページ本文での失敗語検出が「強いシグナル」のとき
+
+        強いシグナルの基準（偽陽性抑制）:
+        - 失敗語の異なるカテゴリーから2件以上ヒット、かつ
+        - 明確な成功語が本文に出現していない、かつ
+        - URLが明確な成功パス（thanks/success/complete等）に遷移していない
+
+        検出なしの場合はNoneを返す。
         """
         try:
             # Bot保護（厳格検出）
@@ -564,20 +571,60 @@ class SuccessJudge:
                 except Exception:
                     continue
 
-            # ページ全体テキストの簡易チェック
+            # ページ全体テキストの簡易チェック（厳格化）
             try:
                 body_text = await self.page.inner_text('body')
             except Exception:
                 body_text = ''
-            if body_text and self._early_failure_regex.search(body_text):
-                return {
-                    'success': False,
-                    'stage': 1,
-                    'stage_name': '早期失敗ゲート (失敗メッセージ)',
-                    'confidence': 0.9,
-                    'details': {'matched': True},
-                    'message': '失敗を示すメッセージを検出しました'
+            if body_text:
+                text_lower = body_text.lower()
+                # 成功語の存在チェック（成功ページでの偽陽性回避）
+                has_strong_success = any(
+                    re.search(pat, body_text, re.IGNORECASE) for pat in self.success_patterns[:6]
+                )
+
+                # URLが明確な成功パスかどうか
+                try:
+                    current_url = self.page.url
+                except Exception:
+                    current_url = ''
+                success_url_signals = ['thanks', 'thank-you', 'success', 'complete', 'done', 'sent', 'submitted']
+                url_indicates_success = any(sig in (current_url or '').lower() for sig in success_url_signals)
+
+                # 失敗語のカテゴリー分布（簡易）
+                categories = {
+                    'required': [r'必須', r'未入力', r'入力\s*してください', r'is\s*required', r'please\s*(enter|select|fill)'],
+                    'invalid': [r'不正', r'無効', r'invalid', r'正しく.*入力', r'形式.*(正しく|エラー|不正)'],
+                    'retry': [r'もう一度', r'やり直し', r'retry', r'try\s*again'],
+                    'bot': [r'recaptcha|captcha|not\s*a\s*robot|human\s*verification|認証してください|画像認証|ロボットでは|人間であること']
                 }
+                matched_terms = []
+                matched_cats = set()
+                for cat, pats in categories.items():
+                    for pat in pats:
+                        if re.search(pat, text_lower, re.IGNORECASE):
+                            matched_cats.add(cat)
+                            matched_terms.append(pat)
+                            break
+
+                # 強いシグナル判定
+                is_bot_text = 'bot' in matched_cats
+                strong_signal = (len([c for c in matched_cats if c != 'bot']) >= 2) or is_bot_text
+
+                if strong_signal and not has_strong_success and not url_indicates_success:
+                    return {
+                        'success': False,
+                        'stage': 1,
+                        'stage_name': '早期失敗ゲート (失敗メッセージ:厳格)',
+                        'confidence': 0.9 if is_bot_text else 0.85,
+                        'details': {
+                            'matched_categories': sorted(list(matched_cats)),
+                            'matched_patterns': matched_terms[:8],
+                            'has_strong_success_text': has_strong_success,
+                            'url_indicates_success': url_indicates_success,
+                        },
+                        'message': '失敗を示す強いテキストシグナルを検出しました'
+                    }
 
             return None
         except Exception:
