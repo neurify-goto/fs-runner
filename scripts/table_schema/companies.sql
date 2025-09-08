@@ -13,7 +13,6 @@ create table public.companies (
   established_year integer null,
   established_month smallint null,
   detail_page text null,
-  company_id text null,
   postal_code text null,
   company_url text null,
   tel text null,
@@ -25,7 +24,6 @@ create table public.companies (
   prohibition_candidates text null,
   instruction_json text null,
   instruction_valid boolean null,
-  fetch_detail_queued boolean null,
   form_found boolean null,
   form_finder_queued boolean null,
   form_analyzer_queued boolean null,
@@ -36,12 +34,36 @@ create table public.companies (
   bot_protection_detected boolean null,
   national_id text null,
   analyzer_queued_at timestamp with time zone null,
+  fetch_detail_queued boolean null,
+  duplication boolean null,
   constraint companies_pkey primary key (id)
 ) TABLESPACE pg_default;
 
 create index IF not exists idx_companies_company_url_form_found on public.companies using btree (company_url, form_found) TABLESPACE pg_default
 where
   (company_url is not null);
+
+create index IF not exists ix_companies_prefecture on public.companies using btree (prefecture) TABLESPACE pg_default
+where
+  (
+    (form_url is not null)
+    and (COALESCE(prohibition_detected, false) = false)
+  );
+
+create index IF not exists ix_companies_stats_form_not_explored on public.companies using btree (id) TABLESPACE pg_default
+where
+  (
+    (company_url is not null)
+    and (form_found is null)
+    and (duplication is null)
+  );
+
+create index IF not exists ix_companies_stats_with_form_url on public.companies using btree (id) TABLESPACE pg_default
+where
+  (
+    (form_url is not null)
+    and (duplication is null)
+  );
 
 create index IF not exists idx_companies_industry_category_major on public.companies using btree (industry_category_major) TABLESPACE pg_default;
 
@@ -65,23 +87,12 @@ where
 
 create index IF not exists idx_companies_instruction_valid on public.companies using btree (instruction_valid) TABLESPACE pg_default;
 
-create index IF not exists idx_companies_processing_status on public.companies using btree (company_url, fetch_detail_queued, id) TABLESPACE pg_default
-where
-  (
-    (company_url is null)
-    and (fetch_detail_queued is null)
-  );
-
 create index IF not exists idx_companies_completion_status on public.companies using btree (company_url) TABLESPACE pg_default
 where
   (
     (company_url is not null)
     and (company_url <> ''::text)
   );
-
-create index IF not exists idx_companies_fetch_status on public.companies using btree (fetch_detail_queued) TABLESPACE pg_default
-where
-  (fetch_detail_queued = true);
 
 create index IF not exists idx_companies_form_found_stats on public.companies using btree (form_found) TABLESPACE pg_default
 where
@@ -114,6 +125,24 @@ where
 create index IF not exists idx_companies_instruction_exists on public.companies using btree (id) TABLESPACE pg_default
 where
   (instruction_json is not null);
+
+create index IF not exists idx_companies_processing_status on public.companies using btree (company_url, fetch_detail_queued, id) TABLESPACE pg_default
+where
+  (
+    (company_url is null)
+    and (fetch_detail_queued is null)
+  );
+
+create index IF not exists idx_companies_fetch_status on public.companies using btree (fetch_detail_queued) TABLESPACE pg_default
+where
+  (fetch_detail_queued = true);
+
+create index IF not exists ix_companies_form_allowed on public.companies using btree (id) TABLESPACE pg_default
+where
+  (
+    (form_url is not null)
+    and (COALESCE(prohibition_detected, false) = false)
+  );
 
 create index IF not exists idx_companies_no_instruction_json on public.companies using btree (id) TABLESPACE pg_default
 where
