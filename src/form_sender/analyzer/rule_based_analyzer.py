@@ -170,7 +170,14 @@ class RuleBasedAnalyzer:
                 logger.debug(f"Early prohibition detection failed (will fallback later): {e}")
                 early_prohibition = None  # 例外時は必ず遅延側で再検出する
 
-            if bool(early_prohibition.get('has_prohibition')) or bool(early_prohibition.get('prohibition_detected')):
+            has_early_detection = (
+                isinstance(early_prohibition, dict)
+                and (
+                    bool(early_prohibition.get('has_prohibition'))
+                    or bool(early_prohibition.get('prohibition_detected'))
+                )
+            )
+            if has_early_detection:
                 analysis_time = time.time() - analysis_start
                 # 解析を省略し、検出結果のみ返す（ワーカー側で送信回避）
                 return {
