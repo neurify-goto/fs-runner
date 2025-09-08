@@ -532,9 +532,12 @@ class InputValueAssigner:
 
             # If still empty after specific mapping, use fallback
             if not value:
-                # 住所補助は空文字にする（全角スペースは入力ノイズになりやすいため）
+                # 住所補助は必須時のみ全角スペースで救済し、任意時は空文字を維持
                 if str(field_name).startswith("住所_補助"):
-                    value = ""
+                    if self.required_analysis.get("treat_all_as_required", False) or field_info.get("required", False):
+                        value = "　"  # 全角スペース（送信ブロック回避）
+                    else:
+                        value = ""
                 else:
                     # For any unmappable field (when all are required or specific field is required), use full-width space
                     if self.required_analysis.get(

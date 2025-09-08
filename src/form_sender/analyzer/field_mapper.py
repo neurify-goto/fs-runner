@@ -1357,7 +1357,9 @@ class FieldMapper:
             if strong_attr:
                 threshold = max(50, threshold - 10)
             if score < threshold:
-                break
+                # 動的しきい値は候補ごとに異なるため、
+                # 現在の候補が不採用でも後続候補を検査し続ける
+                continue
             # 既に他で利用済みの要素はスキップ
             if id(el) in used_elements:
                 continue
