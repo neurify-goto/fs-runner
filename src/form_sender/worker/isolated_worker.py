@@ -850,11 +850,36 @@ class IsolatedFormWorker:
             
             if not submit_element:
                 logger.warning(f"Worker {self.worker_id}: No submit button found with rule-based search")
+                # 付加情報: 可能ならページ内容を短く取得（Bot検出補助）
+                page_snippet = ""
+                try:
+                    html = await asyncio.wait_for(getattr(self, '_dom_context', self.page).content(), timeout=5)
+                    page_snippet = html[:1000]
+                except Exception:
+                    pass
+
+                # Bot保護（reCAPTCHA/Cloudflare等）の厳格検知を一度試す
+                try:
+                    is_bot_detected, bot_type = await self.bot_detector.detect_bot_protection(getattr(self, '_dom_context', self.page))
+                except Exception:
+                    is_bot_detected, bot_type = (False, None)
+
+                if is_bot_detected:
+                    err = f"Bot protection detected (no submit found): {bot_type}" if bot_type else "Bot protection detected (no submit found)"
+                    return {
+                        "success": False,
+                        "error_message": err,
+                        "has_url_change": False,
+                        "page_content": page_snippet,
+                        "submit_selector": "",
+                        "bot_protection_detected": True,
+                    }
+
                 return {
                     "success": False,
                     "error_message": "Submit button not found",
                     "has_url_change": False,
-                    "page_content": "",
+                    "page_content": page_snippet,
                     "submit_selector": ""
                 }
             
@@ -1526,6 +1551,8 @@ class IsolatedFormWorker:
                             (self._content_sanitizer.sanitize_string(page_content[:600]) if self._content_sanitizer else "")
                             if isinstance(page_content, str) else ""
                         ),
+                        # 追加: Bot検出フラグを分類コンテキストに明示含める
+                        "is_bot_detected": bool(submit_result.get("bot_protection_detected", False)),
                     }
 
                     # 既存 additional_data（例: retry メタ）と安全にマージ
