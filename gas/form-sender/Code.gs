@@ -1619,20 +1619,20 @@ function getNextExecutionTime() {
   candidate.setMinutes(0, 0, 0);
 
   let pushedDays = 0;
-
-  // まず週末を計算でスキップ（API呼び出し削減）
-  let dow = candidate.getDay(); // 0=日,6=土
-  if (dow === 6) { // 土曜→月曜
-    candidate = new Date(candidate.getTime() + 2 * CONFIG.MILLISECONDS_PER_DAY);
-    pushedDays += 2;
-  } else if (dow === 0) { // 日曜→月曜
-    candidate = new Date(candidate.getTime() + CONFIG.MILLISECONDS_PER_DAY);
-    pushedDays += 1;
-  }
-
-  // 祝日のみをチェック。最大 CONFIG.MAX_SKIP_DAYS 日まで前進。
   let iter = 0;
+
+  // 連休や振替休日で週末化するケースに対応するため、
+  // 「週末 or 祝日」の間は前進を続ける（上限付き）。
   while (iter < CONFIG.MAX_SKIP_DAYS) {
+    const dow = candidate.getDay(); // 0=日,6=土
+    if (dow === 0 || dow === 6) {
+      // 週末はAPIを呼ばずにスキップ
+      candidate = new Date(candidate.getTime() + CONFIG.MILLISECONDS_PER_DAY);
+      pushedDays += 1;
+      iter += 1;
+      continue;
+    }
+
     const holiday = isJapanHolidayJst_(candidate);
     if (holiday === true) {
       candidate = new Date(candidate.getTime() + CONFIG.MILLISECONDS_PER_DAY);
@@ -1640,11 +1640,23 @@ function getNextExecutionTime() {
       iter += 1;
       continue;
     }
-    // holiday === false（営業日）または null（判定失敗→営業日扱い）なら抜ける
+
+    // holiday === false（営業日）または null（判定失敗→営業日扱い）
     break;
   }
   if (iter >= CONFIG.MAX_SKIP_DAYS) {
-    console.warn(`${CONFIG.MAX_SKIP_DAYS}日以上の連続非営業日または判定失敗を検出。強制的に翌日設定を採用`);
+    console.warn(`${CONFIG.MAX_SKIP_DAYS}日以上の連続非営業日/判定失敗を検出。強制的に翌日設定で続行（週末/祝日再検査は打ち切り）`);
+  }
+
+  // 念のため、上限到達時やフォールバック時でも週末では返さない
+  // （上限超過後に土日だった場合は月曜まで進める）
+  const dowFinal = candidate.getDay();
+  if (dowFinal === 6) {
+    candidate = new Date(candidate.getTime() + 2 * CONFIG.MILLISECONDS_PER_DAY);
+    pushedDays += 2;
+  } else if (dowFinal === 0) {
+    candidate = new Date(candidate.getTime() + CONFIG.MILLISECONDS_PER_DAY);
+    pushedDays += 1;
   }
 
   const nextExecutionUTC = new Date(candidate.getTime() - CONFIG.JST_OFFSET);
@@ -1787,20 +1799,18 @@ function getNextWeekdayExecutionTimeAt(hour) {
   jstTarget.setHours(hour, 0, 0, 0);
 
   let pushedDays = 0;
-
-  // 週末を先にスキップ
-  let dow = jstTarget.getDay();
-  if (dow === 6) { // 土曜→月曜
-    jstTarget = new Date(jstTarget.getTime() + 2 * CONFIG.MILLISECONDS_PER_DAY);
-    pushedDays += 2;
-  } else if (dow === 0) { // 日曜→月曜
-    jstTarget = new Date(jstTarget.getTime() + CONFIG.MILLISECONDS_PER_DAY);
-    pushedDays += 1;
-  }
-
-  // 祝日のみをチェック。最大 CONFIG.MAX_SKIP_DAYS 日まで前進。
   let iter = 0;
+
+  // 「週末 or 祝日」の間は前進（上限付き）
   while (iter < CONFIG.MAX_SKIP_DAYS) {
+    const dow = jstTarget.getDay();
+    if (dow === 0 || dow === 6) {
+      jstTarget = new Date(jstTarget.getTime() + CONFIG.MILLISECONDS_PER_DAY);
+      pushedDays += 1;
+      iter += 1;
+      continue;
+    }
+
     const holiday = isJapanHolidayJst_(jstTarget);
     if (holiday === true) {
       jstTarget = new Date(jstTarget.getTime() + CONFIG.MILLISECONDS_PER_DAY);
@@ -1808,10 +1818,21 @@ function getNextWeekdayExecutionTimeAt(hour) {
       iter += 1;
       continue;
     }
-    break; // false または null（判定失敗→営業日扱い）
+    // false または null（判定失敗→営業日扱い）
+    break;
   }
   if (iter >= CONFIG.MAX_SKIP_DAYS) {
-    console.warn(`${CONFIG.MAX_SKIP_DAYS}日以上の連続非営業日または判定失敗を検出。強制的に翌営業日扱いで続行`);
+    console.warn(`${CONFIG.MAX_SKIP_DAYS}日以上の連続非営業日/判定失敗を検出。強制的に翌営業日扱いで続行（週末/祝日再検査は打ち切り）`);
+  }
+
+  // 念のため最終週末は排除
+  const dowFinal = jstTarget.getDay();
+  if (dowFinal === 6) {
+    jstTarget = new Date(jstTarget.getTime() + 2 * CONFIG.MILLISECONDS_PER_DAY);
+    pushedDays += 2;
+  } else if (dowFinal === 0) {
+    jstTarget = new Date(jstTarget.getTime() + CONFIG.MILLISECONDS_PER_DAY);
+    pushedDays += 1;
   }
 
   if (pushedDays > 0) {
