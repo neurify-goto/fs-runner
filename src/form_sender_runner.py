@@ -118,6 +118,54 @@ def jst_utc_bounds(d: date):
     return (start_jst.astimezone(timezone.utc), end_jst.astimezone(timezone.utc))
 
 
+def _build_failure_classify_detail(error_type: Optional[str], base_detail: Optional[Dict[str, Any]], evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """失敗時のclassify_detailを一元生成（PROHIBITION_DETECTEDを優先補正）。"""
+    try:
+        if isinstance(base_detail, dict):
+            bd = dict(base_detail)
+            if isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
+                bd.update({
+                    'code': 'PROHIBITION_DETECTED',
+                    'category': 'BUSINESS',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 1.0,
+                })
+            if evidence:
+                bd['evidence'] = evidence
+            return bd
+        # base_detail が無い場合も PROHIBITION_DETECTED を優先補正
+        if isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
+            return {
+                'code': 'PROHIBITION_DETECTED',
+                'category': 'BUSINESS',
+                'retryable': False,
+                'cooldown_seconds': 0,
+                'confidence': 1.0,
+                'evidence': evidence,
+            }
+        return {
+            'code': error_type or 'UNKNOWN',
+            'category': 'SYSTEM',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': 0.0,
+            'evidence': evidence,
+        }
+    except Exception:
+        # 最低限のフォールバック
+        return {
+            'code': error_type or 'UNKNOWN',
+            'category': 'GENERAL',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': 0.0,
+            'evidence': evidence,
+        }
+
+
+
+
 def _build_supabase_client():
     url = os.environ.get('SUPABASE_URL')
     key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -341,6 +389,39 @@ def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dic
         stage_name = judgment.get('stage_name') if isinstance(judgment.get('stage_name'), str) else None
         confidence = judgment.get('confidence') if isinstance(judgment.get('confidence'), (int, float)) else None
 
+        # 営業禁止検出に関する付加情報（件数/レベル/検出元）
+        try:
+            prohibition_phrases_count = None
+            # SuccessJudge 経由（details）
+            if isinstance(details.get('phrases_count'), (int, float)):
+                try:
+                    prohibition_phrases_count = int(details.get('phrases_count'))
+                except Exception:
+                    prohibition_phrases_count = None
+            # Worker 早期検出サマリー
+            if prohibition_phrases_count is None:
+                ps = add_data.get('prohibition_summary') if isinstance(add_data.get('prohibition_summary'), dict) else None
+                if ps and isinstance(ps.get('matches_count'), (int, float)):
+                    try:
+                        prohibition_phrases_count = int(ps.get('matches_count'))
+                    except Exception:
+                        prohibition_phrases_count = None
+            # 追加メタ（任意）
+            prohibition_detection_level = None
+            prohibition_detection_source = None
+            ps = add_data.get('prohibition_summary') if isinstance(add_data.get('prohibition_summary'), dict) else None
+            if ps:
+                if isinstance(ps.get('level'), str):
+                    prohibition_detection_level = ps.get('level')
+                if isinstance(ps.get('detection_source'), str):
+                    prohibition_detection_source = ps.get('detection_source')
+            if not prohibition_detection_source and isinstance(details.get('detection_method'), str):
+                prohibition_detection_source = details.get('detection_method')
+        except Exception:
+            prohibition_phrases_count = None
+            prohibition_detection_level = None
+            prohibition_detection_source = None
+
         evidence.update({
             'detected_success_words': success_words[:5] if success_words else [],
             'detected_failure_words': failure_words[:5] if failure_words else [],
@@ -351,6 +432,10 @@ def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dic
             'stage': stage,
             'stage_name': stage_name,
             'judge_confidence': confidence,
+            # 営業禁止件数など（存在時のみ利用側で参照）
+            'prohibition_phrases_count': prohibition_phrases_count,
+            'prohibition_detection_level': prohibition_detection_level,
+            'prohibition_detection_source': prohibition_detection_source,
         })
         return evidence
     except Exception:
@@ -551,6 +636,8 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             pass
         return True
 
+    # 3-a) 営業禁止事前チェックはワーカー側に統合（同一ページアクセスで実施）
+
     task_data = {
         'task_id': f'run-{run_id}-{company_id}',
         'task_type': 'process_company',
@@ -593,15 +680,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         base_detail, bot_flag = _classify_failure_detail(err_msg, add_data, error_type)
         if bot_flag:
             bp = True
-        if isinstance(base_detail, dict):
-            # 根拠の追記（安全にマージ）
-            bd = dict(base_detail)
-            if evidence:
-                bd['evidence'] = evidence
-            classify_detail = bd
-        else:
-            # フォールバック
-            classify_detail = {'code': error_type or 'UNKNOWN', 'category': 'SYSTEM', 'retryable': False, 'cooldown_seconds': 0, 'confidence': 0.0, 'evidence': evidence}
+        classify_detail = _build_failure_classify_detail(error_type, base_detail, evidence)
     else:
         # 成功時も根拠を保存（偽陽性/陰性検証のため）
         conf = None

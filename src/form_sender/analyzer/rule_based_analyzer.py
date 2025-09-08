@@ -162,6 +162,45 @@ class RuleBasedAnalyzer:
             if await self.pre_processor.check_if_scroll_needed():
                 await self.pre_processor.perform_progressive_scroll()
 
+            # --- Early Sales Prohibition Detection (before mapping) ---
+            early_prohibition = None
+            try:
+                early_prohibition = await self.sales_prohibition_detector.detect_prohibition_text()
+            except Exception as e:
+                # 例外時は後段で必ずフォールバック検出を実行
+                logger.warning(f"Early prohibition detection failed; falling back to late detection: {e}")
+                early_prohibition = None
+
+            has_early_detection = (
+                early_prohibition is not None
+                and isinstance(early_prohibition, dict)
+                and (
+                    bool(early_prohibition.get('has_prohibition'))
+                    or bool(early_prohibition.get('prohibition_detected'))
+                )
+            )
+            if has_early_detection:
+                analysis_time = time.time() - analysis_start
+                # 解析を省略し、検出結果のみ返す（ワーカー側で送信回避）
+                return {
+                    "success": True,
+                    "analysis_time": analysis_time,
+                    "total_elements": 0,
+                    "field_mapping": {},
+                    "auto_handled_elements": {},
+                    "input_assignments": {},
+                    "submit_buttons": [],
+                    "special_elements": {},
+                    "unmapped_elements": 0,
+                    "analysis_summary": "prohibition_detected_early",
+                    "duplicate_prevention": {},
+                    "split_field_patterns": {},
+                    "field_combination_summary": {},
+                    "validation_result": {"is_valid": True, "issues": []},
+                    "sales_prohibition": early_prohibition,
+                    "debug_info": {},
+                }
+
             self.form_structure = (
                 await self.form_structure_analyzer.analyze_form_structure()
             )
@@ -339,8 +378,12 @@ class RuleBasedAnalyzer:
             submit_buttons = await self.submit_detector.detect_submit_buttons(
                 self.form_structure.form_locator if self.form_structure else None
             )
+            # 遅い段階の禁止検出は基本的に不要だが、後方互換で残す
+            # 早期検出が例外で失敗した場合のみ、遅延側の検出を実行
             prohibition_result = (
-                await self.sales_prohibition_detector.detect_prohibition_text()
+                early_prohibition
+                if early_prohibition is not None
+                else await self.sales_prohibition_detector.detect_prohibition_text()
             )
 
             analysis_time = time.time() - analysis_start
