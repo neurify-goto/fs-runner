@@ -20,6 +20,7 @@ declare
   v_ng_ids bigint[];
   v_limit integer := 10000; -- 一律上限（最大投入件数）
   v_need integer := 0;      -- 追加で投入すべき不足分
+  v_total integer := 0;     -- 合計投入件数（観測用）
 begin
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
@@ -126,6 +127,12 @@ begin
     execute v_sql using p_target_date, p_targeting_id, v_ng_ids, v_need, p_shards;
     get diagnostics v_ins2 = row_count;
     v_ins := coalesce(v_ins,0) + coalesce(v_ins2,0);
+  end if;
+
+  -- 観測用: 合計0件であれば NOTICE（開発/検証用。実行環境での影響は極小）
+  v_total := coalesce(v_ins, 0);
+  if v_total = 0 then
+    raise notice 'create_queue_for_targeting: no candidates for date=%, targeting_id=%', p_target_date, p_targeting_id;
   end if;
 
   return v_ins;
