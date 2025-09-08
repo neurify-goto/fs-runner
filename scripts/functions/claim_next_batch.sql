@@ -16,7 +16,10 @@ begin
     select sq.id
     from public.send_queue sq
     left join public.submissions s
-      on s.targeting_id = p_targeting_id and s.company_id = sq.company_id
+      on s.targeting_id = p_targeting_id
+     and s.company_id = sq.company_id
+     and s.submitted_at >= (p_target_date::timestamp AT TIME ZONE 'Asia/Tokyo')
+     and s.submitted_at <  ((p_target_date::timestamp + interval '1 day') AT TIME ZONE 'Asia/Tokyo')
     where sq.target_date_jst = p_target_date
       and sq.targeting_id = p_targeting_id
       and sq.status = 'pending'

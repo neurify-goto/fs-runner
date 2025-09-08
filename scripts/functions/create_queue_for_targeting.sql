@@ -45,7 +45,10 @@ begin
        select c.id
        from public.companies c
        left join public.submissions s
-         on s.targeting_id = $2 and s.company_id = c.id
+         on s.targeting_id = $2
+        and s.company_id = c.id
+        and s.submitted_at >= ($1::timestamp AT TIME ZONE ''Asia/Tokyo'')
+        and s.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
        where c.form_url is not null
          and coalesce(c.prohibition_detected, false) = false
          and s.id is null';
