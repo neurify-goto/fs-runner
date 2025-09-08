@@ -39,18 +39,19 @@ def load_client_data_simple(config_file: str, targeting_id: int) -> Dict[str, An
 
         # 強化されたセキュリティチェック
         cf_raw = Path(config_file)
-        # 明示的に .. を拒否
+        # 明示的に .. を拒否（生パスで検査）
         if '..' in cf_raw.as_posix():
             raise ValueError("Unsafe path sequence in config file path")
-        # 実体パスを解決（シンボリックリンクも解決）
-        cf = cf_raw.resolve()
-        # シンボリックリンクは拒否
+        # シンボリックリンクは解決前の生パスで拒否（resolve() 前）
         try:
-            if cf.is_symlink():
+            import os as _os
+            if cf_raw.is_symlink() or _os.path.islink(str(cf_raw)):
                 raise ValueError("Symlink is not allowed for config file")
         except Exception:
-            # is_symlink() が例外でも保守的に拒否
+            # 検証不能な場合は保守的に拒否
             raise ValueError("Unable to verify symlink status for config file")
+        # 実体パスを解決（許可ディレクトリ/ファイル名ポリシーは解決後で評価）
+        cf = cf_raw.resolve()
 
         allowed_dirs = [Path('/tmp'), Path('/private/tmp'), project_tests_tmp_real]
         allowed = any(cf.parent == d for d in allowed_dirs)
