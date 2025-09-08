@@ -165,6 +165,142 @@ function startFormSenderFromTrigger() {
 }
 
 /**
+ * 7時専用トリガーから呼び出すメイン関数
+ * - 当日7:00用の自分自身のトリガー（存在すれば）を削除
+ * - 全アクティブtargetingを処理
+ * - 翌平日の7:00に同じ関数の特定日時トリガーを作成
+ */
+function startFormSenderFromTriggerAt7() {
+  console.log('時間トリガー(7:00)によりフォーム送信制御を開始します');
+
+  try {
+    // 7:00用の既存トリガーをクリーンアップ
+    const del = deleteTriggersByHandler('startFormSenderFromTriggerAt7');
+    if (!del.success) console.warn('7時トリガー削除で問題発生:', del.error);
+
+    // アクティブtargetingの処理
+    const activeTargetings = getActiveTargetingIdsFromSheet();
+    if (!activeTargetings || activeTargetings.length === 0) {
+      console.log('アクティブなターゲティング設定が見つかりません');
+    } else {
+      let triggered = 0;
+      for (const t of activeTargetings) {
+        try {
+          const r = processTargeting(t.targeting_id);
+          if (r && r.success) triggered++;
+        } catch (e) {
+          console.error(`ターゲティング ${t.targeting_id} 処理エラー: ${e.message}`);
+        }
+      }
+      console.log(`処理完了(7時): ${triggered} 件トリガー実行`);
+    }
+
+    // 翌平日の7:00に再設定
+    const nextJst = getNextWeekdayExecutionTimeAt(7);
+    const next = createSpecificTimeTriggerFor('startFormSenderFromTriggerAt7', nextJst);
+    if (next.success) {
+      console.log(`次回(7時)トリガー作成完了: ${next.execute_at_jst}`);
+    } else {
+      console.error(`次回(7時)トリガー作成失敗: ${next.error}`);
+    }
+
+    return {
+      success: true,
+      next_trigger: next
+    };
+  } catch (error) {
+    console.error(`7時実行でエラー: ${error.message}`);
+    // エラー時も次回トリガーは作成を試行
+    const nextJst = getNextWeekdayExecutionTimeAt(7);
+    const next = createSpecificTimeTriggerFor('startFormSenderFromTriggerAt7', nextJst);
+    return { success: false, error: error.message, next_trigger: next };
+  }
+}
+
+/**
+ * 13時専用トリガーから呼び出すメイン関数
+ * - 当日13:00用の自分自身のトリガー（存在すれば）を削除
+ * - 全アクティブtargetingを処理
+ * - 翌平日の13:00に同じ関数の特定日時トリガーを作成
+ */
+function startFormSenderFromTriggerAt13() {
+  console.log('時間トリガー(13:00)によりフォーム送信制御を開始します');
+
+  try {
+    // 13:00用の既存トリガーをクリーンアップ
+    const del = deleteTriggersByHandler('startFormSenderFromTriggerAt13');
+    if (!del.success) console.warn('13時トリガー削除で問題発生:', del.error);
+
+    // アクティブtargetingの処理
+    const activeTargetings = getActiveTargetingIdsFromSheet();
+    if (!activeTargetings || activeTargetings.length === 0) {
+      console.log('アクティブなターゲティング設定が見つかりません');
+    } else {
+      let triggered = 0;
+      for (const t of activeTargetings) {
+        try {
+          const r = processTargeting(t.targeting_id);
+          if (r && r.success) triggered++;
+        } catch (e) {
+          console.error(`ターゲティング ${t.targeting_id} 処理エラー: ${e.message}`);
+        }
+      }
+      console.log(`処理完了(13時): ${triggered} 件トリガー実行`);
+    }
+
+    // 翌平日の13:00に再設定
+    const nextJst = getNextWeekdayExecutionTimeAt(13);
+    const next = createSpecificTimeTriggerFor('startFormSenderFromTriggerAt13', nextJst);
+    if (next.success) {
+      console.log(`次回(13時)トリガー作成完了: ${next.execute_at_jst}`);
+    } else {
+      console.error(`次回(13時)トリガー作成失敗: ${next.error}`);
+    }
+
+    return {
+      success: true,
+      next_trigger: next
+    };
+  } catch (error) {
+    console.error(`13時実行でエラー: ${error.message}`);
+    // エラー時も次回トリガーは作成を試行
+    const nextJst = getNextWeekdayExecutionTimeAt(13);
+    const next = createSpecificTimeTriggerFor('startFormSenderFromTriggerAt13', nextJst);
+    return { success: false, error: error.message, next_trigger: next };
+  }
+}
+
+/**
+ * 手動一括実行用の関数（トリガー操作なし）
+ * - 全アクティブtargetingを処理
+ * - トリガーの削除/作成は一切行わない
+ */
+function startFormSenderAll() {
+  console.log('手動一括実行: 全アクティブtargetingの処理を開始');
+  try {
+    const activeTargetings = getActiveTargetingIdsFromSheet();
+    if (!activeTargetings || activeTargetings.length === 0) {
+      console.log('アクティブなターゲティング設定が見つかりません');
+      return { success: false, message: 'アクティブtargetingなし', triggered: 0 };
+    }
+    let triggered = 0;
+    for (const t of activeTargetings) {
+      try {
+        const r = processTargeting(t.targeting_id);
+        if (r && r.success) triggered++;
+      } catch (e) {
+        console.error(`ターゲティング ${t.targeting_id} 処理エラー: ${e.message}`);
+      }
+    }
+    console.log(`手動一括実行完了: ${triggered} 件トリガー実行`);
+    return { success: true, triggered };
+  } catch (error) {
+    console.error('手動一括実行エラー:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * 手動実行用のエントリーポイント（新アーキテクチャ版）
  * @param {number} targetingId ターゲティングID（オプション）
  */
@@ -1324,6 +1460,37 @@ function createSpecificTimeTrigger(executeDateTime) {
 }
 
 /**
+ * 指定ハンドラ用の特定日時トリガーを作成
+ * @param {string} handlerFunction ハンドラ関数名
+ * @param {Date} executeDateTime 実行日時(UTC基準のDate推奨)
+ * @returns {Object} 作成結果
+ */
+function createSpecificTimeTriggerFor(handlerFunction, executeDateTime) {
+  try {
+    console.log(`特定日時トリガー作成開始(handler=${handlerFunction}): ${executeDateTime.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}`);
+    const now = new Date();
+    if (executeDateTime <= now) {
+      throw new Error(`指定日時が過去です: ${executeDateTime.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}`);
+    }
+    const trigger = ScriptApp.newTrigger(handlerFunction)
+      .timeBased()
+      .at(executeDateTime)
+      .create();
+    console.log(`特定日時トリガー作成完了(handler=${handlerFunction}): ID=${trigger.getUniqueId()}`);
+    return {
+      success: true,
+      trigger_id: trigger.getUniqueId(),
+      execute_at: executeDateTime.toISOString(),
+      execute_at_jst: executeDateTime.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'}),
+      handler: handlerFunction
+    };
+  } catch (error) {
+    console.error(`特定日時トリガー作成エラー(handler=${handlerFunction}): ${error.message}`);
+    return { success: false, error: error.message, handler: handlerFunction };
+  }
+}
+
+/**
  * 次回実行時刻を計算（土日回避機能付き）
  * - 平日: 24時間後の00分
  * - 金曜日: 72時間後（月曜日の同時刻）の00分
@@ -1410,11 +1577,13 @@ function createNextDayTrigger() {
 function listFormSenderTriggers() {
   try {
     console.log('=== form-senderトリガー一覧取得開始 ===');
-    
     const triggers = ScriptApp.getProjectTriggers();
-    const formSenderTriggers = triggers.filter(trigger => 
-      trigger.getHandlerFunction() === 'startFormSenderFromTrigger'
-    );
+    const formSenderTriggers = triggers.filter(trigger => {
+      const h = trigger.getHandlerFunction();
+      return h === 'startFormSenderFromTrigger' ||
+             h === 'startFormSenderFromTriggerAt7' ||
+             h === 'startFormSenderFromTriggerAt13';
+    });
     
     const triggerList = formSenderTriggers.map(trigger => {
       const source = trigger.getTriggerSource();
@@ -1430,12 +1599,7 @@ function listFormSenderTriggers() {
         }
       }
       
-      return {
-        id: trigger.getUniqueId(),
-        handler: trigger.getHandlerFunction(),
-        source: source.toString(),
-        details: details
-      };
+      return { id: trigger.getUniqueId(), handler: trigger.getHandlerFunction(), source: source.toString(), details: details };
     });
     
     console.log(`form-senderトリガー数: ${triggerList.length}件`);
@@ -1459,6 +1623,59 @@ function listFormSenderTriggers() {
       error: error.message
     };
   }
+}
+
+/**
+ * 指定ハンドラのトリガーをすべて削除
+ * @param {string} handlerFunction
+ * @returns {Object}
+ */
+function deleteTriggersByHandler(handlerFunction) {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    let deleted = 0;
+    triggers.forEach(tr => {
+      if (tr.getHandlerFunction() === handlerFunction) {
+        ScriptApp.deleteTrigger(tr);
+        deleted++;
+      }
+    });
+    console.log(`deleteTriggersByHandler: handler=${handlerFunction}, deleted=${deleted}`);
+    return { success: true, deleted };
+  } catch (e) {
+    console.error('deleteTriggersByHandler error:', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * 翌平日の指定時刻(JST)を返す
+ * @param {number} hour 0-23 (JST)
+ * @returns {Date} UTC基準Date (Apps Scriptの.at()に渡す用)
+ */
+function getNextWeekdayExecutionTimeAt(hour) {
+  const now = new Date();
+  // 現在時刻(UTC)→JSTに換算
+  const jstNow = new Date(now.getTime() + CONFIG.JST_OFFSET);
+
+  // 翌日ベース
+  const jstTarget = new Date(jstNow); // clone
+  jstTarget.setDate(jstTarget.getDate() + 1);
+  jstTarget.setHours(hour, 0, 0, 0);
+
+  // 土日スキップ
+  // 0=日,1=月,2=火,3=水,4=木,5=金,6=土 (JS)
+  // jstTargetの曜日に応じて調整
+  let dow = jstTarget.getDay();
+  if (dow === 6) { // 土曜日 → 月曜まで+2日
+    jstTarget.setDate(jstTarget.getDate() + 2);
+  } else if (dow === 0) { // 日曜日 → 月曜まで+1日
+    jstTarget.setDate(jstTarget.getDate() + 1);
+  }
+
+  // 最終的にUTCへ戻す
+  const utc = new Date(jstTarget.getTime() - CONFIG.JST_OFFSET);
+  return utc;
 }
 
 /**
