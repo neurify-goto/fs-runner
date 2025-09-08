@@ -707,7 +707,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 try:
                     supabase.table('companies').update({'prohibition_detected': True}).eq('id', company_id).execute()
                 except Exception as ue:
-                    logger.warning(f"companies.prohibition_detected update failed (suppressed): {ue}")
+                    logger.warning(f"companies.prohibition_detected update failed (company_id={company_id}, suppressed): {ue}")
         except Exception:
             pass
 
