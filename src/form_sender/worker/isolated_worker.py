@@ -1412,10 +1412,12 @@ class IsolatedFormWorker:
                 if target_frame:
                     self._dom_context = target_frame
                 else:
-                    self._dom_context = self._get_dom_context()
+                    # P1: 確認画面に iframe が無い場合は page に戻す（入力画面で使っていた旧iframeはdetach済みの可能性がある）
+                    self._dom_context = self.page
             except Exception as e:
                 logger.debug(f"Worker {self.worker_id}: Confirmation frame reselect skipped: {e}")
-                self._dom_context = self._get_dom_context()
+                # 安全側: 例外時も page を採用
+                self._dom_context = self.page
             
             # 確認ページで最終送信ボタンを探して実行
             return await self._find_and_submit_final_button()
