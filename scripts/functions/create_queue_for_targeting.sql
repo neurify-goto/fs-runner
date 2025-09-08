@@ -25,6 +25,10 @@ declare
   v_base_priority integer := 0;           -- 2段目付与用の基準priority
   v_shards integer := 8;                  -- shardsの検証/補正後の値
 begin
+  -- 実行時間が長めになるケース（複合条件 + 上限1万件）に備えて、局所的にstatement_timeoutを緩和
+  -- Supabaseのデフォルトは短めのため、当関数内のみ60秒へ延長
+  perform set_config('statement_timeout', '60000', true);  -- milliseconds
+
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
   if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
