@@ -269,7 +269,7 @@ function buildSendQueueForTargeting(targetingId) {
       targetingId,
       dateJst,
       t.targeting_sql || '',
-      t.ng_companies || '',
+      (t.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
       10000,
       8
     );
@@ -313,7 +313,7 @@ function buildSendQueueForAllTargetings() {
           targetingId,
           dateJst,
           targeting.targeting_sql || '',
-          targeting.ng_companies || '',
+          (targeting.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
           10000,
           8
         );

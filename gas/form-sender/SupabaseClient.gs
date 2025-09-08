@@ -49,3 +49,13 @@ function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCom
     p_shards: Number(shards || 8)
   });
 }
+
+/**
+ * ng_companies列の値（企業名・ID混在可）を、RPCが受け付ける「カンマ区切りのID群」に正規化
+ * - 数値トークンはそのままIDとして扱う
+ * - 数値以外は company_name の完全一致で companies を検索し、id に解決する
+ * - 見つからない企業名は無視（警告ログのみ）
+ * @param {string} rawNgCompanies シートのng_companies文字列
+ * @returns {string} カンマ区切りID文字列（空なら''）
+ */
+// 社名ベース除外に移行したため、ng_companiesのID正規化は不要。

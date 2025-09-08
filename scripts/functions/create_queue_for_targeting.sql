@@ -1,5 +1,5 @@
 -- 当日分キュー投入（GAS から targeting_sql / ng_companies を受け取る）
--- p_ng_companies はカンマ区切り ID 群（空文字可）
+-- p_ng_companies は「社名」のカンマ区切り（空文字可、半角カンマ推奨。全角カンマも許容）
 -- 注意: キュー作成上限はターゲット毎に一律10000件。
 --       p_max_daily は互換性のため残置するが、上限には使用しない。
 create or replace function public.create_queue_for_targeting(
@@ -17,7 +17,7 @@ declare
   v_sql text;
   v_ins integer := 0;
   v_ins2 integer := 0;
-  v_ng_ids bigint[];
+  v_ng_names text[];
   v_limit integer := 10000; -- 一律上限（最大投入件数）
   v_need integer := 0;      -- 追加で投入すべき不足分
   v_current_total integer := 0;           -- 1段目投入後の現在総数（当日/同targeting）
@@ -25,6 +25,10 @@ declare
   v_base_priority integer := 0;           -- 2段目付与用の基準priority
   v_shards integer := 8;                  -- shardsの検証/補正後の値
 begin
+  -- 実行時間が長めになるケース（複合条件 + 上限1万件）に備えて、局所的にstatement_timeoutを緩和
+  -- Supabaseのデフォルトは短めのため、当関数内のみ60秒へ延長
+  perform set_config('statement_timeout', '60000', true);  -- milliseconds
+
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
   if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
@@ -39,11 +43,11 @@ begin
       raise exception 'Invalid targeting_sql: contains forbidden statements';
     end if;
   end if;
-  -- NGリストを配列化
+  -- NG社名リストを配列化（全角カンマを半角へ、空白除去）
   if p_ng_companies is null or length(trim(p_ng_companies)) = 0 then
-    v_ng_ids := null;
+    v_ng_names := null;
   else
-    v_ng_ids := string_to_array(replace(p_ng_companies,' ','') , ',')::bigint[];
+    v_ng_names := string_to_array(replace(replace(p_ng_companies, '，', ','), ' ', ''), ',')::text[];
   end if;
 
   -- shards パラメータの検証/補正（0以下/NULLは既定値8へ）
@@ -69,8 +73,8 @@ begin
     v_sql := v_sql || ' and (' || p_targeting_sql || ')';
   end if;
 
-  -- NG会社ID除外（配列が空/NULLならスキップ）
-  v_sql := v_sql || ' and ( $3::bigint[] is null or array_length($3::bigint[],1) is null or not (c.id = any($3::bigint[])) )';
+  -- NG社名除外（配列が空/NULLならスキップ）
+  v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
 
   v_sql := v_sql || ' order by c.id asc limit $4 )
     insert into public.send_queue(
@@ -83,7 +87,7 @@ begin
     on conflict (target_date_jst, targeting_id, company_id) do nothing;';
 
   -- p_max_daily は無視し、常に v_limit=10000 を使用
-  execute v_sql using p_target_date, p_targeting_id, v_ng_ids, v_limit, v_shards;
+  execute v_sql using p_target_date, p_targeting_id, v_ng_names, v_limit, v_shards;
   get diagnostics v_ins = row_count;
 
   -- 1段目投入後の現在総数を計測
@@ -125,8 +129,8 @@ begin
       v_sql := v_sql || ' and (' || p_targeting_sql || ')';
     end if;
 
-    -- NG会社ID除外（配列が空/NULLならスキップ）
-    v_sql := v_sql || ' and ( $3::bigint[] is null or array_length($3::bigint[],1) is null or not (c.id = any($3::bigint[])) )';
+    -- NG社名除外（配列が空/NULLならスキップ）
+    v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
 
     v_sql := v_sql || ' order by c.id asc limit $4 )
       insert into public.send_queue(
@@ -144,7 +148,7 @@ begin
      where target_date_jst = p_target_date
        and targeting_id    = p_targeting_id;
 
-    execute v_sql using p_target_date, p_targeting_id, v_ng_ids, v_need, v_shards, v_base_priority;
+    execute v_sql using p_target_date, p_targeting_id, v_ng_names, v_need, v_shards, v_base_priority;
     get diagnostics v_ins2 = row_count;
     v_ins := coalesce(v_ins,0) + coalesce(v_ins2,0);
   end if;
