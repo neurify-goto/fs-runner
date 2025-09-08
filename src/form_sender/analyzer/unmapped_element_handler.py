@@ -204,6 +204,7 @@ class UnmappedElementHandler:
             + classified_elements.get("text_inputs", []),
             mapped_element_ids,
             field_mapping,
+            form_structure,
         )
         auto_handled.update(email_conf)
 
@@ -390,6 +391,7 @@ class UnmappedElementHandler:
                 + (classified_elements.get("text_inputs", []) or []),
                 mapped_element_ids,
                 field_mapping,
+                form_structure,
             )
             auto_handled.update(email_conf)
             mapped_element_ids.update(
@@ -1995,6 +1997,7 @@ class UnmappedElementHandler:
         candidates: List[Locator],
         mapped_element_ids: set,
         field_mapping: Dict[str, Dict[str, Any]],
+        form_structure: Optional[FormStructure] = None,
     ) -> Dict[str, Dict[str, Any]]:
         handled: Dict[str, Dict[str, Any]] = {}
         if "メールアドレス" not in field_mapping:
@@ -2121,7 +2124,97 @@ class UnmappedElementHandler:
                 "required": required,
                 "auto_handled": True,
             }
+
+        # フォールバック: 上記ロジックで検出できなかった場合、
+        # 『メール』系の文脈/属性を持つ入力が2つ以上存在し、
+        # そのうち1つが既に『メールアドレス』として確定しているとき、
+        # もう一方を確認欄としてコピー入力対象にする（Google Forms 等の匿名構造対策）。
+        try:
+            if not handled:
+                primary_sel = (field_mapping.get("メールアドレス", {}) or {}).get("selector", "")
+                email_like: list[tuple] = []  # (el, info, best_ctx)
+                for el in candidates:
+                    if id(el) in mapped_element_ids:
+                        continue
+                    info = await self.element_scorer._get_element_info(el)
+                    if not info.get("visible", True):
+                        continue
+                    nm = (info.get("name", "") or "").lower()
+                    ide = (info.get("id", "") or "").lower()
+                    cls = (info.get("class", "") or "").lower()
+                    ph = (info.get("placeholder", "") or "").lower()
+                    attrs_blob = " ".join([nm, ide, cls, ph])
+                    contexts = await self.context_text_extractor.extract_context_for_element(el)
+                    best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
+                    if any(t in attrs_blob for t in ["email", "e-mail", "mail", "メール"]) or any(
+                        t in best for t in ["email", "mail", "メール"]
+                    ):
+                        sel = await self._generate_playwright_selector(el)
+                        # 既に主メールと同一セレクタは除外
+                        if primary_sel and sel == primary_sel:
+                            continue
+                        email_like.append((el, info, best, sel))
+                if len(email_like) >= 1:
+                    # 第1候補を確認欄とみなし、copy_from を設定
+                    el, info, best, sel = email_like[0]
+                    required = await self.element_scorer._detect_required_status(el)
+                    handled["auto_email_confirm_1"] = {
+                        "element": el,
+                        "selector": sel,
+                        "tag_name": info.get("tag_name", "input") or "input",
+                        "type": info.get("type", "email") or "email",
+                        "name": info.get("name", ""),
+                        "id": info.get("id", ""),
+                        "input_type": "email",
+                        "auto_action": "copy_from",
+                        "copy_from_field": "メールアドレス",
+                        "default_value": "",
+                        "required": True if best else bool(required),
+                        "auto_handled": True,
+                    }
+        except Exception as e:
+            # フォールバックでの例外は抑制（他ロジックに影響させない）
+            pass
+
+        # さらに失敗した場合の最終フォールバック（構造順ベース）
+        try:
+            if not handled and form_structure and getattr(form_structure, "elements", None):
+                primary_sel = (field_mapping.get("メールアドレス", {}) or {}).get("selector", "")
+                # フォーム内論理順の一覧を作成
+                seq = [(fe.selector, fe) for fe in (form_structure.elements or []) if getattr(fe, 'selector', '')]
+                idx = next((i for i,(sel,fe) in enumerate(seq) if sel == primary_sel), -1)
+                if idx >= 0:
+                    # 次以降の最初の input を確認欄とみなす（checkbox/radioは除外）
+                    for j in range(idx+1, min(idx+6, len(seq))):
+                        sel, fe = seq[j]
+                        if fe.tag_name != 'input':
+                            continue
+                        if fe.element_type in ('checkbox','radio','number'):
+                            continue
+                        if any((isinstance(v,dict) and v.get('selector')==sel) for v in field_mapping.values()):
+                            continue
+                        handled['auto_email_confirm_structural'] = {
+                            'element': fe.locator,
+                            'selector': sel,
+                            'tag_name': 'input',
+                            'type': fe.element_type or 'text',
+                            'name': fe.name or '',
+                            'id': fe.id or '',
+                            'input_type': 'email',
+                            'auto_action': 'copy_from',
+                            'copy_from_field': 'メールアドレス',
+                            'default_value': '',
+                            'required': True,
+                            'auto_handled': True,
+                        }
+                        break
+        except Exception:
+            pass
+
         return handled
+
+        # Unreachable
+
 
     async def promote_email_confirmation_to_mapping(
         self,

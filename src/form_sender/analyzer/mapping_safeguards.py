@@ -192,6 +192,16 @@ def passes_safeguard(
         return _passes_prefecture(ei, best_txt)
     if field_name == "お問い合わせ本文":
         return _passes_message(ei, best_txt)
+    if field_name == "件名":
+        attrs = _attrs_blob(ei)
+        pos = any(t in attrs for t in ["件名", "subject", "題名"]) or any(
+            t in best_txt for t in ["件名", "subject", "題名"]
+        )
+        neg = any(
+            t in attrs or t in best_txt
+            for t in ["フリガナ", "ふりがな", "カナ", "kana", "furigana", "セイ", "メイ"]
+        )
+        return bool(pos and not neg)
     if field_name == "役職":
         # 役職/職位/position/job title のいずれかの指標が属性/ラベルに必要
         attrs = _attrs_blob(ei)

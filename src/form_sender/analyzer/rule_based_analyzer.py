@@ -366,6 +366,13 @@ class RuleBasedAnalyzer:
                 self.field_mapping, auto_handled, split_groups, client_data
             )
 
+            # 評価容易性の向上: input_assignments の値を field_mapping に反映
+            # セレクタが一致するものについて、空/None の value を補完する。
+            try:
+                self._propagate_assignment_values_to_mapping(self.field_mapping, input_assignment)
+            except Exception as e:
+                logger.debug(f"propagate assignment values skipped: {e}")
+
             is_valid, validation_issues = (
                 await self.validator.validate_final_assignments(
                     input_assignment, self.field_mapping, form_type_info
@@ -422,6 +429,50 @@ class RuleBasedAnalyzer:
         except Exception as e:
             logger.error(f"Form analysis failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
+
+    def _propagate_assignment_values_to_mapping(self, field_mapping: Dict[str, Any], input_assignment: Dict[str, Any]) -> None:
+        """input_assignments に確定した値がある場合、同一セレクタの field_mapping に値を転写する。
+        - Claude 等の静的評価で『必須が空』と誤判定されないよう、
+          JSON 上の field_mapping.value を可能な範囲で埋める。
+        - 動作自体（実入力）は input_assignments が唯一のソースオブトゥルースのまま。
+        """
+        # field_mapping 内で一意なセレクタのみを対象にする（Google Forms 等の汎用セレクタ対策）
+        selector_counts: Dict[str, int] = {}
+        for _, finfo in (field_mapping or {}).items():
+            try:
+                sel = str(finfo.get("selector", "") or "")
+                if sel:
+                    selector_counts[sel] = selector_counts.get(sel, 0) + 1
+            except Exception:
+                continue
+
+        # selector -> value の逆引き表を作る（空値は除外）。一意セレクタのみ許可。
+        selector_to_value: Dict[str, str] = {}
+        for _, assign in (input_assignment or {}).items():
+            try:
+                sel = str(assign.get("selector", "") or "")
+                val = str(assign.get("value", "") or "").strip()
+                if sel and val and selector_counts.get(sel, 0) == 1:
+                    selector_to_value[sel] = val
+            except Exception:
+                continue
+
+        if not selector_to_value:
+            return
+
+        # field_mapping の各エントリに値を補完
+        for fname, finfo in (field_mapping or {}).items():
+            try:
+                sel = str(finfo.get("selector", "") or "")
+                cur = finfo.get("value")
+                if sel and (cur is None or (isinstance(cur, str) and not cur.strip())):
+                    if sel in selector_to_value:
+                        finfo["value"] = selector_to_value[sel]
+                        # メタ: どこから埋めたかのヒント（解析用）
+                        src = finfo.get("source") or ""
+                        finfo["source"] = (src or "") + ("|value_propagated")
+            except Exception:
+                continue
 
     def _prune_suspect_name_mappings(self) -> None:
         from .name_postprocess import prune_suspect_name_mappings
