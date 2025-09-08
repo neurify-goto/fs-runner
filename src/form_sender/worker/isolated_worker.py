@@ -882,7 +882,7 @@ class IsolatedFormWorker:
                 try:
                     is_bot_detected, bot_type = await self.bot_detector.detect_bot_protection(getattr(self, '_dom_context', self.page))
                 except Exception as e:
-                    logger.debug(f"Worker {self.worker_id}: Bot detection failed during no-submit path: {e}")
+                    logger.warning(f"Worker {self.worker_id}: Bot detection check failed in no-submit path: {e}")
                     is_bot_detected, bot_type = (False, None)
 
                 if is_bot_detected:
@@ -1433,6 +1433,7 @@ class IsolatedFormWorker:
     async def _find_and_submit_final_button(self) -> Dict[str, Any]:
         """確認ページで最終送信ボタンを見つけて実行（網羅強化＋同意ON＋フォールバック）"""
         try:
+            FINAL_SUBMIT_EXTRA_WAIT_MAX_MS = 20000  # 過剰待機抑止の上限（設定は config で別途検証）
             dom_ctx = self._get_dom_context()
             pre_submit_url = dom_ctx.url if dom_ctx else (self.page.url if self.page else "")
 
@@ -1590,12 +1591,14 @@ class IsolatedFormWorker:
                 }
 
             # 送信後待機（余裕値は設定から）
-            # 追加待機（0〜20sにクランプ）
+            # 追加待機（0〜上限にクランプ）
             try:
-                extra_ms = int(self.config.get("worker_config", {}).get("final_submit", {}).get("confirmation_extra_wait_ms", 2000))
+                wc = self.config.get("worker_config") or {}
+                fs = wc.get("final_submit") or {}
+                extra_ms = int(fs.get("confirmation_extra_wait_ms", 2000))
             except Exception:
                 extra_ms = 2000
-            extra_ms = max(0, min(extra_ms, 20000))
+            extra_ms = max(0, min(extra_ms, FINAL_SUBMIT_EXTRA_WAIT_MAX_MS))
             await asyncio.sleep(3.0 + extra_ms / 1000.0)
             try:
                 await dom_ctx.wait_for_load_state('networkidle', timeout=12000)
