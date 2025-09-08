@@ -507,7 +507,21 @@ function buildSendQueueForTargeting(targetingId) {
     if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
     const t = cfg.targeting;
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    // デバッグ: パラメータ要約
+    const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
+    const sqlPreview = (t.targeting_sql || '').slice(0, 300);
+    console.log(JSON.stringify({
+      level: 'info', event: 'queue_build_start', targeting_id: targetingId, date_jst: dateJst,
+      param_summary: {
+        shards: 8, limit: 10000,
+        targeting_sql_len: (t.targeting_sql || '').length,
+        targeting_sql_preview: sqlPreview,
+        ng_companies_tokens: ngTokens.length
+      }
+    }));
+
     // キュー上限は一律10000件（max_daily_sendsは送信成功数の上限としてRunner側で使用）
+    const startedMs = Date.now();
     const inserted = createQueueForTargeting(
       targetingId,
       dateJst,
@@ -516,7 +530,8 @@ function buildSendQueueForTargeting(targetingId) {
       10000,
       8
     );
-    console.log(`Queue created for targeting ${targetingId}: ${inserted}`);
+    const elapsedMs = Date.now() - startedMs;
+    console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: Number(inserted) || 0, elapsed_ms: elapsedMs }));
     return { success: true, inserted };
   } catch (e) {
     console.error('buildSendQueueForTargeting error:', e);
@@ -552,6 +567,20 @@ function buildSendQueueForAllTargetings() {
         if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
 
         const targeting = cfg.targeting;
+        const dateStartMs = Date.now();
+        // 追加の詳細デバッグ: 各targetingのパラメータと長さ
+        const ngTokens = (targeting.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
+        const sqlPreview = (targeting.targeting_sql || '').slice(0, 300);
+        console.log(JSON.stringify({
+          level: 'info', event: 'queue_build_start', targeting_id: targetingId, date_jst: dateJst,
+          param_summary: {
+            shards: 8, limit: 10000,
+            targeting_sql_len: (targeting.targeting_sql || '').length,
+            targeting_sql_preview: sqlPreview,
+            ng_companies_tokens: ngTokens.length
+          }
+        }));
+
         const inserted = createQueueForTargeting(
           targetingId,
           dateJst,
@@ -560,15 +589,17 @@ function buildSendQueueForAllTargetings() {
           10000,
           8
         );
+        const elapsedMs = Date.now() - dateStartMs;
         const n = Number(inserted) || 0;
         totalInserted += n;
         processed += 1;
         details.push({ targeting_id: targetingId, inserted: n, success: true });
-        console.log(`targeting_id=${targetingId}: inserted=${n}`);
+        console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: n, elapsed_ms: elapsedMs }));
       } catch (e) {
         failed += 1;
         details.push({ targeting_id: targetingId, success: false, error: String(e) });
-        console.error(`targeting_id=${targetingId}: キュー作成エラー: ${e}`);
+        // 直前のRPCログで attempt / elapsed を出しているが、ここでも見やすいメッセージを追加
+        console.error(JSON.stringify({ level: 'error', event: 'queue_build_failed', targeting_id: targetingId, error: String(e) }));
       }
     }
 

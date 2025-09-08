@@ -19,6 +19,28 @@ function callRpc_(fnName, payload) {
   // 3回まで指数バックオフ（1s, 2s, 4s）。GAS全体の実行上限を考慮して控えめに設定
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const startedAt = new Date();
+    const startedMs = Date.now();
+    // デバッグ: 呼び出しパラメータ要約
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'rpc_call_start',
+        fn: fnName,
+        attempt,
+        url,
+        payload_summary: {
+          keys: Object.keys(payload || {}),
+          targeting_id: payload && payload.p_targeting_id,
+          target_date: payload && payload.p_target_date,
+          shards: payload && payload.p_shards,
+          targeting_sql_len: (payload && (payload.p_targeting_sql || '')).length,
+          ng_companies_len: (payload && (payload.p_ng_companies || '')).split(/[,，]/).filter(s => s.trim()).length
+        },
+        started_at: startedAt.toISOString()
+      }));
+    } catch (_) {}
+
     const res = UrlFetchApp.fetch(url, {
       method: 'post',
       contentType: 'application/json',
@@ -32,6 +54,20 @@ function callRpc_(fnName, payload) {
     });
     const code = res.getResponseCode();
     const text = res.getContentText();
+    const elapsedMs = Date.now() - startedMs;
+
+    // デバッグ: 応答のサマリ
+    try {
+      console.log(JSON.stringify({
+        level: (code >= 200 && code < 300) ? 'info' : 'error',
+        event: 'rpc_call_end',
+        fn: fnName,
+        attempt,
+        code,
+        elapsed_ms: elapsedMs,
+        body_preview: (text || '').slice(0, 300)
+      }));
+    } catch (_) {}
     if (code >= 200 && code < 300) {
       try { return JSON.parse(text || 'null'); } catch (e) { return null; }
     }
@@ -45,6 +81,16 @@ function callRpc_(fnName, payload) {
     );
     if (attempt < maxAttempts && isRetryable) {
       const backoffMs = Math.pow(2, attempt - 1) * 1000; // 1s,2s,4s
+      try {
+        console.log(JSON.stringify({
+          level: 'warning',
+          event: 'rpc_call_retry',
+          fn: fnName,
+          attempt_next: attempt + 1,
+          reason: 'retryable_statement_timeout',
+          backoff_ms: backoffMs
+        }));
+      } catch (_) {}
       Utilities.sleep(backoffMs);
       continue;
     }

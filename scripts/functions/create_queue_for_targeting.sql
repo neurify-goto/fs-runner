@@ -24,6 +24,9 @@ declare
   v_total_final integer := 0;             -- 最終総件数
   v_base_priority integer := 0;           -- 2段目付与用の基準priority
   v_shards integer := 8;                  -- shardsの検証/補正後の値
+  v_t0 timestamp with time zone;          -- 計測用: 関数全体開始
+  v_t1 timestamp with time zone;          -- 計測用: 各ステージ開始
+  v_elapsed_ms numeric;                   -- 計測用: 経過ミリ秒
 begin
   -- 実行時間が長めになるケース（複合条件 + 上限1万件）に備えて、局所的に statement_timeout を緩和
   -- 既存の 60 秒設定では intermittently timeout が発生していたため、当関数内のみ 180 秒へ延長
@@ -31,6 +34,12 @@ begin
   perform set_config('statement_timeout', '180000', true);  -- milliseconds (3 minutes)
   -- 競合ロックによる待ちを短くするために lock_timeout も軽く設定（待ちすぎで statement_timeout に達しないように）
   perform set_config('lock_timeout', '10000', true);        -- milliseconds (10 seconds)
+  -- NOTICE を確実に出す（環境により無視される場合あり）
+  perform set_config('log_min_messages', 'notice', true);
+
+  -- デバッグ計測用タイムスタンプ
+  v_t0 := clock_timestamp();
+  raise notice 'CQT:BEGIN date=%, targeting_id=%, shards=%', p_target_date, p_targeting_id, coalesce(p_shards, 8);
 
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
@@ -60,6 +69,7 @@ begin
   else
     v_ng_names := string_to_array(replace(replace(p_ng_companies, '，', ','), ' ', ''), ',')::text[];
   end if;
+  raise notice 'CQT:PARAMS targeting_sql_len=%, ng_names_len=%', length(coalesce(p_targeting_sql,'')), coalesce(array_length(v_ng_names,1),0);
 
   -- shards パラメータの検証/補正（0以下/NULLは既定値8へ）
   v_shards := coalesce(p_shards, 8);
@@ -99,8 +109,11 @@ begin
     on conflict (target_date_jst, targeting_id, company_id) do nothing;';
 
   -- p_max_daily は無視し、常に v_limit=10000 を使用
+  v_t1 := clock_timestamp();
   execute v_sql using p_target_date, p_targeting_id, v_ng_names, v_limit, v_shards;
   get diagnostics v_ins = row_count;
+  v_elapsed_ms := extract(epoch from (clock_timestamp() - v_t1)) * 1000;
+  raise notice 'CQT:STAGE1 inserted=% rows in % ms', v_ins, v_elapsed_ms::bigint;
 
   -- 1段目投入後の現在総数を計測
   select count(*) into v_current_total
@@ -111,6 +124,7 @@ begin
   -- 追加要件(改): 総数が上限(10000)に満たない場合のみ、
   -- 「過去に送信試行はあるが成功履歴がないもの」で不足分を補充
   if coalesce(v_current_total, 0) < v_limit then
+    raise notice 'CQT:STAGE2 need=% (current_total=%, limit=%)', (v_limit - coalesce(v_current_total,0)), coalesce(v_current_total,0), v_limit;
     v_need := v_limit - coalesce(v_current_total, 0);
 
     v_sql :=
@@ -161,9 +175,12 @@ begin
      where target_date_jst = p_target_date
        and targeting_id    = p_targeting_id;
 
+    v_t1 := clock_timestamp();
     execute v_sql using p_target_date, p_targeting_id, v_ng_names, v_need, v_shards, v_base_priority;
     get diagnostics v_ins2 = row_count;
     v_ins := coalesce(v_ins,0) + coalesce(v_ins2,0);
+    v_elapsed_ms := extract(epoch from (clock_timestamp() - v_t1)) * 1000;
+    raise notice 'CQT:STAGE2 inserted=% rows in % ms', v_ins2, v_elapsed_ms::bigint;
   end if;
 
   -- 最終総件数を取得
@@ -173,8 +190,12 @@ begin
      and targeting_id    = p_targeting_id;
 
   -- 観測用 NOTICE（件数内訳）
-  raise notice 'create_queue_for_targeting: date=%, targeting_id=%, current_total_before_stage2=%, stage1_inserted=%, stage2_inserted=%, total_final=%',
+  raise notice 'CQT:END date=%, targeting_id=%, current_total_before_stage2=%, stage1_inserted=%, stage2_inserted=%, total_final=%, total_ms=%',
     p_target_date, p_targeting_id, v_current_total, (v_ins - coalesce(v_ins2,0)), coalesce(v_ins2,0), v_total_final;
+  -- 合計時間
+  v_elapsed_ms := extract(epoch from (clock_timestamp() - v_t0)) * 1000;
+  -- 直前の NOTICE とまとめて観測
+  perform 1;
 
   return v_ins;
 end;
