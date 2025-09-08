@@ -37,16 +37,29 @@ def load_client_data_simple(config_file: str, targeting_id: int) -> Dict[str, An
         project_root = current_file.parents[3]
         project_tests_tmp_real = (project_root / 'tests' / 'tmp').resolve()
 
-        # セキュリティチェック（本番用/tmp/とテスト用tests/tmp/を許可）
-        allowed_prefixes = [
-            '/tmp/client_config_',
-            '/private/tmp/client_config_',
-            str(project_tests_tmp_real / 'client_config_'),
-        ]
-        if not any(str(config_file).startswith(p) for p in allowed_prefixes):
-            raise ValueError(f"Unsafe config file path: {config_file}")
+        # 強化されたセキュリティチェック
+        cf_raw = Path(config_file)
+        # 明示的に .. を拒否
+        if '..' in cf_raw.as_posix():
+            raise ValueError("Unsafe path sequence in config file path")
+        # 実体パスを解決（シンボリックリンクも解決）
+        cf = cf_raw.resolve()
+        # シンボリックリンクは拒否
+        try:
+            if cf.is_symlink():
+                raise ValueError("Symlink is not allowed for config file")
+        except Exception:
+            # is_symlink() が例外でも保守的に拒否
+            raise ValueError("Unable to verify symlink status for config file")
 
-        with open(config_file, 'r', encoding='utf-8') as f:
+        allowed_dirs = [Path('/tmp'), Path('/private/tmp'), project_tests_tmp_real]
+        allowed = any(cf.parent == d for d in allowed_dirs)
+        if not allowed:
+            raise ValueError(f"Config file directory not allowed: {cf}")
+        if not cf.name.startswith('client_config_'):
+            raise ValueError("Config file name must start with 'client_config_'")
+
+        with open(cf, 'r', encoding='utf-8') as f:
             config_data = json.load(f)
 
         if not isinstance(config_data, dict) or not config_data:
@@ -114,4 +127,3 @@ def load_client_data_simple(config_file: str, targeting_id: int) -> Dict[str, An
         error_msg = f"予期しないエラー: {e}"
         logger.error(error_msg)
         return {'targeting_id': targeting_id, 'error': error_msg}
-

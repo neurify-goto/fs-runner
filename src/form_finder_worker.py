@@ -4,7 +4,7 @@ Form Finder Worker (GitHub Actions版 - マルチプロセス対応エントリ�
 
 GitHub ActionsからGASデータを受け取り、マルチプロセスでフォーム探索処理を実行します。
 
-form_sender_worker.pyのマルチプロセス・アーキテクチャを参考にした実装：
+（参考）旧 form_sender_worker.py のマルチプロセス・アーキテクチャに基づく設計：
 - マルチワーカープロセスによる並列処理
 - オーケストレーターによる統括管理
 - GitHub Actions環境での最適化
