@@ -23,11 +23,11 @@ BEGIN
         -- 2. 企業URLあり
         COUNT(CASE WHEN c.company_url IS NOT NULL THEN 1 END)::bigint AS with_company_url_count,
         
-        -- 3. フォーム未探索（企業URLありかつform_foundがnull）
-        COUNT(CASE WHEN c.company_url IS NOT NULL AND c.form_found IS NULL THEN 1 END)::bigint AS form_not_explored_count,
+        -- 3. フォーム未探索（企業URLあり かつ form_foundがnull かつ duplication is null）
+        COUNT(CASE WHEN c.company_url IS NOT NULL AND c.form_found IS NULL AND c.duplication IS NULL THEN 1 END)::bigint AS form_not_explored_count,
         
-        -- 4. フォームURLあり
-        COUNT(CASE WHEN c.form_url IS NOT NULL THEN 1 END)::bigint AS with_form_url_count,
+        -- 4. フォームURLあり（duplication is null）
+        COUNT(CASE WHEN c.form_url IS NOT NULL AND c.duplication IS NULL THEN 1 END)::bigint AS with_form_url_count,
         
         -- 5. フォーム未解析（フォームURLありかつinstruction_jsonがnullかつprohibition_detectedがtrueでない）
         COUNT(CASE WHEN c.form_url IS NOT NULL 
