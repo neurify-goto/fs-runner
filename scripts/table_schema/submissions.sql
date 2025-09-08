@@ -6,6 +6,7 @@ create table public.submissions (
   submitted_at timestamp with time zone null,
   success boolean null,
   classify_detail jsonb null,
+  field_mapping jsonb null,
   constraint submissions_pkey primary key (id)
 ) TABLESPACE pg_default;
 
