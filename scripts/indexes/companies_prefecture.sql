@@ -1,7 +1,5 @@
--- companies.prefecture の絞り込み最適化用インデックス
--- 用途: create_queue_for_targeting 内での targetting_sql 条件（例: prefecture = '東京都'）
--- 既存のベース部分インデックス(ix_companies_form_allowed)を補完
-create index if not exists idx_companies_prefecture
+-- 命名規則統一のため ix_ プレフィックスを使用
+drop index if exists idx_companies_prefecture;
+create index if not exists ix_companies_prefecture
   on public.companies (prefecture)
   where form_url is not null and coalesce(prohibition_detected, false) = false;
-

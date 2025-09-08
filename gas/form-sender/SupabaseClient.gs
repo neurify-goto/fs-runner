@@ -58,4 +58,3 @@ function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCom
  * @param {string} rawNgCompanies シートのng_companies文字列
  * @returns {string} カンマ区切りID文字列（空なら''）
  */
-// 社名ベース除外に移行したため、ng_companiesのID正規化は不要。
