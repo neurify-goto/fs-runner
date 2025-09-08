@@ -14,6 +14,18 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
     - 性別×select の誤検出抑止: 男女表現が両方なければ除外
     """
     try:
+        # 共通除外: 罠/スパム対策系フィールドや不可視要素は早期除外
+        name_id_cls = " ".join([
+            str(element_info.get("name") or ""),
+            str(element_info.get("id") or ""),
+            str(element_info.get("class") or ""),
+        ]).lower()
+        trap_tokens = ["honeypot", "honey", "trap", "botfield", "no-print", "noprint"]
+        if any(t in name_id_cls for t in trap_tokens):
+            return False
+        if not bool(element_info.get("visible", True)):
+            return False
+
         # 都道府県: select の場合は option に都道府県名が一定数含まれることを要求
         if field_name == "都道府県":
             tag = (element_info.get("tag_name") or "").lower()
@@ -65,6 +77,10 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
             ]).lower()
             neg = ["建物名", "建物", "マンション", "アパート", "部屋番号", "号室", "room", "apartment", "building"]
             if any(t in ph for t in neg) or any(t in name_id_cls for t in neg):
+                return False
+            # 住所に無関係な『注文番号』等のトークンは除外
+            order_like = ["注文番号", "order number", "受注番号", "予約番号", "伝票番号", "受付番号", "お問い合わせ番号", "tracking number"]
+            if any(t in ph for t in order_like) or any(t in name_id_cls for t in order_like):
                 return False
 
         if field_name == "性別":

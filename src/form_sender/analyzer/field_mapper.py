@@ -98,8 +98,8 @@ class FieldMapper:
                         logger.info(
                             "Skip '統合氏名カナ' due to detected split candidates in DOM"
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Skip unified kana log failed: {e}")
                     continue
             except Exception:
                 pass
@@ -1187,6 +1187,12 @@ class FieldMapper:
         name_like_excl = ["ふりがな", "フリガナ", "カナ", "ひらがな"]
 
         best = (None, 0, None, [])
+        # 注文番号/各種番号など、住所と無関係なトークンを含む要素は除外
+        order_like_tokens = [
+            "注文番号", "order number", "受注番号", "予約番号", "伝票番号", "受付番号", "お問い合わせ番号", "tracking number",
+        ]
+        spam_trap_tokens = ["honeypot", "honey", "trap", "botfield", "no-print", "noprint", "hidden", "hid"]
+
         for el in text_inputs:
             if id(el) in used_elements:
                 continue
@@ -1223,6 +1229,15 @@ class FieldMapper:
             best_ctx = (
                 self.context_text_extractor.get_best_context_text(contexts) or ""
             ).lower()
+            # 注文番号・トラップ系は除外
+            try:
+                combined = (blob + " " + best_ctx).lower()
+                if any(t.lower() in combined for t in [t.lower() for t in order_like_tokens]):
+                    continue
+                if any(t in combined for t in spam_trap_tokens):
+                    continue
+            except Exception:
+                pass
             attr_hit = any(t in blob for t in addr_attr_tokens) or any(
                 t in (ei.get("placeholder", "") or "") for t in ["県", "市", "区", "丁目", "番地", "-", "ー", "－"]
             )
@@ -1239,7 +1254,8 @@ class FieldMapper:
         el, score, details, contexts = best
         if not el:
             return
-        threshold = max(60, int(self.settings.get("email_fallback_min_score", 60)))
+        # 住所の誤検出リスクを下げるため、しきい値をやや高めに設定
+        threshold = max(70, int(self.settings.get("email_fallback_min_score", 60)) + 5)
         if score >= threshold:
             info = await self._create_enhanced_element_info(el, details, contexts)
             try:
@@ -1366,6 +1382,12 @@ class FieldMapper:
                     f"Fallback mapped '統合氏名' via label/attr (score {score})"
                 )
 
+        # 追加フォールバック: 分割姓名（姓/名）の取りこぼし救済（プレースホルダ/ラベル/属性の強いトークン）
+        try:
+            await self._fallback_map_split_name_fields(classified_elements, field_mapping, used_elements)
+        except Exception as e:
+            logger.debug(f"fallback split name mapping skipped: {e}")
+
     async def _fallback_map_subject_field(
         self, classified_elements, field_mapping, used_elements
     ):
@@ -1383,6 +1405,8 @@ class FieldMapper:
             "氏名", "お名前", "name", "fullname", "メール", "email", "mail",
             "tel", "phone", "電話", "住所", "郵便", "postal", "zip",
         }
+        # スパム対策/罠フィールドの一般的なトークン（可視/不可視を問わず除外）
+        trap_tokens = {"honeypot", "honey", "trap", "botfield", "no-print", "noprint", "hidden", "hid"}
         best = (None, 0, None, [])
         for el in text_inputs:
             if id(el) in used_elements:
@@ -1398,6 +1422,8 @@ class FieldMapper:
                 (ei.get("placeholder") or ""),
             ]).lower()
             if any(t in blob for t in neg_tokens):
+                continue
+            if any(t in blob for t in trap_tokens):
                 continue
             el_bounds = (
                 self._element_bounds_cache.get(str(el))
@@ -1435,7 +1461,7 @@ class FieldMapper:
                 )
             return
 
-        # 追加救済: name/id が 'sub' / 'subject' / 'title' の要素を安全に採用
+        # 追加救済: name/id が 'sub' / 'subject' / 'title' の要素を安全に採用（罠トークンは除外）
         try:
             for el in classified_elements.get("text_inputs", []) or []:
                 if id(el) in used_elements:
@@ -1443,6 +1469,9 @@ class FieldMapper:
                 ei = await self.element_scorer._get_element_info(el)
                 nm = (ei.get("name") or "").lower()
                 ide = (ei.get("id") or "").lower()
+                cl = (ei.get("class") or "").lower()
+                if any(t in (nm + " " + ide + " " + cl) for t in trap_tokens):
+                    continue
                 if nm in {"sub", "subject", "title"} or ide in {"sub", "subject", "title"}:
                     info = await self._create_enhanced_element_info(el, {"element_info": ei, "total_score": 60}, [])
                     try:
@@ -1502,6 +1531,82 @@ class FieldMapper:
             target_types.update(["text_inputs", "email_inputs", "tel_inputs"])
 
         return list(target_types)
+
+    async def _fallback_map_split_name_fields(self, classified_elements, field_mapping, used_elements):
+        """分割姓名（姓/名）の取りこぼし救済。
+
+        条件（汎用）:
+        - まだ『姓』『名』が未確定
+        - text_inputs のうち、placeholder/ラベル/属性に 姓/名 or first/last/fname/lname 系トークン
+        - 可視かつ allow_candidate を満たす
+        - スコアが最低閾値に近い場合でも、強いトークン一致で昇格
+        """
+        if ("姓" in field_mapping) and ("名" in field_mapping):
+            return
+        text_inputs = classified_elements.get("text_inputs", []) or []
+        if not text_inputs:
+            return
+        patterns_last = self.field_patterns.get_pattern("姓") or {}
+        patterns_first = self.field_patterns.get_pattern("名") or {}
+
+        def _blob(ei: dict, ctx_best: str) -> str:
+            return " ".join([
+                (ei.get("name") or ""), (ei.get("id") or ""), (ei.get("class") or ""), (ei.get("placeholder") or ""),
+                (ctx_best or "")
+            ]).lower()
+
+        candidates_last = []
+        candidates_first = []
+        for el in text_inputs:
+            if id(el) in used_elements:
+                continue
+            ei = await self.element_scorer._get_element_info(el)
+            if not ei.get("visible", True):
+                continue
+            try:
+                from .candidate_filters import allow_candidate as _allow
+                if not await _allow("姓", el, ei):
+                    continue
+            except Exception:
+                pass
+            ctxs = await self.context_text_extractor.extract_context_for_element(el)
+            best_txt = self.context_text_extractor.get_best_context_text(ctxs) or ""
+            blob = _blob(ei, best_txt)
+            last_hit = any(t in blob for t in ["姓", "lastname", "last_name", "last-name", "family-name", "family_name", "sei", "lname", "l_name"]) or any(
+                t in (best_txt or "") for t in ["姓", "苗字"])
+            first_hit = any(t in blob for t in ["名", "firstname", "first_name", "first-name", "given-name", "given_name", "mei", "fname", "f_name"]) or any(
+                t in (best_txt or "") for t in ["名"])
+            if last_hit:
+                s, d = await self.element_scorer.calculate_element_score(el, patterns_last, "姓")
+                candidates_last.append((s, el, d, ctxs))
+            if first_hit:
+                s, d = await self.element_scorer.calculate_element_score(el, patterns_first, "名")
+                candidates_first.append((s, el, d, ctxs))
+
+        if candidates_last and ("姓" not in field_mapping):
+            candidates_last.sort(key=lambda x: x[0], reverse=True)
+            s, el, d, ctxs = candidates_last[0]
+            info = await self._create_enhanced_element_info(el, d, ctxs)
+            tmp = self._generate_temp_field_value("姓")
+            if self.duplicate_prevention.register_field_assignment("姓", tmp, s, info):
+                field_mapping["姓"] = info
+                used_elements.add(id(el))
+        if candidates_first and ("名" not in field_mapping):
+            candidates_first.sort(key=lambda x: x[0], reverse=True)
+            # 既に『姓』に使った要素は避ける
+            pick = None
+            for s, el, d, ctxs in candidates_first:
+                if id(el) not in used_elements:
+                    pick = (s, el, d, ctxs)
+                    break
+            if not pick:
+                return
+            s, el, d, ctxs = pick
+            info = await self._create_enhanced_element_info(el, d, ctxs)
+            tmp = self._generate_temp_field_value("名")
+            if self.duplicate_prevention.register_field_assignment("名", tmp, s, info):
+                field_mapping["名"] = info
+                used_elements.add(id(el))
 
     def _should_skip_field_for_unified(self, field_name: str) -> bool:
         # 統合氏名（漢字）がある場合は「姓」「名」のみスキップ

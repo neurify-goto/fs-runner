@@ -59,6 +59,9 @@ class RequiredRescue:
                         attrs = (
                             nm + " " + ide + " " + (ei.get("class", "") or "")
                         ).lower()
+                        # 罠/スパム対策フィールドは除外
+                        if any(t in attrs for t in ["honeypot", "honey", "trap", "botfield", "no-print", "noprint"]):
+                            continue
                         if nm == "email" or ide == "email":
                             # 確認/チェック用でない & 必須マーカー
                             if any(k in attrs for k in ["confirm", "確認", "check"]):
@@ -189,9 +192,45 @@ class RequiredRescue:
                             el
                         )
                     )
-                    field_name = self._infer_logical_field_name_for_required(
-                        ei, contexts
-                    )
+                    field_name = self._infer_logical_field_name_for_required(ei, contexts)
+                    # テキストエリア誤判定救済: 住所系テキストエリアを『お問い合わせ本文』にしない
+                    try:
+                        if field_name == "お問い合わせ本文":
+                            texts = " ".join([(getattr(c, 'text', '') or '') for c in (contexts or [])])
+                            blob = " ".join([
+                                (ei.get("name", "") or ""),
+                                (ei.get("id", "") or ""),
+                                (ei.get("class", "") or ""),
+                                (ei.get("placeholder", "") or ""),
+                                texts,
+                            ]).lower()
+                            addr_tokens = [
+                                "住所", "address", "addr", "street", "city", "prefecture", "都道府県", "市区町村",
+                                "p-region", "p-locality", "p-street-address", "p-extended-address",
+                            ]
+                            if any(t in blob for t in addr_tokens):
+                                field_name = "住所"
+                    except Exception:
+                        pass
+
+                    # フィールド固有の早期除外（誤検出抑止）
+                    try:
+                        from .candidate_filters import allow_candidate as _allow
+                        if not await _allow(field_name, el, ei):
+                            continue
+                    except Exception:
+                        pass
+
+                    # 重要フィールドはセーフガードを通す
+                    try:
+                        if field_name in {"メールアドレス", "電話番号", "郵便番号", "都道府県", "お問い合わせ本文"}:
+                            from .mapping_safeguards import passes_safeguard as _pass
+                            # 簡易スコア詳細（最低限）
+                            details_tmp = {"element_info": ei, "total_score": 60}
+                            if not _pass(field_name, details_tmp, contexts, self.context_text_extractor, {}, self.settings):
+                                continue
+                    except Exception:
+                        pass
 
                     try:
                         if field_name.startswith("auto_required_text_"):
