@@ -216,12 +216,17 @@ def _classify_failure_detail(err_msg: Optional[str], add_data: Optional[Dict[str
         if ent and isinstance(ent, dict) and (now_ts - ent.get('ts', 0) <= ttl):
             detail = ent.get('detail')
         else:
-            detail = ErrorClassifier.classify_detail(
-                error_message=err_msg or '',
-                page_content=page_content or '',
-                http_status=http_status,
-                context={'error_type_hint': error_type} if error_type else None,
-            )
+            try:
+                detail = ErrorClassifier.classify_detail(
+                    error_message=err_msg or '',
+                    page_content=page_content or '',
+                    http_status=http_status,
+                    context={'error_type_hint': error_type} if error_type else None,
+                )
+            except Exception as e:
+                # 失敗分類の例外は握りつぶし、処理継続を最優先
+                logger.warning(f"detail classification error (suppressed): {type(e).__name__}: {e}")
+                return None, None
             _CLASSIFY_CACHE[cache_key] = {'detail': detail, 'ts': now_ts}
             _prune_classify_cache(now_ts)
 
@@ -239,8 +244,117 @@ def _classify_failure_detail(err_msg: Optional[str], add_data: Optional[Dict[str
         logger.warning(f"detail classification failed: {e}")
         return None, None
     except Exception as e:
-        logger.debug(f"unexpected classification error: {e}")
+        # 予期せぬ例外も抑止し、分類不能として返す
+        logger.warning(f"failure detail unexpected error (suppressed): {type(e).__name__}: {e}")
         return None, None
+
+
+def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Workerのadditional_dataから、DB保存用の根拠情報を抽出する。
+    - 検出ワード（成功/失敗）
+    - HTTPステータス/リダイレクトURL
+    - URL変更・最終URL
+    - 判定ステージ/信頼度
+    機微になり得るページ本文は含めない（サニタイズ済みスニペットは別途保持されうる）。
+    """
+    evidence: Dict[str, Any] = {}
+    try:
+        if not isinstance(add_data, dict):
+            return evidence
+
+        judgment = add_data.get('judgment') or {}
+        if not isinstance(judgment, dict):
+            judgment = {}
+        details = judgment.get('details') or {}
+        if not isinstance(details, dict):
+            details = {}
+
+        # 検出ワード（成功側）
+        success_words: List[str] = []
+        try:
+            for m in (details.get('success_matches') or []):
+                t = (m.get('text') or '') if isinstance(m, dict) else ''
+                if t:
+                    success_words.append(t[:80])
+            for m in (details.get('element_success_matches') or []):
+                t = (m.get('text') or '') if isinstance(m, dict) else ''
+                if t:
+                    success_words.append(t[:80])
+        except Exception:
+            pass
+
+        # 検出ワード（失敗側）
+        failure_words: List[str] = []
+        try:
+            for m in (details.get('error_matches') or []):
+                t = (m.get('text') or '') if isinstance(m, dict) else ''
+                if t:
+                    failure_words.append(t[:80])
+            for m in (details.get('visible_error_elements') or []):
+                t = (m.get('text') or '') if isinstance(m, dict) else ''
+                if t:
+                    failure_words.append(t[:80])
+            # 早期失敗ゲートの厳格パターン
+            for p in (details.get('matched_patterns') or []):
+                if isinstance(p, str) and p:
+                    failure_words.append(p[:80])
+        except Exception:
+            pass
+
+        # HTTPレスポンス・リダイレクト
+        redirect_urls: List[str] = []
+        http_status = None
+        try:
+            resp = details.get('response_analysis') or {}
+            if isinstance(resp, dict):
+                for r in (resp.get('redirect_responses') or []):
+                    if isinstance(r, dict) and r.get('url'):
+                        redirect_urls.append(str(r.get('url')))
+        except Exception:
+            pass
+
+        # classify_context優先のHTTPステータス
+        try:
+            ctx = add_data.get('classify_context') or {}
+            if isinstance(ctx, dict) and isinstance(ctx.get('http_status'), int):
+                http_status = ctx.get('http_status')
+        except Exception:
+            pass
+
+        # URL情報
+        try:
+            final_url = add_data.get('final_url') if isinstance(add_data.get('final_url'), str) else None
+            original_url = add_data.get('original_url') if isinstance(add_data.get('original_url'), str) else None
+            if not final_url and isinstance(details.get('current_url'), str):
+                final_url = details.get('current_url')
+            if not original_url and isinstance(details.get('original_url'), str):
+                original_url = details.get('original_url')
+        except Exception:
+            final_url = None
+            original_url = None
+
+        # ステージ/信頼度
+        try:
+            stage = int(judgment.get('stage')) if isinstance(judgment.get('stage'), (int, float)) else None
+        except Exception:
+            stage = None
+        stage_name = judgment.get('stage_name') if isinstance(judgment.get('stage_name'), str) else None
+        confidence = judgment.get('confidence') if isinstance(judgment.get('confidence'), (int, float)) else None
+
+        evidence.update({
+            'detected_success_words': success_words[:5] if success_words else [],
+            'detected_failure_words': failure_words[:5] if failure_words else [],
+            'http_status': http_status,
+            'redirect_urls': redirect_urls[:5] if redirect_urls else [],
+            'final_url': final_url,
+            'original_url': original_url,
+            'stage': stage,
+            'stage_name': stage_name,
+            'judge_confidence': confidence,
+        })
+        return evidence
+    except Exception:
+        return evidence
 
 def _get_success_count_today_jst(supabase, targeting_id: int, target_date: date) -> int:
     """当日(JST)成功数をUTC境界で集計"""
@@ -466,15 +580,42 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     error_type = getattr(result, 'error_type', None) if not is_success else None
     bp = getattr(result, 'bot_protection_detected', False)
 
-    # 失敗時は詳細分類を生成（HTTP/WAF/検証 等）
+    # 成功・失敗の根拠情報を抽出
+    add_data = getattr(result, 'additional_data', None) if not isinstance(result, dict) else result.get('additional_data')
+    evidence = _extract_evidence_from_additional(add_data)
+
+    # 詳細分類（失敗時はErrorClassifierベース + 根拠を追加、成功時も根拠を保存）
     classify_detail = None
     if not is_success:
-        # WorkerResult/dataclass 互換: error_message/追加文脈の取得
+        # WorkerResult/dataclass 互換: error_message 取得
         err_msg = getattr(result, 'error_message', None) if not isinstance(result, dict) else result.get('error_message')
-        add_data = getattr(result, 'additional_data', None) if not isinstance(result, dict) else result.get('additional_data')
-        classify_detail, bot_flag = _classify_failure_detail(err_msg, add_data, error_type)
+        base_detail, bot_flag = _classify_failure_detail(err_msg, add_data, error_type)
         if bot_flag:
             bp = True
+        if isinstance(base_detail, dict):
+            # 根拠の追記（安全にマージ）
+            bd = dict(base_detail)
+            if evidence:
+                bd['evidence'] = evidence
+            classify_detail = bd
+        else:
+            # フォールバック
+            classify_detail = {'code': error_type or 'UNKNOWN', 'category': 'SYSTEM', 'retryable': False, 'cooldown_seconds': 0, 'confidence': 0.0, 'evidence': evidence}
+    else:
+        # 成功時も根拠を保存（偽陽性/陰性検証のため）
+        conf = None
+        try:
+            conf = float(evidence.get('judge_confidence')) if isinstance(evidence.get('judge_confidence'), (int, float)) else None
+        except Exception:
+            conf = None
+        classify_detail = {
+            'code': 'SUCCESS',
+            'category': 'SUBMISSION',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': conf if conf is not None else 0.8,
+            'evidence': evidence
+        }
 
     # 4) finalize via RPC（固定 company_id の場合も submissions 記録目的で呼ぶ。send_queue更新は0件でも問題なし）
     try:

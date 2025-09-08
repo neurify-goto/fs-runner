@@ -2493,9 +2493,30 @@ class FormSenderWorker:
             content_match = self.failure_matcher.find_match(page_content)
 
             if text_match or content_match:
-                matched_keyword = text_match or content_match
-                logger.info(f"Failure keyword detected: {matched_keyword}")  # Critical detection always logged
-                return True
+                matched_keyword = (text_match or content_match or '').lower()
+
+                # 成功語が同時に強くヒットしている場合は失敗とみなさない（偽陽性抑止）
+                try:
+                    if self.success_matcher.find_match(page_text) or self.success_matcher.find_match(page_content):
+                        return False
+                except Exception:
+                    pass
+
+                # エラー文脈ヒント（DOMの属性・クラス）
+                error_context_hints = [
+                    'aria-invalid="true"', 'class="error', 'class="alert', 'class="is-error', 'class="invalid',
+                    '[role="alert"]', 'data-error', 'data-valmsg-for'
+                ]
+                has_error_context = any(hint in (page_content or '').lower() for hint in error_context_hints)
+
+                # Bot/キャプチャ系は単独でも強いシグナル
+                is_bot_like = any(tok in matched_keyword for tok in ['captcha', 'recaptcha', 'not a robot'])
+
+                if is_bot_like or has_error_context:
+                    logger.info("Failure keyword detected with strong context")  # No sensitive detail
+                    return True
+                # それ以外は早期段階では失敗としない（SuccessJudgeで再評価）
+                return False
 
             return False
 

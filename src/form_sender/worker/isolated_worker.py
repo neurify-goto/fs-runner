@@ -1464,6 +1464,8 @@ class IsolatedFormWorker:
                                     "submit_selector": selector,
                                     "bot_protection_detected": bool(sj_result.get('details', {}).get('bot_protection_detected', False)),
                                     "judgment": sj_result,
+                                    "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
+                                    "original_url": pre_submit_url,
                                 }
                             except Exception as e:
                                 logger.warning(f"Worker {self.worker_id}: SuccessJudge post-final failed: {e}")
@@ -1473,6 +1475,8 @@ class IsolatedFormWorker:
                                     "has_url_change": pre_submit_url != self.page.url,
                                     "page_content": "",
                                     "submit_selector": selector,
+                                    "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
+                                    "original_url": pre_submit_url,
                                 }
                             
                     except Exception:
@@ -1485,7 +1489,9 @@ class IsolatedFormWorker:
                 "error_message": "Final submit button not found on confirmation page",
                 "has_url_change": False,
                 "page_content": "",
-                "submit_selector": ""
+                "submit_selector": "",
+                "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
+                "original_url": pre_submit_url
             }
             
         except Exception as e:
@@ -1495,7 +1501,9 @@ class IsolatedFormWorker:
                 "error_message": f"Final button search error: {str(e)}",
                 "has_url_change": False,
                 "page_content": "",
-                "submit_selector": ""
+                "submit_selector": "",
+                "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
+                "original_url": pre_submit_url
             }
     
     # _analyze_final_submission_result: SuccessJudgeでの統一判定に置き換え済み（削除）
