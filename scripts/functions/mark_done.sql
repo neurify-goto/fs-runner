@@ -1,4 +1,6 @@
 -- 送信結果を記録し、キューを更新（原子的）
+-- 旧シグネチャ（p_field_mappingなし）と新シグネチャを明示的にDROPして多重定義を排除
+drop function if exists public.mark_done(date,bigint,bigint,boolean,text,jsonb,boolean,timestamp with time zone);
 drop function if exists public.mark_done(date,bigint,bigint,boolean,text,jsonb,jsonb,boolean,timestamp with time zone);
 
 create or replace function public.mark_done(
