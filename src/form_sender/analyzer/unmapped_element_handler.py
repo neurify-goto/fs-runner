@@ -37,7 +37,17 @@ class UnmappedElementHandler:
         self._container_required_cache: Dict[str, bool] = {}
 
         # 必須マーカー（『※』は注記用途が多く誤検出の原因になるため除外）
-        self.REQUIRED_MARKERS = ['*','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］']
+        self.REQUIRED_MARKERS = [
+            "*",
+            "必須",
+            "Required",
+            "Mandatory",
+            "Must",
+            "(必須)",
+            "（必須）",
+            "[必須]",
+            "［必須］",
+        ]
 
     async def _detect_group_required_via_container(self, first_radio: Locator) -> bool:
         """見出しコンテナ側の必須マーカーを探索して判定（設定化・キャッシュ付）。"""
@@ -48,8 +58,8 @@ class UnmappedElementHandler:
         if key in self._container_required_cache:
             return self._container_required_cache[key]
 
-        max_depth = int(self.settings.get('radio_required_max_container_depth', 6))
-        sib_depth = int(self.settings.get('radio_required_max_sibling_depth', 2))
+        max_depth = int(self.settings.get("radio_required_max_container_depth", 6))
+        sib_depth = int(self.settings.get("radio_required_max_sibling_depth", 2))
         js = """
             (el) => {{
               const MARKERS = ['*','必須','Required','Mandatory','Must','(必須)','（必須）','[必須]','［必須］'];
@@ -114,37 +124,63 @@ class UnmappedElementHandler:
         # 先に『統合氏名/統合氏名カナ』が name1/name2 / kana1/kana2 のような分割ペアに誤割当てされていないかを確認し、
         # 該当する場合は統合マッピングを降格して分割入力を優先できるようにする（汎用・安全）。
         try:
-            self._demote_unified_name_for_indexed_pairs(classified_elements, field_mapping)
-            self._demote_unified_kana_for_indexed_pairs(classified_elements, field_mapping)
+            self._demote_unified_name_for_indexed_pairs(
+                classified_elements, field_mapping
+            )
+            self._demote_unified_kana_for_indexed_pairs(
+                classified_elements, field_mapping
+            )
         except Exception as e:
             logger.debug(f"unified demotion skipped: {e}")
 
-        mapped_element_ids = {id(info.get("element")) for info in field_mapping.values() if isinstance(info, dict) and info.get("element")}
+        mapped_element_ids = {
+            id(info.get("element"))
+            for info in field_mapping.values()
+            if isinstance(info, dict) and info.get("element")
+        }
 
         checkbox_handled = await self._auto_handle_checkboxes(
             classified_elements.get("checkboxes", []), mapped_element_ids
         )
         auto_handled.update(checkbox_handled)
-        mapped_element_ids.update({id(v.get("element")) for v in checkbox_handled.values() if isinstance(v, dict) and v.get("element")})
+        mapped_element_ids.update(
+            {
+                id(v.get("element"))
+                for v in checkbox_handled.values()
+                if isinstance(v, dict) and v.get("element")
+            }
+        )
 
         radio_handled = await self._auto_handle_radios(
             classified_elements.get("radios", []), mapped_element_ids, client_data
         )
         auto_handled.update(radio_handled)
-        mapped_element_ids.update({id(v.get("element")) for v in radio_handled.values() if isinstance(v, dict) and v.get("element")})
+        mapped_element_ids.update(
+            {
+                id(v.get("element"))
+                for v in radio_handled.values()
+                if isinstance(v, dict) and v.get("element")
+            }
+        )
 
         select_handled = await self._auto_handle_selects(
             classified_elements.get("selects", []), mapped_element_ids, client_data
         )
         auto_handled.update(select_handled)
-        mapped_element_ids.update({id(v.get("element")) for v in select_handled.values() if isinstance(v, dict) and v.get("element")})
+        mapped_element_ids.update(
+            {
+                id(v.get("element"))
+                for v in select_handled.values()
+                if isinstance(v, dict) and v.get("element")
+            }
+        )
 
         # 汎用昇格: 都道府県フィールド（select/text）が未マッピングなら field_mapping に昇格
         try:
             promoted_pref = await self._promote_prefecture_field(
                 (classified_elements.get("selects", []) or []),
                 (classified_elements.get("text_inputs", []) or []),
-                field_mapping
+                field_mapping,
             )
             if promoted_pref:
                 auto_handled.update(promoted_pref)
@@ -185,26 +221,60 @@ class UnmappedElementHandler:
                     info = await self.element_scorer._get_element_info(el)
                     if not info.get("visible", True):
                         continue
-                    name_id_cls = " ".join([info.get("name",""), info.get("id",""), info.get("class","")]).lower()
-                    nm = (info.get("name","") or "").lower()
-                    if nm in ("kana1","kana_1","kana2","kana_2"):
+                    name_id_cls = " ".join(
+                        [
+                            info.get("name", ""),
+                            info.get("id", ""),
+                            info.get("class", ""),
+                        ]
+                    ).lower()
+                    nm = (info.get("name", "") or "").lower()
+                    if nm in ("kana1", "kana_1", "kana2", "kana_2"):
                         # どちらか一方でも見つかれば候補
-                        indexed_kana_pair_present = indexed_kana_pair_present or (nm in ("kana1","kana_1"))
-                    contexts = await self.context_text_extractor.extract_context_for_element(el)
-                    best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
-                    kana_like = ("kana" in name_id_cls) or ("furigana" in name_id_cls) or ("katakana" in name_id_cls) or ("カナ" in best) or ("フリガナ" in best) or ("ふりがな" in best)
+                        indexed_kana_pair_present = indexed_kana_pair_present or (
+                            nm in ("kana1", "kana_1")
+                        )
+                    contexts = (
+                        await self.context_text_extractor.extract_context_for_element(
+                            el
+                        )
+                    )
+                    best = (
+                        self.context_text_extractor.get_best_context_text(contexts)
+                        or ""
+                    ).lower()
+                    kana_like = (
+                        ("kana" in name_id_cls)
+                        or ("furigana" in name_id_cls)
+                        or ("katakana" in name_id_cls)
+                        or ("カナ" in best)
+                        or ("フリガナ" in best)
+                        or ("ふりがな" in best)
+                    )
                     if not kana_like:
                         continue
-                    if any(t in (best+" "+name_id_cls) for t in ["sei","姓","セイ"]):
+                    if any(
+                        t in (best + " " + name_id_cls) for t in ["sei", "姓", "セイ"]
+                    ):
                         last_like = el if last_like is None else last_like
-                    if any(t in (best+" "+name_id_cls) for t in ["mei","名","メイ"]):
+                    if any(
+                        t in (best + " " + name_id_cls) for t in ["mei", "名", "メイ"]
+                    ):
                         first_like = el if first_like is None else first_like
                 except Exception:
                     continue
             if last_like and first_like:
-                kana_split = await self._auto_handle_split_kana(text_inputs, mapped_element_ids, client_data)
+                kana_split = await self._auto_handle_split_kana(
+                    text_inputs, mapped_element_ids, client_data
+                )
                 auto_handled.update(kana_split)
-                mapped_element_ids.update({id(v.get("element")) for v in kana_split.values() if isinstance(v, dict) and v.get("element")})
+                mapped_element_ids.update(
+                    {
+                        id(v.get("element"))
+                        for v in kana_split.values()
+                        if isinstance(v, dict) and v.get("element")
+                    }
+                )
             elif not indexed_kana_pair_present:
                 kana_handled = await self._auto_handle_unified_kana(
                     text_inputs,
@@ -213,13 +283,21 @@ class UnmappedElementHandler:
                     form_structure,
                 )
                 auto_handled.update(kana_handled)
-                mapped_element_ids.update({id(v.get("element")) for v in kana_handled.values() if isinstance(v, dict) and v.get("element")})
+                mapped_element_ids.update(
+                    {
+                        id(v.get("element"))
+                        for v in kana_handled.values()
+                        if isinstance(v, dict) and v.get("element")
+                    }
+                )
             # indexed_kana_pair_present の場合は、この後のインデックス処理で安全に分割カナを割当てる
 
         # 任意のFAXフィールドがある場合、電話番号で補完（必須でない場合のみ）
         try:
             fax_handled = await self._auto_handle_fax(
-                classified_elements.get("text_inputs", []) or [], mapped_element_ids, client_data
+                classified_elements.get("text_inputs", []) or [],
+                mapped_element_ids,
+                client_data,
             )
             auto_handled.update(fax_handled)
         except Exception as e:
@@ -231,7 +309,13 @@ class UnmappedElementHandler:
                 classified_elements.get("text_inputs", []) or [], mapped_element_ids
             )
             auto_handled.update(split_name)
-            mapped_element_ids.update({id(v.get("element")) for v in split_name.values() if isinstance(v, dict) and v.get("element")})
+            mapped_element_ids.update(
+                {
+                    id(v.get("element"))
+                    for v in split_name.values()
+                    if isinstance(v, dict) and v.get("element")
+                }
+            )
         except Exception as e:
             logger.debug(f"Auto handle split name arrays skipped: {e}")
 
@@ -241,7 +325,13 @@ class UnmappedElementHandler:
                 classified_elements.get("text_inputs", []) or [], mapped_element_ids
             )
             auto_handled.update(indexed_pairs)
-            mapped_element_ids.update({id(v.get("element")) for v in indexed_pairs.values() if isinstance(v, dict) and v.get("element")})
+            mapped_element_ids.update(
+                {
+                    id(v.get("element"))
+                    for v in indexed_pairs.values()
+                    if isinstance(v, dict) and v.get("element")
+                }
+            )
         except Exception as e:
             logger.debug(f"Auto handle indexed name pairs skipped: {e}")
 
@@ -251,42 +341,70 @@ class UnmappedElementHandler:
                 classified_elements.get("text_inputs", []) or [], mapped_element_ids
             )
             auto_handled.update(fam_given)
-            mapped_element_ids.update({id(v.get("element")) for v in fam_given.values() if isinstance(v, dict) and v.get("element")})
+            mapped_element_ids.update(
+                {
+                    id(v.get("element"))
+                    for v in fam_given.values()
+                    if isinstance(v, dict) and v.get("element")
+                }
+            )
         except Exception as e:
             logger.debug(f"Auto handle family/given skipped: {e}")
 
         # 電話番号の3分割（tel1/tel2/tel3 等）の汎用処理
         try:
             phone_split = await self._auto_handle_split_phone(
-                (classified_elements.get("tel_inputs", []) or []) + (classified_elements.get("text_inputs", []) or []),
+                (classified_elements.get("tel_inputs", []) or [])
+                + (classified_elements.get("text_inputs", []) or []),
                 mapped_element_ids,
                 field_mapping,
                 client_data,
             )
             auto_handled.update(phone_split)
-            mapped_element_ids.update({id(v.get("element")) for v in phone_split.values() if isinstance(v, dict) and v.get("element")})
+            mapped_element_ids.update(
+                {
+                    id(v.get("element"))
+                    for v in phone_split.values()
+                    if isinstance(v, dict) and v.get("element")
+                }
+            )
         except Exception as e:
             logger.debug(f"Auto handle split phone skipped: {e}")
 
         # 確認用メールアドレスの汎用処理（強シグナルがある場合にコピー入力）
         try:
             email_conf = await self._auto_handle_email_confirmation(
-                (classified_elements.get("email_inputs", []) or []) + (classified_elements.get("text_inputs", []) or []),
+                (classified_elements.get("email_inputs", []) or [])
+                + (classified_elements.get("text_inputs", []) or []),
                 mapped_element_ids,
                 field_mapping,
             )
             auto_handled.update(email_conf)
-            mapped_element_ids.update({id(v.get("element")) for v in email_conf.values() if isinstance(v, dict) and v.get("element")})
+            mapped_element_ids.update(
+                {
+                    id(v.get("element"))
+                    for v in email_conf.values()
+                    if isinstance(v, dict) and v.get("element")
+                }
+            )
         except Exception as e:
             logger.debug(f"Auto handle email confirmation skipped: {e}")
 
         # 汎用救済: 未マッピングの必須テキスト入力に全角空白を入力
         try:
             req_texts = await self._auto_handle_required_texts(
-                classified_elements.get("text_inputs", []) or [], mapped_element_ids, field_mapping
+                classified_elements.get("text_inputs", []) or [],
+                mapped_element_ids,
+                field_mapping,
             )
             auto_handled.update(req_texts)
-            mapped_element_ids.update({id(v.get("element")) for v in req_texts.values() if isinstance(v, dict) and v.get("element")})
+            mapped_element_ids.update(
+                {
+                    id(v.get("element"))
+                    for v in req_texts.values()
+                    if isinstance(v, dict) and v.get("element")
+                }
+            )
         except Exception as e:
             logger.debug(f"Auto handle required texts skipped: {e}")
 
@@ -294,8 +412,6 @@ class UnmappedElementHandler:
             f"Auto-handled elements: checkboxes={len(checkbox_handled)}, radios={len(radio_handled)}, selects={len(select_handled)}"
         )
         return auto_handled
-
-    
 
     def _demote_unified_name_for_indexed_pairs(
         self,
@@ -313,8 +429,10 @@ class UnmappedElementHandler:
             if "統合氏名" not in field_mapping:
                 return
             text_inputs = classified_elements.get("text_inputs", []) or []
+
             def _name_key(n: str) -> str:
                 return (n or "").strip().lower()
+
             pairs = {}
             for el in text_inputs:
                 info = self.element_scorer._shared_cache.get(str(el)) or {}
@@ -326,13 +444,19 @@ class UnmappedElementHandler:
                 elif nm in ("name2", "name_2"):
                     pairs[2] = el
             if 1 in pairs and 2 in pairs:
-                mapped_name_attr = (field_mapping.get("統合氏名", {}) or {}).get("name", "")
+                mapped_name_attr = (field_mapping.get("統合氏名", {}) or {}).get(
+                    "name", ""
+                )
                 # 片方の name 属性が統合氏名の割当先と一致していれば降格
                 for idx in (1, 2):
                     info = self.element_scorer._shared_cache.get(str(pairs[idx])) or {}
-                    if mapped_name_attr and mapped_name_attr == (info.get("name", "") or ""):
+                    if mapped_name_attr and mapped_name_attr == (
+                        info.get("name", "") or ""
+                    ):
                         field_mapping.pop("統合氏名", None)
-                        logger.info("Demoted unified fullname in favor of indexed split name fields")
+                        logger.info(
+                            "Demoted unified fullname in favor of indexed split name fields"
+                        )
                         return
         except Exception:
             pass
@@ -347,8 +471,10 @@ class UnmappedElementHandler:
             if "統合氏名カナ" not in field_mapping:
                 return
             text_inputs = classified_elements.get("text_inputs", []) or []
+
             def _name_key(n: str) -> str:
                 return (n or "").strip().lower()
+
             pairs = {}
             for el in text_inputs:
                 info = self.element_scorer._shared_cache.get(str(el)) or {}
@@ -360,12 +486,18 @@ class UnmappedElementHandler:
                 elif nm in ("kana2", "kana_2"):
                     pairs[2] = el
             if 1 in pairs and 2 in pairs:
-                mapped_name_attr = (field_mapping.get("統合氏名カナ", {}) or {}).get("name", "")
+                mapped_name_attr = (field_mapping.get("統合氏名カナ", {}) or {}).get(
+                    "name", ""
+                )
                 for idx in (1, 2):
                     info = self.element_scorer._shared_cache.get(str(pairs[idx])) or {}
-                    if mapped_name_attr and mapped_name_attr == (info.get("name", "") or ""):
+                    if mapped_name_attr and mapped_name_attr == (
+                        info.get("name", "") or ""
+                    ):
                         field_mapping.pop("統合氏名カナ", None)
-                        logger.info("Demoted unified kana in favor of indexed split kana fields")
+                        logger.info(
+                            "Demoted unified kana in favor of indexed split kana fields"
+                        )
                         return
         except Exception:
             pass
@@ -468,9 +600,12 @@ class UnmappedElementHandler:
                 - 何も無ければ 1 を仮定
                 """
                 import re
-                nm = (nm or '').lower(); ide = (ide or '').lower(); cls = (cls or '').lower()
-                blob = nm + ' ' + ide + ' ' + cls
-                if not (('tel' in blob) or ('phone' in blob) or ('電話' in blob)):
+
+                nm = (nm or "").lower()
+                ide = (ide or "").lower()
+                cls = (cls or "").lower()
+                blob = nm + " " + ide + " " + cls
+                if not (("tel" in blob) or ("phone" in blob) or ("電話" in blob)):
                     return None
                 # 配列風 [d] の最終出現を優先
                 m_br = re.search(r"\[(\d)\](?!.*\d)", blob)
@@ -500,15 +635,15 @@ class UnmappedElementHandler:
                 info = await self.element_scorer._get_element_info(el)
                 if not info.get("visible", True):
                     continue
-                nm = (info.get("name","") or "").lower()
-                ide= (info.get("id","") or "").lower()
-                cls= (info.get("class","") or "").lower()
+                nm = (info.get("name", "") or "").lower()
+                ide = (info.get("id", "") or "").lower()
+                cls = (info.get("class", "") or "").lower()
                 idx = _infer_phone_part_index(nm, ide, cls)
                 if idx is None:
                     continue
-                if idx in (1,2,3):
+                if idx in (1, 2, 3):
                     triples_all[idx] = (el, info)
-            if not all(k in triples_all for k in (1,2,3)):
+            if not all(k in triples_all for k in (1, 2, 3)):
                 return handled
 
             # 2) 統合『電話番号』がこのグループのいずれかに割当てられているなら降格
@@ -517,26 +652,34 @@ class UnmappedElementHandler:
                     sel_unified = field_mapping.get("電話番号", {}).get("selector", "")
                     if sel_unified:
                         group_selectors = set()
-                        for idx in (1,2,3):
+                        for idx in (1, 2, 3):
                             try:
-                                group_selectors.add(await self._generate_playwright_selector(triples_all[idx][0]))
+                                group_selectors.add(
+                                    await self._generate_playwright_selector(
+                                        triples_all[idx][0]
+                                    )
+                                )
                             except Exception:
                                 pass
                         if sel_unified in group_selectors:
                             field_mapping.pop("電話番号", None)
-                            logger.info("Demoted unified phone in favor of split phone fields")
+                            logger.info(
+                                "Demoted unified phone in favor of split phone fields"
+                            )
             except Exception:
                 pass
 
             # 3) 値を割当（client_data から）
-            client = client_data.get('client', {}) if isinstance(client_data, dict) else {}
+            client = (
+                client_data.get("client", {}) if isinstance(client_data, dict) else {}
+            )
             parts = [
-                (client.get('phone_1', '') or '').strip(),
-                (client.get('phone_2', '') or '').strip(),
-                (client.get('phone_3', '') or '').strip(),
+                (client.get("phone_1", "") or "").strip(),
+                (client.get("phone_2", "") or "").strip(),
+                (client.get("phone_3", "") or "").strip(),
             ]
-            labels = {1: '市外局番', 2: '市内局番', 3: '加入者番号'}
-            for idx in (1,2,3):
+            labels = {1: "市外局番", 2: "市内局番", 3: "加入者番号"}
+            for idx in (1, 2, 3):
                 el, info = triples_all[idx]
                 selector = await self._generate_playwright_selector(el)
                 required = await self.element_scorer._detect_required_status(el)
@@ -546,19 +689,19 @@ class UnmappedElementHandler:
                         required = await self._detect_group_required_via_container(el)
                     except Exception:
                         required = False
-                handled[f'auto_phone_part_{idx}'] = {
-                    'element': el,
-                    'selector': selector,
-                    'tag_name': info.get('tag_name','input') or 'input',
-                    'type': info.get('type','text') or 'text',
-                    'name': info.get('name',''),
-                    'id': info.get('id',''),
-                    'input_type': 'text',
-                    'auto_action': 'fill',
-                    'default_value': parts[idx-1],
-                    'required': required,
-                    'auto_handled': True,
-                    'part_label': labels[idx],
+                handled[f"auto_phone_part_{idx}"] = {
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": info.get("tag_name", "input") or "input",
+                    "type": info.get("type", "text") or "text",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "text",
+                    "auto_action": "fill",
+                    "default_value": parts[idx - 1],
+                    "required": required,
+                    "auto_handled": True,
+                    "part_label": labels[idx],
                 }
         except Exception as e:
             logger.debug(f"split phone handler error: {e}")
@@ -585,53 +728,106 @@ class UnmappedElementHandler:
                 if id(el) in mapped_element_ids:
                     continue
                 info = await self.element_scorer._get_element_info(el)
-                if not info.get('visible', True):
+                if not info.get("visible", True):
                     continue
                 # 罠/スパム対策フィールドは除外
                 try:
-                    trap_blob = ' '.join([
-                        (info.get('name','') or ''),
-                        (info.get('id','') or ''),
-                        (info.get('class','') or ''),
-                    ]).lower()
-                    if any(t in trap_blob for t in ['honeypot','honey','trap','botfield','no-print','noprint']):
+                    trap_blob = " ".join(
+                        [
+                            (info.get("name", "") or ""),
+                            (info.get("id", "") or ""),
+                            (info.get("class", "") or ""),
+                        ]
+                    ).lower()
+                    if any(
+                        t in trap_blob
+                        for t in [
+                            "honeypot",
+                            "honey",
+                            "trap",
+                            "botfield",
+                            "no-print",
+                            "noprint",
+                        ]
+                    ):
                         continue
                 except Exception:
                     pass
                 # 既存のマッピングと同一セレクタはスキップ（重複対策）
                 try:
                     sel = await self._generate_playwright_selector(el)
-                    if any((fm.get('selector') == sel) for fm in field_mapping.values() if isinstance(fm, dict)):
+                    if any(
+                        (fm.get("selector") == sel)
+                        for fm in field_mapping.values()
+                        if isinstance(fm, dict)
+                    ):
                         continue
                 except Exception:
                     pass
                 # 除外（確認用/認証等）: ここでは軽量なローカル判定で十分
                 try:
-                    name_id_cls = ' '.join([
-                        (info.get('name') or ''), (info.get('id') or ''), (info.get('class') or '')
-                    ]).lower()
-                    input_type = (info.get('type') or '').lower()
-                    tag = (info.get('tag_name') or '').lower()
-                    blacklist = ['captcha','image_auth','image-auth','spam-block','token','otp','verification',
-                                 'email_confirm','mail_confirm','email_confirmation','confirm_email','confirm','re_email','re-mail']
+                    name_id_cls = " ".join(
+                        [
+                            (info.get("name") or ""),
+                            (info.get("id") or ""),
+                            (info.get("class") or ""),
+                        ]
+                    ).lower()
+                    input_type = (info.get("type") or "").lower()
+                    tag = (info.get("tag_name") or "").lower()
+                    blacklist = [
+                        "captcha",
+                        "image_auth",
+                        "image-auth",
+                        "spam-block",
+                        "token",
+                        "otp",
+                        "verification",
+                        "email_confirm",
+                        "mail_confirm",
+                        "email_confirmation",
+                        "confirm_email",
+                        "confirm",
+                        "re_email",
+                        "re-mail",
+                    ]
                     if any(b in name_id_cls for b in blacklist):
                         continue
-                    if input_type in ['checkbox', 'radio'] or tag == 'select':
+                    if input_type in ["checkbox", "radio"] or tag == "select":
                         continue
                 except Exception:
                     pass
                 # カナ/ふりがな等はここでは扱わない（後段の昇格/assignerに委譲）
                 try:
-                    blob = ' '.join([
-                        (info.get('name','') or ''),
-                        (info.get('id','') or ''),
-                        (info.get('class','') or ''),
-                        (info.get('placeholder','') or ''),
-                    ]).lower()
+                    blob = " ".join(
+                        [
+                            (info.get("name", "") or ""),
+                            (info.get("id", "") or ""),
+                            (info.get("class", "") or ""),
+                            (info.get("placeholder", "") or ""),
+                        ]
+                    ).lower()
                     # context からも簡易取得
-                    ctxs = await self.context_text_extractor.extract_context_for_element(el)
-                    ctx_text = ' '.join([(getattr(c,'text','') or '') for c in (ctxs or [])])
-                    if any(t in (blob + ' ' + ctx_text) for t in ['furigana','kana','katakana','カナ','フリガナ','ふりがな','ひらがな']):
+                    ctxs = (
+                        await self.context_text_extractor.extract_context_for_element(
+                            el
+                        )
+                    )
+                    ctx_text = " ".join(
+                        [(getattr(c, "text", "") or "") for c in (ctxs or [])]
+                    )
+                    if any(
+                        t in (blob + " " + ctx_text)
+                        for t in [
+                            "furigana",
+                            "kana",
+                            "katakana",
+                            "カナ",
+                            "フリガナ",
+                            "ふりがな",
+                            "ひらがな",
+                        ]
+                    ):
                         continue
                 except Exception:
                     pass
@@ -644,30 +840,37 @@ class UnmappedElementHandler:
                 # （不要なスタブ関数を削除：後段の割当/assigner で処理されるためここでは未使用）
                 # ここでは、電話番号2/3のケースは後段の split_phone 処理が入らない環境でも
                 # 空白ではなく空文字にしてバリデーション衝突を避ける（全角空白より安全）
-                auto_value = '　'
+                auto_value = "　"
                 try:
-                    nic = (info.get('name','') + ' ' + info.get('id','') + ' ' + info.get('class','')).lower()
+                    nic = (
+                        info.get("name", "")
+                        + " "
+                        + info.get("id", "")
+                        + " "
+                        + info.get("class", "")
+                    ).lower()
                     import re
-                    if ('tel' in nic or 'phone' in nic):
-                        m = re.search(r'(?:tel|phone)[^\d]*([123])(?!.*\d)', nic)
+
+                    if "tel" in nic or "phone" in nic:
+                        m = re.search(r"(?:tel|phone)[^\d]*([123])(?!.*\d)", nic)
                         if m:
                             idxnum = int(m.group(1))
-                            if idxnum in (2,3):
-                                auto_value = ''  # 後段の割当（auto_phone_part_*）やassignerで埋まる前提で空文字
+                            if idxnum in (2, 3):
+                                auto_value = ""  # 後段の割当（auto_phone_part_*）やassignerで埋まる前提で空文字
                 except Exception:
                     pass
                 handled[field_name] = {
-                    'element': el,
-                    'selector': selector,
-                    'tag_name': info.get('tag_name','input') or 'input',
-                    'type': info.get('type','text') or 'text',
-                    'name': info.get('name',''),
-                    'id': info.get('id',''),
-                    'input_type': 'text',
-                    'auto_action': 'fill',
-                    'default_value': auto_value,
-                    'required': True,
-                    'auto_handled': True,
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": info.get("tag_name", "input") or "input",
+                    "type": info.get("type", "text") or "text",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "text",
+                    "auto_action": "fill",
+                    "default_value": auto_value,
+                    "required": True,
+                    "auto_handled": True,
                 }
                 idx += 1
             except Exception as e:
@@ -675,7 +878,10 @@ class UnmappedElementHandler:
         return handled
 
     async def _promote_prefecture_field(
-        self, selects: List[Locator], text_inputs: List[Locator], field_mapping: Dict[str, Dict[str, Any]]
+        self,
+        selects: List[Locator],
+        text_inputs: List[Locator],
+        field_mapping: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
         """select要素の中から『都道府県』を示すものを汎用判定し、未マッピングなら昇格する。
 
@@ -687,30 +893,36 @@ class UnmappedElementHandler:
         - 既に field_mapping に『都道府県』がある場合は処理しない
         """
         handled: Dict[str, Dict[str, Any]] = {}
-        if '都道府県' in field_mapping:
+        if "都道府県" in field_mapping:
             return handled
-        tokens_attr = ['pref', 'prefecture', 'todofuken', 'todouhuken']
-        tokens_ctx = ['都道府県', 'prefecture']
+        tokens_attr = ["pref", "prefecture", "todofuken", "todouhuken"]
+        tokens_ctx = ["都道府県", "prefecture"]
 
         # 1) select を優先
         for el in selects:
             try:
                 info = await self.element_scorer._get_element_info(el)
-                if not info.get('visible', True):
+                if not info.get("visible", True):
                     continue
-                blob = ' '.join([
-                    (info.get('name','') or '').lower(),
-                    (info.get('id','') or '').lower(),
-                    (info.get('class','') or '').lower(),
-                    (info.get('placeholder','') or '').lower(),
-                ])
+                blob = " ".join(
+                    [
+                        (info.get("name", "") or "").lower(),
+                        (info.get("id", "") or "").lower(),
+                        (info.get("class", "") or "").lower(),
+                        (info.get("placeholder", "") or "").lower(),
+                    ]
+                )
                 attr_hit = any(t in blob for t in tokens_attr)
 
                 ctx_hit = False
                 if not attr_hit:
                     try:
-                        contexts = await self.context_text_extractor.extract_context_for_element(el)
-                        texts = ' '.join([(c.text or '').lower() for c in (contexts or [])])
+                        contexts = await self.context_text_extractor.extract_context_for_element(
+                            el
+                        )
+                        texts = " ".join(
+                            [(c.text or "").lower() for c in (contexts or [])]
+                        )
                         ctx_hit = any(t in texts for t in tokens_ctx)
                     except Exception:
                         ctx_hit = False
@@ -719,7 +931,9 @@ class UnmappedElementHandler:
                 option_ok = False
                 if not (attr_hit or ctx_hit):
                     try:
-                        pref_list = [p.lower() for p in (get_prefectures().get('names') or [])]
+                        pref_list = [
+                            p.lower() for p in (get_prefectures().get("names") or [])
+                        ]
                     except Exception:
                         pref_list = []
                     try:
@@ -729,7 +943,11 @@ class UnmappedElementHandler:
                     except Exception:
                         options = []
                     lowered = [str(o).lower() for o in options]
-                    hits = sum(1 for p in pref_list if any(p in o for o in lowered)) if pref_list else 0
+                    hits = (
+                        sum(1 for p in pref_list if any(p in o for o in lowered))
+                        if pref_list
+                        else 0
+                    )
                     option_ok = hits >= 5
 
                 if not (attr_hit or ctx_hit or option_ok):
@@ -738,27 +956,27 @@ class UnmappedElementHandler:
                 selector = await self._generate_playwright_selector(el)
                 required = await self.element_scorer._detect_required_status(el)
                 # field_mapping に正式登録（assigner が『都道府県』を特別扱い）
-                field_mapping['都道府県'] = {
-                    'element': el,
-                    'selector': selector,
-                    'tag_name': 'select',
-                    'type': 'select',
-                    'name': info.get('name',''),
-                    'id': info.get('id',''),
-                    'input_type': 'select',
-                    'default_value': '',
-                    'required': required,
-                    'visible': info.get('visible', True),
-                    'enabled': info.get('enabled', True),
-                    'score': 0,
+                field_mapping["都道府県"] = {
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": "select",
+                    "type": "select",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "select",
+                    "default_value": "",
+                    "required": required,
+                    "visible": info.get("visible", True),
+                    "enabled": info.get("enabled", True),
+                    "score": 0,
                 }
-                handled['都道府県'] = field_mapping['都道府県']
+                handled["都道府県"] = field_mapping["都道府県"]
                 # 既に同一要素が『住所』として登録されていれば除去（誤上書き防止）
                 try:
                     for k, v in list(field_mapping.items()):
-                        if k.startswith('住所') and v.get('selector') == selector:
+                        if k.startswith("住所") and v.get("selector") == selector:
                             field_mapping.pop(k, None)
-                    
+
                 except Exception:
                     pass
                 logger.info("Promoted '都道府県' select to field_mapping")
@@ -769,50 +987,56 @@ class UnmappedElementHandler:
         for el in text_inputs:
             try:
                 info = await self.element_scorer._get_element_info(el)
-                if not info.get('visible', True):
+                if not info.get("visible", True):
                     continue
-                t = (info.get('type','') or '').lower()
-                if t not in ['', 'text']:
+                t = (info.get("type", "") or "").lower()
+                if t not in ["", "text"]:
                     continue
-                blob = ' '.join([
-                    (info.get('name','') or '').lower(),
-                    (info.get('id','') or '').lower(),
-                    (info.get('class','') or '').lower(),
-                    (info.get('placeholder','') or '').lower(),
-                ])
+                blob = " ".join(
+                    [
+                        (info.get("name", "") or "").lower(),
+                        (info.get("id", "") or "").lower(),
+                        (info.get("class", "") or "").lower(),
+                        (info.get("placeholder", "") or "").lower(),
+                    ]
+                )
                 # input系は属性に 'pref' があるか、placeholder/ラベルに『都道府県』がある場合のみ
-                attr_hit = any(k in blob for k in ['pref', 'prefecture'])
+                attr_hit = any(k in blob for k in ["pref", "prefecture"])
                 ctx_hit = False
                 if not attr_hit:
                     try:
-                        contexts = await self.context_text_extractor.extract_context_for_element(el)
-                        texts = ' '.join([(c.text or '').lower() for c in (contexts or [])])
-                        ctx_hit = ('都道府県' in texts or 'prefecture' in texts)
+                        contexts = await self.context_text_extractor.extract_context_for_element(
+                            el
+                        )
+                        texts = " ".join(
+                            [(c.text or "").lower() for c in (contexts or [])]
+                        )
+                        ctx_hit = "都道府県" in texts or "prefecture" in texts
                     except Exception:
                         ctx_hit = False
                 if not (attr_hit or ctx_hit):
                     continue
                 selector = await self._generate_playwright_selector(el)
                 required = await self.element_scorer._detect_required_status(el)
-                field_mapping['都道府県'] = {
-                    'element': el,
-                    'selector': selector,
-                    'tag_name': info.get('tag_name','input') or 'input',
-                    'type': info.get('type','text') or 'text',
-                    'name': info.get('name',''),
-                    'id': info.get('id',''),
-                    'input_type': 'text',
-                    'default_value': '',
-                    'required': required,
-                    'visible': info.get('visible', True),
-                    'enabled': info.get('enabled', True),
-                    'score': 0,
+                field_mapping["都道府県"] = {
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": info.get("tag_name", "input") or "input",
+                    "type": info.get("type", "text") or "text",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "text",
+                    "default_value": "",
+                    "required": required,
+                    "visible": info.get("visible", True),
+                    "enabled": info.get("enabled", True),
+                    "score": 0,
                 }
-                handled['都道府県'] = field_mapping['都道府県']
+                handled["都道府県"] = field_mapping["都道府県"]
                 # 既に同一要素が『住所』として登録されていれば除去
                 try:
                     for k, v in list(field_mapping.items()):
-                        if k.startswith('住所') and v.get('selector') == selector:
+                        if k.startswith("住所") and v.get("selector") == selector:
                             field_mapping.pop(k, None)
                 except Exception:
                     pass
@@ -854,8 +1078,15 @@ class UnmappedElementHandler:
                         ]
                     ).lower()
                     if any(
-                        k in name_id_class for k in [
-                            "acceptance", "consent", "同意", "policy", "privacy", "個人情報", "personal"
+                        k in name_id_class
+                        for k in [
+                            "acceptance",
+                            "consent",
+                            "同意",
+                            "policy",
+                            "privacy",
+                            "個人情報",
+                            "personal",
                         ]
                     ):
                         group_required = True
@@ -863,31 +1094,71 @@ class UnmappedElementHandler:
                 # コンテナ側の必須マーカー検出（DT/DD, TH/TD, 見出しなど）
                 if not group_required:
                     try:
-                        group_required = await self._detect_group_required_via_container(items[0][0])
+                        group_required = (
+                            await self._detect_group_required_via_container(items[0][0])
+                        )
                     except Exception as e:
-                        logger.debug(f"Container required detection error for checkbox group '{group_key}': {e}")
+                        logger.debug(
+                            f"Container required detection error for checkbox group '{group_key}': {e}"
+                        )
                 # 追加: プライバシー/規約同意の文脈検出（name/id/classに現れないケースの補完）
                 is_privacy_group = False
                 if not group_required:
                     try:
                         privacy_tokens_primary = [
-                            "プライバシー", "プライバシーポリシー", "個人情報", "個人情報保護", "個人情報の取り扱い",
-                            "privacy", "privacy policy", "個人情報の取扱い", "個人情報保護方針",
-                            "利用規約", "terms", "terms of service"
+                            "プライバシー",
+                            "プライバシーポリシー",
+                            "個人情報",
+                            "個人情報保護",
+                            "個人情報の取り扱い",
+                            "privacy",
+                            "privacy policy",
+                            "個人情報の取扱い",
+                            "個人情報保護方針",
+                            "利用規約",
+                            "terms",
+                            "terms of service",
                         ]
-                        agree_tokens = ["同意", "承諾", "同意する", "agree", "確認の上", "に同意"]
+                        agree_tokens = [
+                            "同意",
+                            "承諾",
+                            "同意する",
+                            "agree",
+                            "確認の上",
+                            "に同意",
+                        ]
                         for cb, info in items:
-                            contexts = await self.context_text_extractor.extract_context_for_element(cb)
+                            contexts = await self.context_text_extractor.extract_context_for_element(
+                                cb
+                            )
                             # すべてのコンテキストを連結して広く判定（best のみだと取りこぼしが出る）
                             texts = []
                             try:
-                                texts = [c.text for c in (contexts or []) if getattr(c, 'text', None)]
+                                texts = [
+                                    c.text
+                                    for c in (contexts or [])
+                                    if getattr(c, "text", None)
+                                ]
                             except Exception:
                                 texts = []
-                            best = (self.context_text_extractor.get_best_context_text(contexts) or "")
+                            best = (
+                                self.context_text_extractor.get_best_context_text(
+                                    contexts
+                                )
+                                or ""
+                            )
                             blob = (" ".join(texts + [best])).lower()
-                            if any(tok in blob for tok in [t.lower() for t in privacy_tokens_primary]):
-                                if any(tok in blob for tok in [t.lower() for t in agree_tokens]) or len(items) == 1:
+                            if any(
+                                tok in blob
+                                for tok in [t.lower() for t in privacy_tokens_primary]
+                            ):
+                                if (
+                                    any(
+                                        tok in blob
+                                        for tok in [t.lower() for t in agree_tokens]
+                                    )
+                                    or len(items) == 1
+                                ):
                                     is_privacy_group = True
                                     break
                     except Exception:
@@ -954,13 +1225,13 @@ class UnmappedElementHandler:
         client_data: Optional[Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
         async def _extract_radio_option_text(radio: Locator) -> str:
-            """ラジオボタン個別の選択肢テキストを抽出（汎用・安全）。
+            """ラジオ選択肢のラベル抽出（ブロック要素も許容＋フォールバック）。
 
             優先順:
-            1) <label for="id"> のテキスト
-            2) input が囲まれている <label> のテキスト
-            3) 直後/直前のテキストノード or インライン要素（span/i/b/strong/em）
-            4) 空の場合のみ空文字
+            1) label[for]
+            2) 祖先<label>
+            3) 近傍兄弟（テキスト/インライン/小ブロック: span,i,b,strong,em,small,label,div,p,li,dd）
+            4) 取れない場合は Python 側でコンテキスト抽出
             """
             try:
                 text = await radio.evaluate(
@@ -968,57 +1239,113 @@ class UnmappedElementHandler:
                     (el) => {
                       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
                       const getText = (n) => norm(n && (n.innerText || n.textContent || ''));
+                      const isInline = (n) => {
+                        const tag = (n.tagName || '').toLowerCase();
+                        return ['span','i','b','strong','em','small','label'].includes(tag);
+                      };
+                      const isSmallBlock = (n) => {
+                        const tag = (n.tagName || '').toLowerCase();
+                        return ['div','p','li','dd'].includes(tag);
+                      };
+                      const looksLikeHeading = (t) => {
+                        if (!t) return false;
+                        const s = t.toLowerCase();
+                        if (s.length > 40) return true;
+                        if (/[?？]/.test(s)) return true;
+                        const stop = ['必須','※','お問い合わせ','問合せ','お問合せ','内容','項目','カテゴリー','カテゴリ','category','subject','type','contact','gender','性別'];
+                        return stop.some(k => s.includes(k));
+                      };
                       // 1) label[for]
                       const id = el.getAttribute('id');
                       if (id) {
                         const lbl = document.querySelector(`label[for="${id}"]`);
                         if (lbl) {
                           const t = getText(lbl);
-                          if (t) return t;
+                          if (t && !looksLikeHeading(t)) return t;
                         }
                       }
-                      // 2) 親階層で直近の <label>
-                      let p = el;
-                      let depth = 0;
+                      // 2) 祖先<label>
+                      let p = el; let depth = 0;
                       while (p && depth < 3) {
                         if ((p.tagName || '').toLowerCase() === 'label') {
                           const t = getText(p);
-                          if (t) return t;
+                          if (t && !looksLikeHeading(t)) return t;
                           break;
                         }
-                        // 子1要素のみを持つ薄いラッパーはスキップ
-                        const nextP = p.parentElement;
-                        if (!nextP) break;
-                        p = nextP; depth++;
+                        p = p.parentElement; depth++;
                       }
-                      // 3) 直後/直前のテキストノードやインライン要素
-                      const isInline = (n) => {
-                        const tag = (n.tagName || '').toLowerCase();
-                        return ['span','i','b','strong','em','small'].includes(tag);
+                      // 3) 近傍兄弟（インライン優先、ついで小ブロック）。
+                      const pickFromSiblings = (dir = 'next') => {
+                        let sib = dir === 'next' ? el.nextSibling : el.previousSibling;
+                        let hops = 0;
+                        while (sib && hops < 3) {
+                          const isText = sib.nodeType === 3;
+                          const isElem = sib.nodeType === 1;
+                          if (isText || isElem) {
+                            let candidate = '';
+                            if (isText) candidate = norm(sib.textContent);
+                            else if (isInline(sib) || isSmallBlock(sib)) candidate = getText(sib);
+                            if (candidate && !looksLikeHeading(candidate)) return candidate;
+                          }
+                          sib = dir === 'next' ? sib.nextSibling : sib.previousSibling;
+                          hops++;
+                        }
+                        return '';
                       };
-                      let sib = el.nextSibling;
-                      while (sib && !(sib.nodeType === 3 || (sib.nodeType === 1 && isInline(sib)))) {
-                        sib = sib.nextSibling;
-                      }
-                      if (sib) {
-                        const t = norm(sib.nodeType === 3 ? sib.textContent : getText(sib));
-                        if (t) return t;
-                      }
-                      sib = el.previousSibling;
-                      while (sib && !(sib.nodeType === 3 || (sib.nodeType === 1 && isInline(sib)))) {
-                        sib = sib.previousSibling;
-                      }
-                      if (sib) {
-                        const t = norm(sib.nodeType === 3 ? sib.textContent : getText(sib));
-                        if (t) return t;
-                      }
+                      const n1 = pickFromSiblings('next');
+                      if (n1) return n1;
+                      const n2 = pickFromSiblings('prev');
+                      if (n2) return n2;
                       return '';
                     }
                     """
                 )
-                return str(text or '').strip()
+                label_text = str(text or "").strip()
             except Exception:
-                return ''
+                label_text = ""
+
+            # Python側フォールバック: コンテキスト抽出（質問見出しは除外）
+            if not label_text:
+                try:
+                    contexts = (
+                        await self.context_text_extractor.extract_context_for_element(
+                            radio
+                        )
+                    )
+                    best = (
+                        self.context_text_extractor.get_best_context_text(contexts)
+                        if contexts
+                        else ""
+                    )
+                    t = (best or "").strip()
+                    t_lower = t.lower()
+                    if (
+                        t
+                        and len(t) <= 40
+                        and ("必須" not in t)
+                        and ("※" not in t)
+                        and not ("?" in t or "？" in t)
+                    ):
+                        stop = [
+                            "お問い合わせ",
+                            "問合せ",
+                            "お問合せ",
+                            "内容",
+                            "項目",
+                            "category",
+                            "subject",
+                            "type",
+                            "contact",
+                            "gender",
+                            "性別",
+                        ]
+                        if not any(s in t_lower for s in stop):
+                            label_text = t
+                except Exception:
+                    label_text = ""
+
+            return label_text
+
         handled: Dict[str, Dict[str, Any]] = {}
         radio_groups = {}
         for radio in radios:
@@ -1085,9 +1412,13 @@ class UnmappedElementHandler:
             # 例: 「お問い合わせ項目 (必須)」のようにグループ見出し側にのみ付くケース
             if not group_required:
                 try:
-                    group_required = await self._detect_group_required_via_container(radio_list[0][0])
+                    group_required = await self._detect_group_required_via_container(
+                        radio_list[0][0]
+                    )
                 except Exception as e:
-                    logger.debug(f"Container required detection error for group '{group_name}': {e}")
+                    logger.debug(
+                        f"Container required detection error for group '{group_name}': {e}"
+                    )
             # 任意グループでも送信成功率向上のため一つ選択（『その他』優先）
 
             texts: List[str] = []
@@ -1127,12 +1458,17 @@ class UnmappedElementHandler:
             # 会社/個人の汎用判定: ラジオに『法人』『個人』がある場合、会社名の有無で選択
             if idx is None:
                 try:
-                    has_corporate = any(('法人' in (t or '')) for t in texts)
-                    has_personal = any(('個人' in (t or '')) for t in texts)
-                    company_name = str(client_info.get('company_name','') or '').strip()
+                    has_corporate = any(("法人" in (t or "")) for t in texts)
+                    has_personal = any(("個人" in (t or "")) for t in texts)
+                    company_name = str(
+                        client_info.get("company_name", "") or ""
+                    ).strip()
                     if has_corporate and has_personal and company_name:
                         # 『法人』を選択
-                        idx = next((i for i, t in enumerate(texts) if '法人' in (t or '')), None)
+                        idx = next(
+                            (i for i, t in enumerate(texts) if "法人" in (t or "")),
+                            None,
+                        )
                 except Exception:
                     pass
 
@@ -1240,10 +1576,14 @@ class UnmappedElementHandler:
                             list(self.REQUIRED_MARKERS),
                         )
                     except PlaywrightTimeoutError as e:
-                        logger.debug(f"Timeout during DT/DD required detection for select: {e}")
+                        logger.debug(
+                            f"Timeout during DT/DD required detection for select: {e}"
+                        )
                         required = False
                     except Exception as e:
-                        logger.debug(f"Unexpected error in DT/DD required detection for select: {e}")
+                        logger.debug(
+                            f"Unexpected error in DT/DD required detection for select: {e}"
+                        )
                         required = False
 
                 # 追加の汎用フォールバック: デフォルトがダミーの場合は実質必須とみなして選択する
@@ -1263,10 +1603,32 @@ class UnmappedElementHandler:
                 values = [d.get("value", "") for d in opt_data]
                 if not required:
                     try:
-                        pre_text = (texts[pre_idx] or '').strip() if isinstance(pre_idx, int) and pre_idx >= 0 else ''
-                        pre_val = (values[pre_idx] or '').strip() if isinstance(pre_idx, int) and pre_idx >= 0 else ''
-                        dummy_tokens = ['選択', 'お選び', '選んで', 'choose', 'select', '---', '未選択']
-                        is_dummy_default = (not pre_text and not pre_val) or any(tok.lower() in pre_text.lower() for tok in dummy_tokens) or pre_val == ''
+                        pre_text = (
+                            (texts[pre_idx] or "").strip()
+                            if isinstance(pre_idx, int) and pre_idx >= 0
+                            else ""
+                        )
+                        pre_val = (
+                            (values[pre_idx] or "").strip()
+                            if isinstance(pre_idx, int) and pre_idx >= 0
+                            else ""
+                        )
+                        dummy_tokens = [
+                            "選択",
+                            "お選び",
+                            "選んで",
+                            "choose",
+                            "select",
+                            "---",
+                            "未選択",
+                        ]
+                        is_dummy_default = (
+                            (not pre_text and not pre_val)
+                            or any(
+                                tok.lower() in pre_text.lower() for tok in dummy_tokens
+                            )
+                            or pre_val == ""
+                        )
                         if is_dummy_default:
                             required = True  # 実質必須として自動選択を適用
                     except Exception:
@@ -1285,10 +1647,21 @@ class UnmappedElementHandler:
                 idx = None
                 # 既定値が有効（先頭ダミーでない、かつ値が空でない）ならそれを優先採用
                 if isinstance(pre_idx, int) and 0 <= pre_idx < len(values):
-                    pre_text = (texts[pre_idx] or '').strip()
-                    pre_val = (values[pre_idx] or '').strip()
-                    dummy_tokens = ['選択', 'お選び', '選んで', 'choose', 'select', '---', '未選択']
-                    is_dummy = any(tok.lower() in pre_text.lower() for tok in dummy_tokens) or pre_val == ''
+                    pre_text = (texts[pre_idx] or "").strip()
+                    pre_val = (values[pre_idx] or "").strip()
+                    dummy_tokens = [
+                        "選択",
+                        "お選び",
+                        "選んで",
+                        "choose",
+                        "select",
+                        "---",
+                        "未選択",
+                    ]
+                    is_dummy = (
+                        any(tok.lower() in pre_text.lower() for tok in dummy_tokens)
+                        or pre_val == ""
+                    )
                     if not is_dummy:
                         idx = pre_idx
                 if is_gender_select and client_gender_norm:
@@ -1371,10 +1744,13 @@ class UnmappedElementHandler:
         return 0
 
     async def _auto_handle_email_confirmation(
-        self, candidates: List[Locator], mapped_element_ids: set, field_mapping: Dict[str, Dict[str, Any]]
+        self,
+        candidates: List[Locator],
+        mapped_element_ids: set,
+        field_mapping: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
         handled: Dict[str, Dict[str, Any]] = {}
-        if 'メールアドレス' not in field_mapping:
+        if "メールアドレス" not in field_mapping:
             return handled
         confirmation_attr_patterns = [
             "email_confirm",
@@ -1382,11 +1758,27 @@ class UnmappedElementHandler:
             "email_confirmation",
             "confirm_email",
             "confirm_mail",
-            "mail2", "mail_2", "email2", "email_2", "confirm-mail", "email-confirm", "from2",
-            "email_check", "mail_check", "re_email", "re_mail",
+            "mail2",
+            "mail_2",
+            "email2",
+            "email_2",
+            "confirm-mail",
+            "email-confirm",
+            "from2",
+            "email_check",
+            "mail_check",
+            "re_email",
+            "re_mail",
         ]
         confirmation_ctx_tokens = ["確認", "確認用", "再入力", "再度", "もう一度"]
-        blacklist = ["captcha", "image_auth", "spam-block", "token", "otp", "verification"]
+        blacklist = [
+            "captcha",
+            "image_auth",
+            "spam-block",
+            "token",
+            "otp",
+            "verification",
+        ]
 
         # 既に確定している主メール欄（論理フィールド『メールアドレス』）の name/id を取得して、
         # そのバリアント（例: "_<name>", "<name>2"）を確認欄として扱う汎用ヒューリスティクスを追加。
@@ -1427,19 +1819,37 @@ class UnmappedElementHandler:
                 nm = (name_raw or "").lower()
                 ide = (id_raw or "").lower()
                 if primary_name:
-                    if nm == f"_{primary_name}" or nm == f"{primary_name}2" or nm == f"{primary_name}_confirm":
+                    if (
+                        nm == f"_{primary_name}"
+                        or nm == f"{primary_name}2"
+                        or nm == f"{primary_name}_confirm"
+                    ):
                         attr_hit = True
                 if not attr_hit and primary_id:
-                    if ide == f"_{primary_id}" or ide == f"{primary_id}2" or ide == f"{primary_id}_confirm":
+                    if (
+                        ide == f"_{primary_id}"
+                        or ide == f"{primary_id}2"
+                        or ide == f"{primary_id}_confirm"
+                    ):
                         attr_hit = True
             except Exception:
                 pass
             ctx_hit = False
             if not attr_hit:
                 try:
-                    contexts = await self.context_text_extractor.extract_context_for_element(el)
-                    best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
-                    ctx_hit = any(tok in best for tok in [t.lower() for t in confirmation_ctx_tokens])
+                    contexts = (
+                        await self.context_text_extractor.extract_context_for_element(
+                            el
+                        )
+                    )
+                    best = (
+                        self.context_text_extractor.get_best_context_text(contexts)
+                        or ""
+                    ).lower()
+                    ctx_hit = any(
+                        tok in best
+                        for tok in [t.lower() for t in confirmation_ctx_tokens]
+                    )
                 except Exception:
                     ctx_hit = False
             if not (attr_hit or ctx_hit):
@@ -1466,7 +1876,9 @@ class UnmappedElementHandler:
             }
         return handled
 
-    async def _auto_handle_split_name_arrays(self, text_inputs: List[Locator], mapped_element_ids: set) -> Dict[str, Dict[str, Any]]:
+    async def _auto_handle_split_name_arrays(
+        self, text_inputs: List[Locator], mapped_element_ids: set
+    ) -> Dict[str, Dict[str, Any]]:
         """name[0]/name[1], kana[0]/kana[1] のような配列入力を汎用対応。
 
         ルール:
@@ -1478,11 +1890,13 @@ class UnmappedElementHandler:
         handled: Dict[str, Dict[str, Any]] = {}
         try:
             pairs = {
-                'name': [('姓', 0), ('名', 1)],
-                'kana': [('姓カナ', 0), ('名カナ', 1)]
+                "name": [("姓", 0), ("名", 1)],
+                "kana": [("姓カナ", 0), ("名カナ", 1)],
             }
             buckets = {k: {} for k in pairs.keys()}  # base -> {index: (locator, info)}
-            order_buckets = {k: [] for k in pairs.keys()}  # base -> [(locator, info)] (順序用)
+            order_buckets = {
+                k: [] for k in pairs.keys()
+            }  # base -> [(locator, info)] (順序用)
             for el in text_inputs:
                 if id(el) in mapped_element_ids:
                     continue
@@ -1490,18 +1904,18 @@ class UnmappedElementHandler:
                     info = await self.element_scorer._get_element_info(el)
                 except Exception:
                     continue
-                if not info.get('visible', True):
+                if not info.get("visible", True):
                     continue
-                nm = (info.get('name','') or '').lower()
+                nm = (info.get("name", "") or "").lower()
                 for base in pairs.keys():
-                    if nm.startswith(base + '[') and nm.endswith(']'):
+                    if nm.startswith(base + "[") and nm.endswith("]"):
                         try:
-                            idx = int(nm[len(base)+1:-1])
+                            idx = int(nm[len(base) + 1 : -1])
                         except Exception:
                             continue
-                        if idx in (0,1):
+                        if idx in (0, 1):
                             buckets[base][idx] = (el, info)
-                    elif nm == base + '[]':
+                    elif nm == base + "[]":
                         # インデックス無しの配列は出現順で割当
                         order_buckets[base].append((el, info))
             for base, mapping in buckets.items():
@@ -1509,25 +1923,25 @@ class UnmappedElementHandler:
                     for field_name, idx in pairs[base]:
                         if field_name in handled:
                             continue
-                        if field_name in getattr(self, 'field_mapping', {}):
+                        if field_name in getattr(self, "field_mapping", {}):
                             # UnmappedElementHandler では self.field_mapping 参照不可のため抑制
                             pass
                         el, info = mapping[idx]
                         selector = await self._generate_playwright_selector(el)
                         required = await self.element_scorer._detect_required_status(el)
                         handled[field_name] = {
-                            'element': el,
-                            'selector': selector,
-                            'tag_name': info.get('tag_name','input') or 'input',
-                            'type': info.get('type','text') or 'text',
-                            'name': info.get('name',''),
-                            'id': info.get('id',''),
-                            'input_type': 'text',
-                            'default_value': '',
-                            'required': required,
-                            'visible': info.get('visible', True),
-                            'enabled': info.get('enabled', True),
-                            'auto_handled': True,
+                            "element": el,
+                            "selector": selector,
+                            "tag_name": info.get("tag_name", "input") or "input",
+                            "type": info.get("type", "text") or "text",
+                            "name": info.get("name", ""),
+                            "id": info.get("id", ""),
+                            "input_type": "text",
+                            "default_value": "",
+                            "required": required,
+                            "visible": info.get("visible", True),
+                            "enabled": info.get("enabled", True),
+                            "auto_handled": True,
                         }
             # 順序割当（name[] / kana[]）
             for base, items in order_buckets.items():
@@ -1536,24 +1950,26 @@ class UnmappedElementHandler:
                         selector = await self._generate_playwright_selector(el)
                         required = await self.element_scorer._detect_required_status(el)
                         handled[field_name] = {
-                            'element': el,
-                            'selector': selector,
-                            'tag_name': info.get('tag_name','input') or 'input',
-                            'type': info.get('type','text') or 'text',
-                            'name': info.get('name',''),
-                            'id': info.get('id',''),
-                            'input_type': 'text',
-                            'default_value': '',
-                            'required': required,
-                            'visible': info.get('visible', True),
-                            'enabled': info.get('enabled', True),
-                            'auto_handled': True,
+                            "element": el,
+                            "selector": selector,
+                            "tag_name": info.get("tag_name", "input") or "input",
+                            "type": info.get("type", "text") or "text",
+                            "name": info.get("name", ""),
+                            "id": info.get("id", ""),
+                            "input_type": "text",
+                            "default_value": "",
+                            "required": required,
+                            "visible": info.get("visible", True),
+                            "enabled": info.get("enabled", True),
+                            "auto_handled": True,
                         }
         except Exception as e:
             logger.debug(f"split name arrays handler error: {e}")
         return handled
 
-    async def _auto_handle_family_given_names(self, text_inputs: List[Locator], mapped_element_ids: set) -> Dict[str, Dict[str, Any]]:
+    async def _auto_handle_family_given_names(
+        self, text_inputs: List[Locator], mapped_element_ids: set
+    ) -> Dict[str, Dict[str, Any]]:
         handled: Dict[str, Dict[str, Any]] = {}
         try:
             cand = []
@@ -1561,16 +1977,35 @@ class UnmappedElementHandler:
                 if id(el) in mapped_element_ids:
                     continue
                 info = await self.element_scorer._get_element_info(el)
-                if not info.get('visible', True):
+                if not info.get("visible", True):
                     continue
-                nm = (info.get('name','') or '').lower()
-                idv= (info.get('id','') or '').lower()
-                blob = nm + ' ' + idv
+                nm = (info.get("name", "") or "").lower()
+                idv = (info.get("id", "") or "").lower()
+                blob = nm + " " + idv
                 kind = None
-                if any(t in blob for t in ['family_name','family-name','lastname','last_name','surname','family']):
-                    kind = '姓'
-                elif any(t in blob for t in ['given_name','given-name','firstname','first_name','given']):
-                    kind = '名'
+                if any(
+                    t in blob
+                    for t in [
+                        "family_name",
+                        "family-name",
+                        "lastname",
+                        "last_name",
+                        "surname",
+                        "family",
+                    ]
+                ):
+                    kind = "姓"
+                elif any(
+                    t in blob
+                    for t in [
+                        "given_name",
+                        "given-name",
+                        "firstname",
+                        "first_name",
+                        "given",
+                    ]
+                ):
+                    kind = "名"
                 if kind:
                     cand.append((kind, el, info))
             for kind, el, info in cand:
@@ -1579,18 +2014,18 @@ class UnmappedElementHandler:
                 selector = await self._generate_playwright_selector(el)
                 required = await self.element_scorer._detect_required_status(el)
                 handled[kind] = {
-                    'element': el,
-                    'selector': selector,
-                    'tag_name': info.get('tag_name','input') or 'input',
-                    'type': info.get('type','text') or 'text',
-                    'name': info.get('name',''),
-                    'id': info.get('id',''),
-                    'input_type': 'text',
-                    'default_value': '',
-                    'required': required,
-                    'visible': info.get('visible', True),
-                    'enabled': info.get('enabled', True),
-                    'auto_handled': True,
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": info.get("tag_name", "input") or "input",
+                    "type": info.get("type", "text") or "text",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "text",
+                    "default_value": "",
+                    "required": required,
+                    "visible": info.get("visible", True),
+                    "enabled": info.get("enabled", True),
+                    "auto_handled": True,
                 }
         except Exception as e:
             logger.debug(f"family/given name handler error: {e}")
@@ -1618,10 +2053,16 @@ class UnmappedElementHandler:
                     if not info.get("visible", True):
                         continue
                     # 追加ガード: email/確認系には統合氏名を適用しない
-                    typ = (info.get('type','') or '').lower()
-                    nm  = (info.get('name','') or '').lower()
-                    cls = (info.get('class','') or '').lower()
-                    if (typ == 'email') or ('mail' in nm) or ('email' in nm) or ('mail' in cls) or ('email' in cls):
+                    typ = (info.get("type", "") or "").lower()
+                    nm = (info.get("name", "") or "").lower()
+                    cls = (info.get("class", "") or "").lower()
+                    if (
+                        (typ == "email")
+                        or ("mail" in nm)
+                        or ("email" in nm)
+                        or ("mail" in cls)
+                        or ("email" in cls)
+                    ):
                         continue
                     selector = await self._generate_playwright_selector(fe.locator)
                     required = await self.element_scorer._detect_required_status(
@@ -1706,9 +2147,13 @@ class UnmappedElementHandler:
                 if not required:
                     # コンテキスト内の必須マーカー（* や 必須）が近傍に存在する場合は必須扱い
                     try:
-                        texts = [c.text for c in (contexts or []) if getattr(c, 'text', None)]
+                        texts = [
+                            c.text for c in (contexts or []) if getattr(c, "text", None)
+                        ]
                         blob_txt = " ".join(texts).strip()
-                        if any(m in blob_txt for m in self.REQUIRED_MARKERS) or ('*' in blob_txt):
+                        if any(m in blob_txt for m in self.REQUIRED_MARKERS) or (
+                            "*" in blob_txt
+                        ):
                             required = True
                     except Exception:
                         pass
@@ -1743,40 +2188,56 @@ class UnmappedElementHandler:
         """
         handled: Dict[str, Dict[str, Any]] = {}
         # 設定で明示的に有効化された場合のみ実行（デフォルト無効）
-        if not bool(self.settings.get('enable_optional_fax_fill', False)):
+        if not bool(self.settings.get("enable_optional_fax_fill", False)):
             return handled
         try:
-            client = client_data.get('client', {}) if isinstance(client_data, dict) else {}
-            phone = ''.join([client.get('phone_1',''), client.get('phone_2',''), client.get('phone_3','')]).strip()
+            client = (
+                client_data.get("client", {}) if isinstance(client_data, dict) else {}
+            )
+            phone = "".join(
+                [
+                    client.get("phone_1", ""),
+                    client.get("phone_2", ""),
+                    client.get("phone_3", ""),
+                ]
+            ).strip()
             if not phone:
                 return handled
             for i, el in enumerate(text_inputs):
                 if id(el) in mapped_element_ids:
                     continue
                 info = await self.element_scorer._get_element_info(el)
-                if not info.get('visible', True):
+                if not info.get("visible", True):
                     continue
-                name_id_cls = ' '.join([info.get('name',''), info.get('id',''), info.get('class','')]).lower()
-                contexts = await self.context_text_extractor.extract_context_for_element(el)
-                best = (self.context_text_extractor.get_best_context_text(contexts) or '').lower()
-                if not (('fax' in name_id_cls) or ('ファックス' in best) or ('fax' in best)):
+                name_id_cls = " ".join(
+                    [info.get("name", ""), info.get("id", ""), info.get("class", "")]
+                ).lower()
+                contexts = (
+                    await self.context_text_extractor.extract_context_for_element(el)
+                )
+                best = (
+                    self.context_text_extractor.get_best_context_text(contexts) or ""
+                ).lower()
+                if not (
+                    ("fax" in name_id_cls) or ("ファックス" in best) or ("fax" in best)
+                ):
                     continue
                 # 必須でない場合のみ自動入力
                 if await self.element_scorer._detect_required_status(el):
                     continue
                 selector = await self._generate_playwright_selector(el)
-                handled[f'auto_fax_{i+1}'] = {
-                    'element': el,
-                    'selector': selector,
-                    'tag_name': info.get('tag_name','input'),
-                    'type': info.get('type','text') or 'text',
-                    'name': info.get('name',''),
-                    'id': info.get('id',''),
-                    'input_type': 'text',
-                    'auto_action': 'fill',
-                    'default_value': phone,
-                    'required': False,
-                    'auto_handled': True,
+                handled[f"auto_fax_{i+1}"] = {
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": info.get("tag_name", "input"),
+                    "type": info.get("type", "text") or "text",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "text",
+                    "auto_action": "fill",
+                    "default_value": phone,
+                    "required": False,
+                    "auto_handled": True,
                 }
         except Exception as e:
             logger.debug(f"Auto handle fax failed: {e}")
@@ -1801,48 +2262,67 @@ class UnmappedElementHandler:
                 if id(el) in mapped_element_ids:
                     continue
                 info = await self.element_scorer._get_element_info(el)
-                if not info.get('visible', True):
+                if not info.get("visible", True):
                     continue
-                name_id_cls = " ".join([info.get('name',''), info.get('id',''), info.get('class','')]).lower()
-                contexts = await self.context_text_extractor.extract_context_for_element(el)
-                best = (self.context_text_extractor.get_best_context_text(contexts) or '').lower()
-                kana_like = ('kana' in name_id_cls) or ('furigana' in name_id_cls) or ('katakana' in name_id_cls) or ('カナ' in best) or ('フリガナ' in best) or ('ふりがな' in best)
+                name_id_cls = " ".join(
+                    [info.get("name", ""), info.get("id", ""), info.get("class", "")]
+                ).lower()
+                contexts = (
+                    await self.context_text_extractor.extract_context_for_element(el)
+                )
+                best = (
+                    self.context_text_extractor.get_best_context_text(contexts) or ""
+                ).lower()
+                kana_like = (
+                    ("kana" in name_id_cls)
+                    or ("furigana" in name_id_cls)
+                    or ("katakana" in name_id_cls)
+                    or ("カナ" in best)
+                    or ("フリガナ" in best)
+                    or ("ふりがな" in best)
+                )
                 if not kana_like:
                     continue
-                blob = best + ' ' + name_id_cls
-                if any(t in blob for t in ['sei','姓','セイ']):
+                blob = best + " " + name_id_cls
+                if any(t in blob for t in ["sei", "姓", "セイ"]):
                     last_el = last_el or el
-                if any(t in blob for t in ['mei','名','メイ']):
+                if any(t in blob for t in ["mei", "名", "メイ"]):
                     first_el = first_el or el
             if not (last_el and first_el):
                 return handled
 
-            client = client_data.get('client', {}) if isinstance(client_data, dict) else {}
-            last_kana = client.get('last_name_kana', '')
-            first_kana = client.get('first_name_kana', '')
+            client = (
+                client_data.get("client", {}) if isinstance(client_data, dict) else {}
+            )
+            last_kana = client.get("last_name_kana", "")
+            first_kana = client.get("first_name_kana", "")
             if last_el and last_kana:
                 selector = await self._generate_playwright_selector(last_el)
-                handled['auto_split_kana_last'] = {
-                    'element': last_el,
-                    'selector': selector,
-                    'tag_name': 'input',
-                    'type': 'text',
-                    'input_type': 'text',
-                    'auto_action': 'fill',
-                    'default_value': last_kana,
-                    'required': await self.element_scorer._detect_required_status(last_el),
+                handled["auto_split_kana_last"] = {
+                    "element": last_el,
+                    "selector": selector,
+                    "tag_name": "input",
+                    "type": "text",
+                    "input_type": "text",
+                    "auto_action": "fill",
+                    "default_value": last_kana,
+                    "required": await self.element_scorer._detect_required_status(
+                        last_el
+                    ),
                 }
             if first_el and first_kana:
                 selector = await self._generate_playwright_selector(first_el)
-                handled['auto_split_kana_first'] = {
-                    'element': first_el,
-                    'selector': selector,
-                    'tag_name': 'input',
-                    'type': 'text',
-                    'input_type': 'text',
-                    'auto_action': 'fill',
-                    'default_value': first_kana,
-                    'required': await self.element_scorer._detect_required_status(first_el),
+                handled["auto_split_kana_first"] = {
+                    "element": first_el,
+                    "selector": selector,
+                    "tag_name": "input",
+                    "type": "text",
+                    "input_type": "text",
+                    "auto_action": "fill",
+                    "default_value": first_kana,
+                    "required": await self.element_scorer._detect_required_status(
+                        first_el
+                    ),
                 }
         except Exception as e:
             logger.debug(f"Auto handle split kana failed: {e}")
@@ -1888,30 +2368,48 @@ class UnmappedElementHandler:
           『統合氏名カナ』として field_mapping に追加
         """
         promoted: List[str] = []
-        if ('統合氏名カナ' in field_mapping) or (('姓カナ' in field_mapping) and ('名カナ' in field_mapping)):
+        if ("統合氏名カナ" in field_mapping) or (
+            ("姓カナ" in field_mapping) and ("名カナ" in field_mapping)
+        ):
             return promoted
         for k, v in auto_handled.items():
-            if not k.startswith('auto_unified_kana_'):
+            if not k.startswith("auto_unified_kana_"):
                 continue
-            if not v.get('required', False):
+            if not v.get("required", False):
                 continue
             # フィールド名を昇格
             try:
-                el = v.get('element')
+                el = v.get("element")
                 # 可能なら要素詳細を取得してプレースホルダー/属性を含める
-                element_info = await self._get_element_details(el) if el else {
-                    **{kk: vv for kk, vv in v.items() if kk not in ['auto_action', 'default_value']}
-                }
+                element_info = (
+                    await self._get_element_details(el)
+                    if el
+                    else {
+                        **{
+                            kk: vv
+                            for kk, vv in v.items()
+                            if kk not in ["auto_action", "default_value"]
+                        }
+                    }
+                )
                 # 入力値はここでは設定せず（assignerが安全に決定）
-                element_info.update({
-                    'score': element_info.get('score', 0) or 100,
-                })
-                field_mapping['統合氏名カナ'] = {
-                    **{kk: vv for kk, vv in element_info.items() if kk not in ['auto_action', 'default_value']},
-                    'input_type': 'text',
+                element_info.update(
+                    {
+                        "score": element_info.get("score", 0) or 100,
+                    }
+                )
+                field_mapping["統合氏名カナ"] = {
+                    **{
+                        kk: vv
+                        for kk, vv in element_info.items()
+                        if kk not in ["auto_action", "default_value"]
+                    },
+                    "input_type": "text",
                     # 実際の必須性を要素から再判定して反映（誤必須を防止）
-                    'required': (await self.element_scorer._detect_required_status(el)) if el else bool(element_info.get('required')), 
-                    'source': 'promoted'
+                    "required": (await self.element_scorer._detect_required_status(el))
+                    if el
+                    else bool(element_info.get("required")),
+                    "source": "promoted",
                 }
                 # 呼び出し側で auto_handled から除去できるよう、昇格元キー（auto_*）を返す
                 promoted.append(k)
