@@ -74,9 +74,9 @@ result = self.supabase.rpc('get_target_companies_advanced', {
 - **アクセス権限**: `SECURITY DEFINER` で関数実行時の権限を制限
 - **入力検証**: 呼び出し側で WHERE 句の妥当性を事前チェック
 
-## 代替実装
+## 代替実装（廃止）
 
-RPC 関数が利用できない環境では、`form_sender_worker.py` の `_get_companies_with_basic_query` メソッドによるフォールバック処理を実行。
+Runner への完全移行に伴い、旧 `form_sender_worker.py` ベースのフォールバック実装（`_get_companies_with_basic_query`）は削除済みです。本システムは `send_queue` と RPC 群（`claim_next_batch`/`mark_done` 等）を前提とします。RPC が利用できない環境では実行不可となるため、環境側での RPC 有効化・デプロイを行ってください。
 
 ## 実装状況
 
@@ -88,7 +88,7 @@ RPC 関数が利用できない環境では、`form_sender_worker.py` の `_get_
 - ✅ フォールバック処理統一化
 - ✅ SQL条件構築の安全性強化
 - ⚠️ Supabase 側の関数定義は環境に応じて別途実装が必要
-- ✅ フォールバック機能による互換性確保
+- ⛔ フォールバック機能は廃止（Runner 完全移行）
 
 ## 新機能：軽量疑似ランダム抽出 v2.0
 

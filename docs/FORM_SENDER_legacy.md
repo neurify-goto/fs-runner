@@ -1,5 +1,11 @@
 ## はじめに
 
+> 注意（2025-09-08 JST）
+>
+> この文書は旧仕様（`src/form_sender_worker.py` ベース）の履歴・参考用ドキュメントです。
+> コードは Runner（`src/form_sender_runner.py`）へ完全移行済みで、旧ワーカー/オーケストレーター一式は削除されています。
+> 現行の実装/運用は `docs/FORM_SENDER.md` と `docs/form_sender_setup.md` を参照してください。
+
 このドキュメントでは、事前に作成された**指示書（instruction_json）**に基づいて、Webサイトのお問い合わせフォームに対し、指定されたデータを入力送信するための、**GAS トリガー + GitHub Actions ワークフロー**による自動化システムの網羅的なアルゴリズムを自然言語で記述します。
 
 **実行アーキテクチャ**: Google Apps Script (GAS) がスプレッドシート連携によりアクティブなターゲティング設定を確認し、定期的に GitHub Actions ワークフローを `repository_dispatch` でトリガーする。ワークフロー内で処理対象企業を10件ずつ抽出・処理し、GitHub Actions側で営業時間・送信数制限を判定して連続ループ実行する分散処理システム。
@@ -911,4 +917,3 @@ reCAPTCHAやCloudflareなどのbot送信防止システムを検知し、適切�
 4. 企業データの更新：
    - companies.instruction_valid = 変更なし（指示書の問題ではないため）
 ```
-

@@ -2,7 +2,7 @@
 
 このドキュメントでは、**RuleBasedAnalyzer による動的フォーム解析**に基づいて、Webサイトのお問い合わせフォームに対し、指定されたデータを入力送信するための、**GAS トリガー + GitHub Actions ワークフロー**による自動化システムの網羅的なアルゴリズムを自然言語で記述します。
 
-**実行アーキテクチャ（最新版）**: Google Apps Script (GAS) が毎朝 Supabase に当日分の送信キュー（`send_queue`）を直接生成し、その後 `repository_dispatch` で GitHub Actions を起動します。GitHub Actions はエントリ `src/form_sender_runner.py` を実行し、Runner 内の各ワーカーが Supabase RPC（`claim_next_batch`）でキューを原子的に専有→フォーム送信→結果を `mark_done` で確定・保存します。営業時間・日次成功上限制御は Runner 側で継続的に判定します。設計の詳細は `docs/form_sender_plan.md` を一次参照としてください。
+**実行アーキテクチャ（最新版）**: Google Apps Script (GAS) が毎朝 Supabase に当日分の送信キュー（`send_queue`）を直接生成し、その後 `repository_dispatch` で GitHub Actions を起動します。GitHub Actions はエントリ `src/form_sender_runner.py` を実行し、Runner 内の各ワーカーが Supabase RPC（`claim_next_batch`）でキューを1件ずつ原子的に専有→フォーム送信→結果を `mark_done` で確定・保存します。営業時間・日次成功上限制御は Runner 側で継続的に判定します。設計の詳細は `docs/form_sender_plan.md` を一次参照としてください。
 
 あくまで処理フローを自然言語で定義する文書であるため、システム要件や実装計画、運用方針等については基本的に記述しません。
 
@@ -26,8 +26,8 @@ GAS トリガー + GitHub Actions ワークフローによるフォーム送信�
 1. **GAS定期実行**: 毎日決まった時間帯に起動
 2. **アクティブ判定**: targeting-id ごとのアクティブ状態を確認
 3. **repository_dispatch**: アクティブな targeting-id とスプレッドシート設定データを GitHub Actions ワークフローにトリガー
-4. **連続ループ実行**: 営業時間等の制限を判定した上で、実行可能かどうかを判定した上で、ワークフロー内で処理対象を10件ずつ抽出・処理
-5. **結果記録**: GitHub Actions内で各処理ループごとに Supabase に結果を直接保存
+4. **連続ループ実行**: 営業時間等の制限を判定した上で、Runner が `send_queue` から1件ずつ原子的に専有→処理
+5. **結果記録**: 各件処理の直後に Supabase RPC で確定保存（`mark_done`）
 
 #### **1.1.2. GitHub Actions ワークフロー仕様（更新）**
 
@@ -223,14 +223,14 @@ RuleBasedAnalyzerが動的マッピング時に参照するクライアントデ
 
 ### 1.6. 結果記録システム（GitHub Actions専用）
 
-#### **1.6.1. 連続処理結果記録システム**
+#### **1.6.1. 連続処理結果記録システム（Runner）**
 
-**概要**: GitHub Actions の `src/form_sender_worker.py` が連続ループ実行結果を10件ごとにSupabaseに直接記録します。GASは結果記録に一切関与しません。
+**概要**: GitHub Actions の `src/form_sender_runner.py` が `send_queue` を1件ずつ専有して処理し、各件の処理直後に Supabase RPC `mark_done` で確定保存します。GAS は結果記録に関与しません。
 
 **書き込み方式と処理タイミング**:
-- **書き込み方式**: 直接 Supabase に一括書き込み
-- **処理タイミング**: 10件の企業の送信処理が完了するたびに一括で実行
-- **記録タイミング**: 各ループ完了後、10件の処理が完了するたびに記録
+- **書き込み方式**: RPC `mark_done` による逐次確定保存
+- **処理タイミング**: 各企業の処理完了直後
+- **記録タイミング**: 逐次（バッチ一括ではない）
 
 **書き込み対象テーブル**:
 1. **`submissions`**: 各送信結果の詳細記録

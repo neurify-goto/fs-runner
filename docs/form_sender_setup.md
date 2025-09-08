@@ -1,6 +1,6 @@
 # Form Sender セットアップ手順（GAS直キュー作成＋自走Runner）
 
-最終更新: 2025-09-06 (JST)
+最終更新: 2025-09-08 (JST)
 
 この文書は、日次送信キュー（GAS→Supabase直呼び出し）と、GitHub Actions Runner（4ワーカー自走）を本番運用/ローカル検証するためのセットアップ手順をまとめる。
 
@@ -124,7 +124,7 @@ python tests/test_form_sender_local.py --nolimit
 ## 6. よくある質問
 
 Q. 旧オーケストレーター版はどうしますか？
-- 段階移行中は残置。安定後に無効化/削除してください。
+- 2025-09-08 時点でコードベースから削除済みです（`src/form_sender_worker.py` と `src/form_sender/orchestrator/*`）。本番は Runner（`src/form_sender_runner.py`）のみを利用してください。
 
 Q. targeting-id ごとにテーブルは分けますか？
 - いいえ。`send_queue` 1テーブルで十分です（毎朝リセット運用）。
