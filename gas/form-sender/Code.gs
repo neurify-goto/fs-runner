@@ -265,12 +265,11 @@ function buildSendQueueForTargeting(targetingId) {
     const t = cfg.targeting;
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     // キュー上限は一律10000件（max_daily_sendsは送信成功数の上限としてRunner側で使用）
-    const ngCsv = normalizeNgCompaniesToIdCsv(t.ng_companies || '');
     const inserted = createQueueForTargeting(
       targetingId,
       dateJst,
       t.targeting_sql || '',
-      ngCsv,
+      (t.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
       10000,
       8
     );
@@ -310,12 +309,11 @@ function buildSendQueueForAllTargetings() {
         if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
 
         const targeting = cfg.targeting;
-        const ngCsv = normalizeNgCompaniesToIdCsv(targeting.ng_companies || '');
         const inserted = createQueueForTargeting(
           targetingId,
           dateJst,
           targeting.targeting_sql || '',
-          ngCsv,
+          (targeting.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
           10000,
           8
         );
