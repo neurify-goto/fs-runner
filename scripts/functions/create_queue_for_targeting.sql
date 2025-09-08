@@ -16,8 +16,11 @@ as $$
 declare
   v_sql text;
   v_ins integer := 0;
+  v_ins2 integer := 0;
   v_ng_ids bigint[];
   v_limit integer := 10000; -- 一律上限
+  v_min_prefill integer := 1000; -- 目標プレフィル件数（要件: 最低1000件確保を目指す）
+  v_need integer := 0;
 begin
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
@@ -74,6 +77,58 @@ begin
   -- p_max_daily は無視し、常に v_limit=10000 を使用
   execute v_sql using p_target_date, p_targeting_id, v_ng_ids, v_limit, p_shards;
   get diagnostics v_ins = row_count;
+
+  -- 追加要件: 取得件数が1000件未満の場合、
+  -- 「過去に送信試行はあるが成功履歴がないもの」を追加で投入する
+  if coalesce(v_ins, 0) < v_min_prefill then
+    v_need := v_min_prefill - coalesce(v_ins, 0);
+
+    v_sql :=
+      'with hist as (
+         select company_id,
+                bool_or(success = true) as has_success
+           from public.submissions
+          where targeting_id = $2
+          group by company_id
+       ),
+       candidates as (
+         select c.id
+           from public.companies c
+           left join public.submissions s_today
+                  on s_today.targeting_id = $2
+                 and s_today.company_id = c.id
+                 and s_today.submitted_at >= ($1::timestamp AT TIME ZONE ''Asia/Tokyo'')
+                 and s_today.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
+           join hist h
+             on h.company_id = c.id
+          where c.form_url is not null
+            and coalesce(c.prohibition_detected, false) = false
+            and s_today.id is null
+            and coalesce(h.has_success, false) = false';
+
+    -- targeting_sql を同様に適用
+    if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
+      v_sql := v_sql || ' and (' || p_targeting_sql || ')';
+    end if;
+
+    -- NG会社ID除外（配列が空/NULLならスキップ）
+    v_sql := v_sql || ' and ( $3::bigint[] is null or array_length($3::bigint[],1) is null or not (c.id = any($3::bigint[])) )';
+
+    v_sql := v_sql || ' order by c.id asc limit $4 )
+      insert into public.send_queue(
+        target_date_jst, targeting_id, company_id, priority, shard_id, status, attempts, created_at)
+      select $1::date, $2::bigint, id,
+             (select coalesce(max(priority),0) from public.send_queue where target_date_jst = $1::date and targeting_id = $2::bigint) + row_number() over (order by id),
+             (id % $5),
+             ''pending'', 0, now()
+        from candidates
+      on conflict (target_date_jst, targeting_id, company_id) do nothing;';
+
+    execute v_sql using p_target_date, p_targeting_id, v_ng_ids, v_need, p_shards;
+    get diagnostics v_ins2 = row_count;
+    v_ins := coalesce(v_ins,0) + coalesce(v_ins2,0);
+  end if;
+
   return v_ins;
 end;
 $$;
