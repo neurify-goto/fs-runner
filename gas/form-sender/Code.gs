@@ -243,18 +243,9 @@ function processTargeting(targetingId) {
   }
 }
 
-/**
- * 06:25 JST: 当日用キューの完全リセットを実行
- */
+/** 当日用キューの完全リセットを実行 */
 function resetSendQueueAllDaily() {
   try {
-    // 07:00 JST 以降は安全のため実行禁止
-    const nowJstStr = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm');
-    const [hh, mm] = nowJstStr.split(':').map(Number);
-    if (hh >= 7) { // 07:00 以降
-      console.warn('resetSendQueueAllDaily: 07:00以降のためスキップしました');
-      return { success: false, skipped: true, reason: 'after 07:00 JST' };
-    }
     const res = resetSendQueueAll();
     console.log('send_queue truncated');
     return { success: true, result: res };
@@ -265,7 +256,7 @@ function resetSendQueueAllDaily() {
 }
 
 /**
- * 06:35–06:50 JST: targeting毎に当日キューを生成
+ * targeting毎に当日キューを生成
  */
 function buildSendQueueForTargeting(targetingId) {
   try {
@@ -291,7 +282,7 @@ function buildSendQueueForTargeting(targetingId) {
 }
 
 /**
- * 06:35–06:50 JST: アクティブな全targetingについて当日キューを一括生成
+ * アクティブな全targetingについて当日キューを一括生成
  * - startFormSenderFromTrigger と同様、スプレッドシートのアクティブ行を走査
  * - 企業名などの機密情報はログ出力しない
  */
