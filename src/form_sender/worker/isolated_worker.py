@@ -658,7 +658,7 @@ class IsolatedFormWorker:
             # 営業禁止検出（Analyzerの結果を用いた早期中断）
             try:
                 sp = analysis_result.get('sales_prohibition') or {}
-                has_prohibition = bool(sp.get('has_prohibition')) or bool(sp.get('prohibition_detected'))
+                has_prohibition = bool(sp.get('has_prohibition') or sp.get('prohibition_detected'))
                 if has_prohibition:
                     matches = sp.get('matches') or []
                     level = sp.get('prohibition_level') or sp.get('detection_method') or 'detected'

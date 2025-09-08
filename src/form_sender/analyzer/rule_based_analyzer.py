@@ -167,11 +167,13 @@ class RuleBasedAnalyzer:
             try:
                 early_prohibition = await self.sales_prohibition_detector.detect_prohibition_text()
             except Exception as e:
-                logger.debug(f"Early prohibition detection failed (will fallback later): {e}")
-                early_prohibition = None  # 例外時は必ず遅延側で再検出する
+                # 例外時は後段で必ずフォールバック検出を実行
+                logger.warning(f"Early prohibition detection failed; falling back to late detection: {e}")
+                early_prohibition = None
 
             has_early_detection = (
-                isinstance(early_prohibition, dict)
+                early_prohibition is not None
+                and isinstance(early_prohibition, dict)
                 and (
                     bool(early_prohibition.get('has_prohibition'))
                     or bool(early_prohibition.get('prohibition_detected'))

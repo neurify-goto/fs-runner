@@ -118,6 +118,52 @@ def jst_utc_bounds(d: date):
     return (start_jst.astimezone(timezone.utc), end_jst.astimezone(timezone.utc))
 
 
+def _build_failure_classify_detail(error_type: Optional[str], base_detail: Optional[Dict[str, Any]], evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """失敗時のclassify_detailを一元生成（PROHIBITION_DETECTEDを優先補正）。"""
+    try:
+        if isinstance(base_detail, dict):
+            bd = dict(base_detail)
+            if isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
+                bd.update({
+                    'code': 'PROHIBITION_DETECTED',
+                    'category': 'BUSINESS',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 1.0,
+                })
+            if evidence:
+                bd['evidence'] = evidence
+            return bd
+        # base_detail が無い場合も PROHIBITION_DETECTED を優先補正
+        if isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
+            return {
+                'code': 'PROHIBITION_DETECTED',
+                'category': 'BUSINESS',
+                'retryable': False,
+                'cooldown_seconds': 0,
+                'confidence': 1.0,
+                'evidence': evidence,
+            }
+        return {
+            'code': error_type or 'UNKNOWN',
+            'category': 'SYSTEM',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': 0.0,
+            'evidence': evidence,
+        }
+    except Exception:
+        # 最低限のフォールバック
+        return {
+            'code': error_type or 'UNKNOWN',
+            'category': 'GENERAL',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': 0.0,
+            'evidence': evidence,
+        }
+
+
 
 
 def _build_supabase_client():
@@ -597,44 +643,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         base_detail, bot_flag = _classify_failure_detail(err_msg, add_data, error_type)
         if bot_flag:
             bp = True
-        if isinstance(base_detail, dict):
-            # 根拠の追記（安全にマージ）
-            bd = dict(base_detail)
-            # 営業禁止検出はコードを強制上書き（Runner側エビデンスの整合性確保）
-            try:
-                if isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
-                    bd.update({
-                        'code': 'PROHIBITION_DETECTED',
-                        'category': 'BUSINESS',
-                        'retryable': False,
-                        'cooldown_seconds': 0,
-                        'confidence': 1.0,
-                    })
-            except Exception:
-                pass
-            if evidence:
-                bd['evidence'] = evidence
-            classify_detail = bd
-        else:
-            # フォールバック
-            if isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
-                classify_detail = {
-                    'code': 'PROHIBITION_DETECTED',
-                    'category': 'BUSINESS',
-                    'retryable': False,
-                    'cooldown_seconds': 0,
-                    'confidence': 1.0,
-                    'evidence': evidence,
-                }
-            else:
-                classify_detail = {
-                    'code': error_type or 'UNKNOWN',
-                    'category': 'SYSTEM',
-                    'retryable': False,
-                    'cooldown_seconds': 0,
-                    'confidence': 0.0,
-                    'evidence': evidence,
-                }
+        classify_detail = _build_failure_classify_detail(error_type, base_detail, evidence)
     else:
         # 成功時も根拠を保存（偽陽性/陰性検証のため）
         conf = None
