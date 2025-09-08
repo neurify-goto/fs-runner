@@ -33,12 +33,12 @@ function callRpc_(fnName, payload) {
   throw new Error('Supabase RPC error ' + code + ': ' + text);
 }
 
-/** リセット（06:25 JST） */
+/** リセット */
 function resetSendQueueAll() {
   return callRpc_('reset_send_queue_all', {});
 }
 
-/** targeting用の当日キュー作成（06:35–06:50 JST） */
+/** targeting用の当日キュー作成 */
 function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, maxDailySends, shards) {
   return callRpc_('create_queue_for_targeting', {
     p_target_date: targetDateJst,
@@ -49,4 +49,3 @@ function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCom
     p_shards: Number(shards || 8)
   });
 }
-

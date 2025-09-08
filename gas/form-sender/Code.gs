@@ -256,7 +256,7 @@ function resetSendQueueAllDaily() {
 }
 
 /**
- * 06:35–06:50 JST: targeting毎に当日キューを生成
+ * targeting毎に当日キューを生成
  */
 function buildSendQueueForTargeting(targetingId) {
   try {
@@ -282,7 +282,7 @@ function buildSendQueueForTargeting(targetingId) {
 }
 
 /**
- * 06:35–06:50 JST: アクティブな全targetingについて当日キューを一括生成
+ * アクティブな全targetingについて当日キューを一括生成
  * - startFormSenderFromTrigger と同様、スプレッドシートのアクティブ行を走査
  * - 企業名などの機密情報はログ出力しない
  */
