@@ -427,7 +427,8 @@ def _within_business_hours(client_data: Dict[str, Any]) -> bool:
         if not start or not end:
             return True
         cur_min = now_jst.hour * 60 + now_jst.minute
-        return to_minutes(start) <= cur_min < to_minutes(end)
+        # GAS側の実装に合わせて終了時刻を含む（<= end）
+        return to_minutes(start) <= cur_min <= to_minutes(end)
     except Exception:
         return True
 
@@ -691,7 +692,41 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                 backoff_initial, backoff_max = 2, 60
             backoff = backoff_initial
             processed = 0
+            # 取り残し再配布の定期実行（worker_id=0 のみ）
+            try:
+                runner_cfg = get_worker_config().get('runner', {})
+                requeue_interval = int(runner_cfg.get('requeue_interval_seconds', 300))  # 既定5分
+                requeue_stale_minutes = int(runner_cfg.get('requeue_stale_minutes', 15))  # 既定15分
+            except Exception:
+                requeue_interval, requeue_stale_minutes = 300, 15
+            last_requeue_ts = 0.0
             while True:
+                # 取り残し再配布は仕事の有無に関係なく一定間隔で実行（worker_id=0 のみ）
+                try:
+                    now_ts = _time.time()
+                    if worker_id == 0 and (now_ts - last_requeue_ts >= requeue_interval):
+                        try:
+                            resp = supabase.rpc('requeue_stale_assigned', {
+                                'p_target_date': str(target_date),
+                                'p_targeting_id': targeting_id,
+                                'p_stale_minutes': requeue_stale_minutes,
+                            }).execute()
+                            try:
+                                count_val = None
+                                if hasattr(resp, 'data'):
+                                    count_val = resp.data
+                                _get_lifecycle_logger().info(
+                                    f"requeue_stale_assigned: targeting_id={targeting_id}, stale_minutes={requeue_stale_minutes}, requeued={count_val}"
+                                )
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.warning(f"requeue_stale_assigned error (suppressed): {e}")
+                        finally:
+                            last_requeue_ts = now_ts
+                except Exception:
+                    pass
+
                 if not _within_business_hours(client_data):
                     await asyncio.sleep(60)
                     continue
