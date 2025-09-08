@@ -1781,7 +1781,7 @@ class FieldMapper:
             "E-mail",
             "Eメール",
         ]
-        if tag == "input" and typ in ["", "text", "mail"]:
+        if tag == "input" and typ in ["", "text", "mail", "number", "tel"]:
             if any(tok in ctx_text for tok in email_tokens) or any(
                 tok in name_id_cls for tok in ["email", "mail"]
             ):
