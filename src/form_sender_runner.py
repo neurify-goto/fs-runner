@@ -32,9 +32,7 @@ import hashlib
 from form_sender.worker.isolated_worker import IsolatedFormWorker
 from form_sender.security.log_sanitizer import setup_sanitized_logging
 from form_sender.utils.error_classifier import ErrorClassifier
-
-# 既存のクライアントデータローダーを再利用
-from form_sender_worker import _load_client_data_simple  # type: ignore
+from form_sender.utils.client_data_loader import load_client_data_simple
 from config.manager import get_worker_config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -790,7 +788,7 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
             if not ok:
                 logger.error(f"Worker {worker_id}: Playwright init failed")
                 return
-            client_data = _load_client_data_simple(config_file, targeting_id)
+            client_data = load_client_data_simple(config_file, targeting_id)
             max_daily = _extract_max_daily_sends(client_data)
             # バックオフ設定（config/worker_config.json → runner）
             try:
