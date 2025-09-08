@@ -24,7 +24,7 @@ def infer_idx(nm: str, ide: str, cls: str):
 
 
 def test_phone_index_mapping_zero_based():
-    assert infer_idx('電話番号[data][0]', '', '') == 2 - 1 + 1  # -> 1
+    assert infer_idx('電話番号[data][0]', '', '') == 1
     assert infer_idx('電話番号[data][1]', '', '') == 2
     assert infer_idx('電話番号[data][2]', '', '') == 3
 
@@ -37,3 +37,9 @@ def test_phone_index_mapping_english_tokens():
 def test_phone_index_mapping_no_digit():
     assert infer_idx('tel', '', '') == 1
 
+
+def test_phone_index_mapping_out_of_range():
+    # 4などの範囲外はそのまま返る（後段で1..3以外は弾かれる想定）
+    assert infer_idx('tel4', '', '') == 4
+    # 異常系: 電話トークン無し → None
+    assert infer_idx('fax2', '', '') is None

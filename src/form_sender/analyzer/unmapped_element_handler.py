@@ -442,22 +442,41 @@ class UnmappedElementHandler:
         try:
             # 1) 候補抽出（既存マッピングの有無に関わらず検出）
             def _infer_phone_part_index(nm: str, ide: str, cls: str) -> Optional[int]:
+                """電話番号分割のインデックスを 1..3 で推定する。
+
+                ルール:
+                - name/id/class のいずれかに 'tel'/'phone'/'電話' が無ければ None
+                - まず配列風の末尾インデックス [0-2] を検出したら +1（0→1, 1→2, 2→3）
+                - それ以外で『tel1/phone2/電話3』のような直接数字があれば、その数字を返す（1..3想定）
+                - フォールバックで末尾一桁数字があれば、それを返す（0 のみ +1 する）
+                - 何も無ければ 1 を仮定
+                """
                 import re
                 nm = (nm or '').lower(); ide = (ide or '').lower(); cls = (cls or '').lower()
                 blob = nm + ' ' + ide + ' ' + cls
                 if not (('tel' in blob) or ('phone' in blob) or ('電話' in blob)):
                     return None
+                # 配列風 [d] の最終出現を優先
+                m_br = re.search(r"\[(\d)\](?!.*\d)", blob)
+                if m_br:
+                    raw = int(m_br.group(1))
+                    return raw + 1  # 0→1, 1→2, 2→3
+
+                # 接頭辞 + 数字（tel1/phone2/電話3）
                 for s in (nm, ide, cls):
                     if not s:
                         continue
-                    m = re.search(r"(?:tel|phone|電話)[^\d]*([0123])(?!.*\d)", s)
+                    m = re.search(r"(?:tel|phone|電話)[^\d]*([0-9])(?!.*\d)", s)
                     if m:
                         raw = int(m.group(1))
-                        return (raw + 1) if raw in (0,1,2) else raw
+                        return 1 if raw == 0 else raw
+
+                # フォールバック: 末尾の一桁数字
                 tail = re.search(r"(\d)(?!.*\d)$", blob)
                 if tail:
                     raw = int(tail.group(1))
-                    return (raw + 1) if raw in (0,1,2) else raw
+                    return 1 if raw == 0 else raw
+
                 return 1
 
             triples_all: Dict[int, Tuple[Locator, Dict[str, Any]]] = {}
