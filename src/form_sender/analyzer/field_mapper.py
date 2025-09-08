@@ -1197,7 +1197,7 @@ class FieldMapper:
         # ひらがな/カナなど人名指標が強いものは除外
         name_like_excl = ["ふりがな", "フリガナ", "カナ", "ひらがな"]
 
-        best = (None, 0, None, [])
+        candidates: list[tuple] = []  # (el, score, details, contexts)
         # 注文番号/各種番号など、住所と無関係なトークンを含む要素は除外
         order_like_tokens = [
             "注文番号", "order number", "受注番号", "予約番号", "伝票番号", "受付番号", "お問い合わせ番号", "tracking number",
@@ -1259,29 +1259,67 @@ class FieldMapper:
             score, details = await self.element_scorer.calculate_element_score(
                 el, patterns, target_field
             )
-            if score > best[1]:
-                best = (el, score, details, contexts)
+            # スコアがゼロ/マイナスは除外
+            if score <= 0:
+                continue
+            candidates.append((el, score, details, contexts, attr_hit, ctx_hit))
 
-        el, score, details, contexts = best
-        if not el:
+        if not candidates:
             return
+        # スコア降順で安定ソート
+        candidates.sort(key=lambda t: t[1], reverse=True)
         # 住所の誤検出リスクを下げるため、しきい値をやや高めに設定
         threshold = max(70, int(self.settings.get("email_fallback_min_score", 60)) + 5)
-        if score >= threshold:
+
+        mapped_count = 0
+        supplement_idx = 1
+        for el, score, details, contexts, attr_hit, ctx_hit in candidates:
+            if score < threshold:
+                break
+            # 既に他で利用済みの要素はスキップ
+            if id(el) in used_elements:
+                continue
+            # 役割推定（市区町村/詳細）に使う簡易トークン
+            try:
+                ei = details.get("element_info", {}) or {}
+                blob = " ".join([
+                    (ei.get("name", "") or ""),
+                    (ei.get("id", "") or ""),
+                    (ei.get("class", "") or ""),
+                    (ei.get("placeholder", "") or ""),
+                    (self.context_text_extractor.get_best_context_text(contexts) or ""),
+                ]).lower()
+            except Exception:
+                blob = ""
+            city_tokens = ["市区町村", "市区", "郡", "市", "city", "区", "町", "town", "丁目"]
+            detail_tokens = [
+                "番地", "丁目", "建物", "building", "マンション", "ビル", "部屋", "room", "apt", "apartment", "号室"
+            ]
+
+            # フィールド名の決定: 先頭は『住所』、以降は『住所_補助N』
+            fname = target_field if (mapped_count == 0 and target_field not in field_mapping) else f"住所_補助{supplement_idx}"
+            # 過剰マッピング抑制: 2つまで（市区町村+詳細）
+            if fname.startswith("住所_補助") and supplement_idx > 2:
+                break
+
             info = await self._create_enhanced_element_info(el, details, contexts)
             try:
                 info["source"] = "fallback"
             except Exception:
                 pass
-            tmp = self._generate_temp_field_value(target_field)
-            if self.duplicate_prevention.register_field_assignment(
-                target_field, tmp, score, info
-            ):
-                field_mapping[target_field] = info
+            tmp = self._generate_temp_field_value(fname)
+            if self.duplicate_prevention.register_field_assignment(fname, tmp, score, info):
+                field_mapping[fname] = info
                 used_elements.add(id(el))
+                mapped_count += 1
+                if fname.startswith("住所_補助"):
+                    supplement_idx += 1
                 logger.info(
-                    f"Fallback mapped '{target_field}' via label/attr/placeholder (score {score})"
+                    f"Fallback mapped '{fname}' via label/attr/placeholder (score {score})"
                 )
+            # 2フィールドまでで十分
+            if mapped_count >= 2:
+                break
 
     async def _salvage_strict_email_by_attr(
         self, classified_elements, field_mapping, used_elements

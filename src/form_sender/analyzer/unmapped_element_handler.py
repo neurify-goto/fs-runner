@@ -846,6 +846,12 @@ class UnmappedElementHandler:
                 # 必須判定
                 required = await self.element_scorer._detect_required_status(el)
                 if not required:
+                    # コンテナ(dt/dd/th/td 等)に必須マーカーが表示されるタイプの検出を追加（汎用）
+                    try:
+                        required = await self._detect_group_required_via_container(el)
+                    except Exception:
+                        required = False
+                if not required:
                     continue
                 selector = await self._generate_playwright_selector(el)
                 field_name = f"auto_required_text_{idx}"

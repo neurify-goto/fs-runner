@@ -293,7 +293,7 @@ class RequiredRescue:
                             ):
                                 field_name = "統合氏名カナ"
                             else:
-                                # 住所救済（placeholder/属性もヒントに）
+                                # 郵便番号/住所 救済（placeholder/属性もヒントに）
                                 blob = " ".join(
                                     [
                                         (ei.get("name", "") or ""),
@@ -303,6 +303,45 @@ class RequiredRescue:
                                         ctx_texts,
                                     ]
                                 ).lower()
+                                # 先に 郵便番号 系を優先判定（住所系文脈に埋もれやすいため）
+                                postal_tokens = [
+                                    "郵便", "郵便番号", "postal", "postcode", "post_code", "zip", "zipcode", "〒",
+                                    "上3桁", "前3桁", "下4桁", "後4桁",
+                                ]
+                                if any(t in blob for t in postal_tokens):
+                                    # 分割ヒント
+                                    name_id = (ei.get("name", "") + " " + ei.get("id", "")).lower()
+                                    if any(h in name_id for h in ["-1", "_1", "1"]):
+                                        field_name = "郵便番号1"
+                                    elif any(h in name_id for h in ["-2", "_2", "2"]):
+                                        field_name = "郵便番号2"
+                                    else:
+                                        field_name = "郵便番号"
+                                else:
+                                    # 住所救済
+                                    addr_tokens = [
+                                        "住所",
+                                        "所在地",
+                                        "address",
+                                        "addr",
+                                        "street",
+                                        "city",
+                                        "都道府県",
+                                        "prefecture",
+                                        "郵便",
+                                        "zip",
+                                        "postal",
+                                        "県",
+                                        "市",
+                                        "区",
+                                        "丁目",
+                                        "番地",
+                                        "-",
+                                        "ー",
+                                        "－",
+                                    ]
+                                    if any(t in blob for t in addr_tokens):
+                                        field_name = "住所"
                                 addr_tokens = [
                                     "住所",
                                     "所在地",
@@ -326,6 +365,37 @@ class RequiredRescue:
                                 ]
                                 if any(t in blob for t in addr_tokens):
                                     field_name = "住所"
+                        # 住所の重複救済/郵便番号の誤判定是正
+                        # まず、住所と判定されたが郵便番号らしい場合は郵便番号へ補正
+                        try:
+                            blob2 = " ".join([
+                                (ei.get("name", "") or ""),
+                                (ei.get("id", "") or ""),
+                                (ei.get("class", "") or ""),
+                                (ei.get("placeholder", "") or ""),
+                                " ".join([(getattr(c, 'text', '') or '') for c in (contexts or [])]),
+                            ]).lower()
+                        except Exception:
+                            blob2 = ""
+                        if field_name == "住所":
+                            postal_hint = any(t in blob2 for t in [
+                                "郵便", "郵便番号", "postal", "postcode", "post_code", "zip", "zipcode", "〒", "post"
+                            ])
+                            if postal_hint:
+                                name_id = (ei.get("name", "") + " " + ei.get("id", "")).lower()
+                                if any(h in name_id for h in ["-1", "_1", "1"]):
+                                    field_name = "郵便番号1"
+                                elif any(h in name_id for h in ["-2", "_2", "2"]):
+                                    field_name = "郵便番号2"
+                                else:
+                                    field_name = "郵便番号"
+
+                        # 住所の重複救済: すでに『住所』が確定済みの場合は補助スロットへ振り分け
+                        if field_name == "住所" and "住所" in field_mapping:
+                            suffix = 1
+                            while f"住所_補助{suffix}" in field_mapping:
+                                suffix += 1
+                            field_name = f"住所_補助{suffix}"
                         elif self._is_confirmation_field(ei, contexts) or any(
                             t
                             in (
