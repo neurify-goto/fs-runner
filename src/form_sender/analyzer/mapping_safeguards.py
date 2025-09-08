@@ -95,7 +95,8 @@ def _passes_email(ei: Dict[str, Any], best_txt: str) -> bool:
 def _passes_phone(ei: Dict[str, Any], best_txt: str) -> bool:
     etype = (ei.get("type") or "").lower()
     attrs_blob = _attrs_blob(ei)
-    pos_attr = any(t in attrs_blob for t in ["tel", "phone"])
+    # 属性: tel/phone に加え、日本語の『電話』『携帯』も許可（type=text な和名属性でも通す）
+    pos_attr = any(t in attrs_blob for t in ["tel", "phone", "電話", "携帯"])
     pos_ctx = any(t in best_txt for t in ["電話", "tel", "phone", "携帯", "mobile", "cell"])
     neg_ctx = any(t in best_txt for t in ["時", "時頃", "午前", "午後", "連絡方法"]) or any(
         t in attrs_blob for t in ["timeno", "h1", "h2"]

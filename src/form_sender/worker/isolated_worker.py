@@ -908,23 +908,40 @@ class IsolatedFormWorker:
             # 送信ボタンが無効のままなら送信を中止
             try:
                 if submit_element and not await submit_element.is_enabled():
-                    # 最終フォールバック: disabled属性を外してみる（フロント側のUIバグ回避）
-                    logger.warning(f"Worker {self.worker_id}: Submit button is disabled; trying to force-enable")
+                    # reCAPTCHA などの Bot 保護がある場合は強制有効化を行わない
+                    guard_present = False
                     try:
-                        await submit_element.evaluate("el => { el.disabled = false; el.removeAttribute('disabled'); el.classList.remove('disabled'); }")
-                        await asyncio.sleep(0.2)
-                    except Exception as e:
-                        logger.debug(f"Worker {self.worker_id}: Force-enable evaluate failed: {e}")
+                        guard_present = bool(
+                            await dom_ctx.query_selector('.g-recaptcha, .grecaptcha-badge, [name="g-recaptcha-response"]')
+                        )
+                    except Exception:
+                        guard_present = False
+                    if not guard_present:
+                        # 最終フォールバック: disabled属性を外してみる（フロント側のUIバグ回避）
+                        logger.warning(f"Worker {self.worker_id}: Submit button is disabled; trying to force-enable")
+                        try:
+                            await submit_element.evaluate(
+                                "el => { el.disabled = false; el.removeAttribute('disabled'); el.classList.remove('disabled'); }"
+                            )
+                            await asyncio.sleep(0.2)
+                        except Exception as e:
+                            logger.debug(f"Worker {self.worker_id}: Force-enable evaluate failed: {e}")
                     # 再確認
                     try:
                         if not await submit_element.is_enabled():
                             logger.warning(f"Worker {self.worker_id}: Submit button still disabled; aborting click")
+                            # disabled で送信不能な場合、Bot保護を確認（reCAPTCHA等）
+                            try:
+                                is_bot, bot_type = await self.bot_detector.detect_bot_protection(dom_ctx)
+                            except Exception:
+                                is_bot, bot_type = (False, None)
                             return {
                                 "success": False,
                                 "error_message": "Submit button disabled",
                                 "has_url_change": False,
                                 "page_content": "",
-                                "submit_selector": used_selector
+                                "submit_selector": used_selector,
+                                "bot_protection_detected": bool(is_bot)
                             }
                     except Exception:
                         logger.warning(f"Worker {self.worker_id}: Submit button state re-check failed; aborting")
@@ -938,18 +955,34 @@ class IsolatedFormWorker:
             except Exception:
                 pass
 
+            # クリック直前の状態安定化（race条件緩和）
+            try:
+                await dom_ctx.wait_for_function(
+                    "(sel) => { const el = document.querySelector(sel); return !!el && !el.disabled && el.offsetParent !== null; }",
+                    arg=used_selector,
+                    timeout=3000,
+                )
+            except Exception:
+                pass
+
             # フォーム送信実行
             try:
                 await submit_element.click()
                 logger.debug(f"Worker {self.worker_id}: Submit button click executed successfully")
             except Exception as click_error:
                 logger.error(f"Worker {self.worker_id}: Submit button click failed: {click_error}")
+                # クリック失敗時に Bot 保護を追加検査（UI/DOMベース）
+                try:
+                    is_bot, bot_type = await self.bot_detector.detect_bot_protection(dom_ctx)
+                except Exception:
+                    is_bot, bot_type = (False, None)
                 return {
                     "success": False,
                     "error_message": f"Submit click failed: {str(click_error)}",
                     "has_url_change": False,
                     "page_content": "",
-                    "submit_selector": used_selector
+                    "submit_selector": used_selector,
+                    "bot_protection_detected": bool(is_bot)
                 }
             
             # 確認ボタンの場合は確認ページ処理を実行

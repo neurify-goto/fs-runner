@@ -1096,6 +1096,67 @@ class FormSenderWorker:
         logger.error("Submit button not found with any selector")
         return None
 
+    async def _wait_until_clickable(self, selector: str, timeout_ms: int) -> bool:
+        """指定セレクタの要素が可視・有効になり、クリック可能になるまで待機する"""
+        import time
+        deadline = time.time() + (timeout_ms / 1000)
+        locator = self.page.locator(selector).first
+
+        # 要素がDOMに現れるまで待機
+        try:
+            await locator.wait_for(state="attached", timeout=timeout_ms)
+        except Exception:
+            return False
+
+        while time.time() < deadline:
+            try:
+                await locator.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            try:
+                visible = await locator.is_visible()
+                enabled = await locator.is_enabled()
+                # 一部サイトは disabled 属性のトグルで管理しているため属性も確認
+                try:
+                    has_disabled_attr = bool(await locator.get_attribute("disabled"))
+                except Exception:
+                    has_disabled_attr = False
+
+                if visible and enabled and not has_disabled_attr:
+                    return True
+            except Exception:
+                # 存在しない/取得失敗 → 短い待機後に再試行
+                pass
+            await asyncio.sleep(0.2)
+        return False
+
+    async def _wait_until_element_clickable(self, element, timeout_ms: int) -> bool:
+        """ElementHandleがクリック可能になるまで待機する（可視・有効・disabled属性なし）"""
+        import time
+        deadline = time.time() + (timeout_ms / 1000)
+        try:
+            await element.wait_for_element_state("visible", timeout=timeout_ms)
+        except Exception:
+            return False
+        while time.time() < deadline:
+            try:
+                try:
+                    await element.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                visible = await element.is_visible()
+                enabled = await element.is_enabled()
+                try:
+                    has_disabled_attr = bool(await element.get_attribute("disabled"))
+                except Exception:
+                    has_disabled_attr = False
+                if visible and enabled and not has_disabled_attr:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
+        return False
+
     def _setup_response_listener(self, pre_submit_url: str) -> ResponseDataType:
         """HTTPレスポンス監視の設定"""
         response_data = {
@@ -1147,6 +1208,14 @@ class FormSenderWorker:
             button_type = await self._determine_button_type(button_element_text)
 
             logger.info(f"Button element text: '{button_element_text}', button_type: {button_type}")
+
+            # 事前にクリック可能になるまで待機（disabled解除待ち等）
+            try:
+                clickable = await self._wait_until_clickable(final_selector, max(click_timeout, 5000))
+                if not clickable:
+                    logger.warning("Submit button did not become clickable within timeout; trying click anyway")
+            except Exception as _:
+                pass
 
             # ボタン押下（JavaScript実行フォールバック付き）
             success = await self._execute_submit_button_click(final_selector, click_timeout)
@@ -2914,6 +2983,10 @@ class FormSenderWorker:
                 logger.info("Redirect detected, waiting for confirmation page load")
                 timeout_config = _get_timeout_config()
                 await asyncio.sleep(timeout_config.get("page_load_wait", 3000) / 1000)  # ページ読み込み待機
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=timeout_config.get("page_load", 15000))
+                except Exception:
+                    pass
                 return await self._find_and_submit_final_button()
 
             elif status_code and (400 <= status_code < 500 or 500 <= status_code < 600):
@@ -2935,6 +3008,10 @@ class FormSenderWorker:
             # Ajax処理の完了を待つ
             timeout_config = _get_timeout_config()
             await asyncio.sleep(timeout_config.get("ajax_processing_wait", 3000) / 1000)
+            try:
+                await self.page.wait_for_load_state("networkidle", timeout=timeout_config.get("page_load", 15000))
+            except Exception:
+                pass
 
             # 確認ボタン同一性チェック
             try:
@@ -3410,6 +3487,15 @@ class FormSenderWorker:
     async def _execute_submit_button_click(self, selector: str, timeout_ms: int) -> bool:
         """送信ボタンの確実なクリック（JavaScript実行フォールバック付き）"""
         try:
+            # クリック前にスクロール/可視化
+            try:
+                loc = self.page.locator(selector).first
+                await loc.scroll_into_view_if_needed()
+                # 一瞬待ってレイアウト安定を待つ
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
+
             # Phase 1: 通常のPlaywright操作を試行
             await asyncio.wait_for(self.page.click(selector), timeout=timeout_ms / 1000)
             logger.debug(f"Submit button click successful (standard method): {selector}")
@@ -3440,6 +3526,12 @@ class FormSenderWorker:
     async def _execute_element_click(self, element, description: str) -> bool:
         """要素の確実なクリック（JavaScript実行フォールバック付き）"""
         try:
+            # クリック前にスクロール/可視化 + enable待ち
+            try:
+                await self._wait_until_element_clickable(element, self.timeout_settings.get("click_timeout", 5000))
+            except Exception:
+                pass
+
             # Phase 1: 通常のPlaywright操作を試行
             await element.click()
             logger.debug(f"Element click successful (standard method): {description}")
