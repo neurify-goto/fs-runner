@@ -1,6 +1,6 @@
 # Form Sender スループット拡張 設計計画（GAS直キュー作成＋日次リセット＋自走ワーカー）
 
-最終更新: 2025-09-06 (JST)
+最終更新: 2025-09-08 (JST)
 
 この文書は、現行の Form Sender（GAS→GitHub Actions→Python）を高スループット化するための、実装計画の全体像を示す。ここに書かれた内容だけで、目標・仕様・実装タスク・移行手順・検証方法まで一貫して参照できる。
 
@@ -136,7 +136,7 @@ Supabase: send_queue（当日分のみ）
 ### 6.1 新エントリ: `src/form_sender_runner.py`
 - 役割: 1プロセス=1ワーカー×4 プロセスで、**各ワーカーが自走**して以下を繰り返す。
   1) 営業時間ゲート（`send_days_of_week`, `send_start_time`, `send_end_time`）と日次上限チェック。
-  2) `claim_next_batch(..., limit=1〜2)` で原子的専有。
+  2) `claim_next_batch(..., limit=1)` で原子的専有。
   3) `IsolatedFormWorker` を用いてフォーム送信（RuleBasedAnalyzer+SuccessJudge）。
   4) `submissions` へINSERT（JST）、`mark_done(success/failed)`。
   5) キュー枯渇時は指数バックオフ（最大60秒）。
@@ -152,9 +152,9 @@ Supabase: send_queue（当日分のみ）
 - GAS に Supabase クライアント（`SupabaseClient.gs` 追加）を実装し、RPC を直接呼び出す。
 - 手順は 3.2 の RPC に準拠（抽出・優先度付与・NG適用・上限投入）。
 
-### 6.3 既存コードの扱い
-- 既存の `form_sender_worker.py`（オーケストレーター＋キュー）は**残置**（段階移行・ロールバック用）。
-- 新Runnerが安定後、段階的に旧経路を停止し、冗長部を削除。
+### 6.3 既存コードの扱い（更新）
+- 2025-09-08 時点で旧 `form_sender_worker.py` と関連オーケストレーター/DBモジュールは削除済みです。
+- ロールバック手順は廃止し、Runner を単一経路として運用します。
 
 ---
 
