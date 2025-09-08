@@ -192,15 +192,26 @@ class FormInputHandler:
             return False
 
     async def _fill_checkbox(self, element: ElementHandle, value: str) -> bool:
-        """Checkbox要素の選択"""
+        """Checkbox要素の選択（可視化・短い待機・JSフォールバック強化）"""
         should_be_checked = str(value).lower() not in ['false', '0', '', 'no']
+        # 事前に可視・安定化
         try:
-            # 1) 素直にPlaywrightのensure動作
+            try:
+                await element.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            try:
+                await element.wait_for_element_state('visible', timeout=3000)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            # 1) Playwright の操作（タイムアウト短縮）
             if should_be_checked:
-                await element.check()
+                await element.check(timeout=5000)
             else:
-                await element.uncheck()
-            # 状態確認
+                await element.uncheck(timeout=5000)
             if (await element.is_checked()) == should_be_checked:
                 return True
         except Exception as e:
@@ -213,6 +224,10 @@ class FormInputHandler:
                 label_selector = f'label[for="{el_id}"]'
                 label = await self.page.query_selector(label_selector)
                 if label:
+                    try:
+                        await label.scroll_into_view_if_needed()
+                    except Exception:
+                        pass
                     await label.click()
                     if (await element.is_checked()) == should_be_checked:
                         return True
@@ -223,6 +238,7 @@ class FormInputHandler:
         try:
             parent_is_label = await element.evaluate("el => el.closest('label') !== null")
             if parent_is_label:
+                await element.evaluate("el => el.closest('label').scrollIntoView({block:'center'})")
                 await element.evaluate("el => el.closest('label').click()")
                 if (await element.is_checked()) == should_be_checked:
                     return True

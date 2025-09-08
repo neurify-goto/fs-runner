@@ -919,12 +919,18 @@ class IsolatedFormWorker:
                     try:
                         if not await submit_element.is_enabled():
                             logger.warning(f"Worker {self.worker_id}: Submit button still disabled; aborting click")
+                            # disabled で送信不能な場合、Bot保護を確認（reCAPTCHA等）
+                            try:
+                                is_bot, bot_type = await self.bot_detector.detect_bot_protection(dom_ctx)
+                            except Exception:
+                                is_bot, bot_type = (False, None)
                             return {
                                 "success": False,
                                 "error_message": "Submit button disabled",
                                 "has_url_change": False,
                                 "page_content": "",
-                                "submit_selector": used_selector
+                                "submit_selector": used_selector,
+                                "bot_protection_detected": bool(is_bot)
                             }
                     except Exception:
                         logger.warning(f"Worker {self.worker_id}: Submit button state re-check failed; aborting")
@@ -944,12 +950,18 @@ class IsolatedFormWorker:
                 logger.debug(f"Worker {self.worker_id}: Submit button click executed successfully")
             except Exception as click_error:
                 logger.error(f"Worker {self.worker_id}: Submit button click failed: {click_error}")
+                # クリック失敗時に Bot 保護を追加検査（UI/DOMベース）
+                try:
+                    is_bot, bot_type = await self.bot_detector.detect_bot_protection(dom_ctx)
+                except Exception:
+                    is_bot, bot_type = (False, None)
                 return {
                     "success": False,
                     "error_message": f"Submit click failed: {str(click_error)}",
                     "has_url_change": False,
                     "page_content": "",
-                    "submit_selector": used_selector
+                    "submit_selector": used_selector,
+                    "bot_protection_detected": bool(is_bot)
                 }
             
             # 確認ボタンの場合は確認ページ処理を実行

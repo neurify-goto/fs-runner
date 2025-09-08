@@ -450,7 +450,9 @@ class UnmappedElementHandler:
                 ide= (info.get("id","") or "").lower()
                 cls= (info.get("class","") or "").lower()
                 blob = nm + " " + ide + " " + cls
-                if ("tel" not in blob) and ("phone" not in blob):
+                # 日本語の『電話番号』表記も許容
+                has_phone_token = ("tel" in blob) or ("phone" in blob) or ("電話" in blob)
+                if not has_phone_token:
                     continue
                 # 末尾の数字を抽出
                 import re
@@ -459,17 +461,19 @@ class UnmappedElementHandler:
                 for s in (nm, ide, cls):
                     if not s:
                         continue
-                    m = re.search(r"(?:tel|phone)[^\d]*([123])(?!.*\d)", s)
+                    m = re.search(r"(?:tel|phone|電話)[^\d]*([0123])(?!.*\d)", s)
                     if m:
                         break
                 # フォールバック: 単純に末尾の数字を使用
                 if not m:
                     m = re.search(r"(\d)(?!.*\d)$", (nm or ide or cls))
                 if m:
-                    idx = int(m.group(1))
+                    idx_raw = int(m.group(1))
+                    # 0始まりのケース（[0]/[1]/[2]）を 1..3 に補正
+                    idx = idx_raw + 1 if idx_raw in (0,1,2) else idx_raw
                 else:
                     # さらにフォールバック: 'tel' / 'phone' を含むが数字なし → 1 とみなす
-                    if 'tel' in blob or 'phone' in blob:
+                    if has_phone_token:
                         idx = 1
                     else:
                         continue

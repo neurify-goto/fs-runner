@@ -166,7 +166,21 @@ class ErrorClassifier:
     ]
 
     # 追加: その他代表的エラー
-    CAPTCHA_TEXT_PATTERNS: List[Pattern[str]] = [re.compile(r, re.IGNORECASE) for r in [r"captcha", r"recaptcha", r"私はロボットではありません"]]
+    CAPTCHA_TEXT_PATTERNS: List[Pattern[str]] = [
+        re.compile(r, re.IGNORECASE)
+        for r in [
+            r"captcha",
+            r"recaptcha",
+            r"私はロボットではありません",
+            # 追加: reCAPTCHA UI/DOMの代表パターン（英語文言が出ないケースも検知）
+            r"\brc-anchor(?:-[a-z0-9_-]+)?\b",   # .rc-anchor, .rc-anchor-pt など
+            r"\bg-recaptcha\b",                  # <div class="g-recaptcha" ...>
+            r"grecaptcha",                         # JS API オブジェクト/関数名
+            r"recaptcha/api2/anchor",              # iframe src の一部
+            r"recaptcha/api\.js",                 # スクリプトURLの一部
+            r"g-recaptcha-response"                # hidden/textarea の応答フィールド
+        ]
+    ]
     # CSRF は誤判定防止のため「token」単独では判定しない。エラー語と近接している場合のみ検出。
     CSRF_NEAR_ERROR_PATTERNS: List[Pattern[str]] = [
         # 英語: CSRF/XSRF/forgery/authenticity + エラー語（invalid/mismatch/expired/missing/failedなど）が近接
@@ -577,10 +591,13 @@ class ErrorClassifier:
                 if p.search(content):
                     return 'VALIDATION_FORMAT'
 
-            # reCAPTCHA/Cloudflare → BOT_DETECTED（概要語のみだが相対的に誤判定リスクは低い）
+            # reCAPTCHA/Cloudflare → BOT_DETECTED（UI/DOMパターンも含め広めに検知）
             for p in cls.CAPTCHA_TEXT_PATTERNS:
-                if p.search(content):
-                    return 'BOT_DETECTED'
+                try:
+                    if p.search(content):
+                        return 'BOT_DETECTED'
+                except Exception:
+                    continue
 
             # CSRF/トークン → CSRF_ERROR（近接条件を満たす場合のみ）
             for p in cls.CSRF_NEAR_ERROR_PATTERNS:
