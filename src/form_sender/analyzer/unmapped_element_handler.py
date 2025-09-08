@@ -441,6 +441,25 @@ class UnmappedElementHandler:
         handled: Dict[str, Dict[str, Any]] = {}
         try:
             # 1) 候補抽出（既存マッピングの有無に関わらず検出）
+            def _infer_phone_part_index(nm: str, ide: str, cls: str) -> Optional[int]:
+                import re
+                nm = (nm or '').lower(); ide = (ide or '').lower(); cls = (cls or '').lower()
+                blob = nm + ' ' + ide + ' ' + cls
+                if not (('tel' in blob) or ('phone' in blob) or ('電話' in blob)):
+                    return None
+                for s in (nm, ide, cls):
+                    if not s:
+                        continue
+                    m = re.search(r"(?:tel|phone|電話)[^\d]*([0123])(?!.*\d)", s)
+                    if m:
+                        raw = int(m.group(1))
+                        return (raw + 1) if raw in (0,1,2) else raw
+                tail = re.search(r"(\d)(?!.*\d)$", blob)
+                if tail:
+                    raw = int(tail.group(1))
+                    return (raw + 1) if raw in (0,1,2) else raw
+                return 1
+
             triples_all: Dict[int, Tuple[Locator, Dict[str, Any]]] = {}
             for el in text_inputs:
                 info = await self.element_scorer._get_element_info(el)
@@ -449,34 +468,9 @@ class UnmappedElementHandler:
                 nm = (info.get("name","") or "").lower()
                 ide= (info.get("id","") or "").lower()
                 cls= (info.get("class","") or "").lower()
-                blob = nm + " " + ide + " " + cls
-                # 日本語の『電話番号』表記も許容
-                has_phone_token = ("tel" in blob) or ("phone" in blob) or ("電話" in blob)
-                if not has_phone_token:
+                idx = _infer_phone_part_index(nm, ide, cls)
+                if idx is None:
                     continue
-                # 末尾の数字を抽出
-                import re
-                # 要素名/ID/クラスの中で tel/phone に続く末尾数字を抽出（末尾でなくても許容）
-                m = None
-                for s in (nm, ide, cls):
-                    if not s:
-                        continue
-                    m = re.search(r"(?:tel|phone|電話)[^\d]*([0123])(?!.*\d)", s)
-                    if m:
-                        break
-                # フォールバック: 単純に末尾の数字を使用
-                if not m:
-                    m = re.search(r"(\d)(?!.*\d)$", (nm or ide or cls))
-                if m:
-                    idx_raw = int(m.group(1))
-                    # 0始まりのケース（[0]/[1]/[2]）を 1..3 に補正
-                    idx = idx_raw + 1 if idx_raw in (0,1,2) else idx_raw
-                else:
-                    # さらにフォールバック: 'tel' / 'phone' を含むが数字なし → 1 とみなす
-                    if has_phone_token:
-                        idx = 1
-                    else:
-                        continue
                 if idx in (1,2,3):
                     triples_all[idx] = (el, info)
             if not all(k in triples_all for k in (1,2,3)):

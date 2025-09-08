@@ -908,13 +908,24 @@ class IsolatedFormWorker:
             # 送信ボタンが無効のままなら送信を中止
             try:
                 if submit_element and not await submit_element.is_enabled():
-                    # 最終フォールバック: disabled属性を外してみる（フロント側のUIバグ回避）
-                    logger.warning(f"Worker {self.worker_id}: Submit button is disabled; trying to force-enable")
+                    # reCAPTCHA などの Bot 保護がある場合は強制有効化を行わない
+                    guard_present = False
                     try:
-                        await submit_element.evaluate("el => { el.disabled = false; el.removeAttribute('disabled'); el.classList.remove('disabled'); }")
-                        await asyncio.sleep(0.2)
-                    except Exception as e:
-                        logger.debug(f"Worker {self.worker_id}: Force-enable evaluate failed: {e}")
+                        guard_present = bool(
+                            await dom_ctx.query_selector('.g-recaptcha, .grecaptcha-badge, [name="g-recaptcha-response"]')
+                        )
+                    except Exception:
+                        guard_present = False
+                    if not guard_present:
+                        # 最終フォールバック: disabled属性を外してみる（フロント側のUIバグ回避）
+                        logger.warning(f"Worker {self.worker_id}: Submit button is disabled; trying to force-enable")
+                        try:
+                            await submit_element.evaluate(
+                                "el => { el.disabled = false; el.removeAttribute('disabled'); el.classList.remove('disabled'); }"
+                            )
+                            await asyncio.sleep(0.2)
+                        except Exception as e:
+                            logger.debug(f"Worker {self.worker_id}: Force-enable evaluate failed: {e}")
                     # 再確認
                     try:
                         if not await submit_element.is_enabled():
@@ -941,6 +952,16 @@ class IsolatedFormWorker:
                             "page_content": "",
                             "submit_selector": used_selector
                         }
+            except Exception:
+                pass
+
+            # クリック直前の状態安定化（race条件緩和）
+            try:
+                await dom_ctx.wait_for_function(
+                    "(sel) => { const el = document.querySelector(sel); return !!el && !el.disabled && el.offsetParent !== null; }",
+                    arg=used_selector,
+                    timeout=3000,
+                )
             except Exception:
                 pass
 

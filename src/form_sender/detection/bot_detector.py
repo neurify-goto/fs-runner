@@ -79,19 +79,23 @@ class BotDetectionSystem:
     async def _detect_strict_recaptcha(page: Page) -> Tuple[bool, Optional[str]]:
         """reCAPTCHA検出（厳格→スコアリング緩和の2段構え）"""
         try:
-            # 厳格: v2 visible（anchor iframe + .g-recaptcha 可視）
+            # 厳格: v2 visible（anchor iframe + .g-recaptcha 可視）- DOM往復削減のため evaluate に集約
             try:
-                recaptcha_iframe = await page.locator('iframe[src*="recaptcha/api2/anchor"]').count()
+                rec = await page.evaluate(
+                    "() => ({\n"
+                    "  anchor: document.querySelectorAll('iframe[src*="recaptcha/api2/anchor"]').length,\n"
+                    "  sitekey: document.querySelectorAll('.g-recaptcha[data-sitekey]').length,\n"
+                    "  visible: !!document.querySelector('.g-recaptcha') && (function(el){\n"
+                    "    const s = getComputedStyle(el);\n"
+                    "    return s && s.display !== 'none' && s.visibility !== 'hidden';\n"
+                    "  })(document.querySelector('.g-recaptcha'))\n"
+                    "})"
+                )
             except Exception:
-                recaptcha_iframe = 0
-            try:
-                g_recaptcha_cnt = await page.locator('.g-recaptcha[data-sitekey]').count()
-            except Exception:
-                g_recaptcha_cnt = 0
-            try:
-                visible_recaptcha = await page.locator('.g-recaptcha').is_visible()
-            except Exception:
-                visible_recaptcha = False
+                rec = {"anchor": 0, "sitekey": 0, "visible": False}
+            recaptcha_iframe = int(rec.get("anchor", 0) or 0)
+            g_recaptcha_cnt = int(rec.get("sitekey", 0) or 0)
+            visible_recaptcha = bool(rec.get("visible", False))
 
             if recaptcha_iframe > 0 and g_recaptcha_cnt > 0 and visible_recaptcha:
                 # v2可視が明確
@@ -101,23 +105,21 @@ class BotDetectionSystem:
             signals = 0
             # script / iframe 存在
             try:
-                if await page.locator('script[src*="recaptcha/api.js"]').count() > 0:
+                counts = await page.evaluate(
+                    "() => ({\n"
+                    "  s: document.querySelectorAll('script[src*="recaptcha/api.js"]').length,\n"
+                    "  i: document.querySelectorAll('iframe[src*="recaptcha"]').length,\n"
+                    "  g: document.querySelectorAll('[name="g-recaptcha-response"]').length,\n"
+                    "  b: document.querySelectorAll('.grecaptcha-badge, .g-recaptcha').length\n"
+                    "})"
+                )
+                if int(counts.get('s', 0) or 0) > 0:
                     signals += 1
-            except Exception:
-                pass
-            try:
-                if recaptcha_iframe > 0 or await page.locator('iframe[src*="recaptcha"]').count() > 0:
+                if recaptcha_iframe > 0 or int(counts.get('i', 0) or 0) > 0:
                     signals += 1
-            except Exception:
-                pass
-            # DOM要素（同一オリジンに現れるフィールド）
-            try:
-                if await page.locator('[name="g-recaptcha-response"]').count() > 0:
+                if int(counts.get('g', 0) or 0) > 0:
                     signals += 1
-            except Exception:
-                pass
-            try:
-                if await page.locator('.grecaptcha-badge, .g-recaptcha').count() > 0:
+                if int(counts.get('b', 0) or 0) > 0:
                     signals += 1
             except Exception:
                 pass

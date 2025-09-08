@@ -596,7 +596,11 @@ class ErrorClassifier:
                 try:
                     if p.search(content):
                         return 'BOT_DETECTED'
-                except Exception:
+                except Exception as _re_err:
+                    # 正規表現エラー等はDEBUGに記録（本番は沈黙）
+                    logging.getLogger(__name__).debug(
+                        f"CAPTCHA pattern check error: {type(_re_err).__name__}: {_re_err}"
+                    )
                     continue
 
             # CSRF/トークン → CSRF_ERROR（近接条件を満たす場合のみ）
