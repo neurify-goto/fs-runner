@@ -394,12 +394,23 @@ class InputValueAssigner:
                     "street2",
                     "street",
                 ]
+                # None 安全化ユーティリティ
+                def _nz(x: Any) -> str:
+                    try:
+                        return "" if x is None else str(x)
+                    except Exception:
+                        return ""
+
                 if any(h.lower() in blob for h in city_hints):
-                    return (str(client.get("address_2", "")) + str(client.get("address_3", ""))).strip()
+                    a2 = _nz((client or {}).get("address_2"))
+                    a3 = _nz((client or {}).get("address_3"))
+                    composed = (a2 + a3).strip()
+                    return composed if composed else value
                 if any(h.lower() in blob for h in detail_hints):
-                    a4 = str(client.get("address_4", ""))
-                    a5 = str(client.get("address_5", ""))
-                    return (a4 + ("　" if a4 and a5 else "") + a5).strip()
+                    a4 = _nz((client or {}).get("address_4"))
+                    a5 = _nz((client or {}).get("address_5"))
+                    composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
+                    return composed if composed else value
             except Exception:
                 pass
 
