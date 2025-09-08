@@ -91,7 +91,12 @@ class RequiredRescue:
                         used_names_ids.add((nm, ide))
                         break
         except Exception as e:
-            logger.debug(f"Required postal rescue skipped: {e}")
+            # 例外種別のみを出力して詳細は抑制（機微情報の偶発ログを回避）
+            try:
+                et = type(e).__name__
+            except Exception:
+                et = "Exception"
+            logger.debug(f"Required postal rescue skipped: {et}")
         # 先行救済: name/id='email' の必須入力を確実に登録（確認欄は除外）
         try:
             if "メールアドレス" not in field_mapping:

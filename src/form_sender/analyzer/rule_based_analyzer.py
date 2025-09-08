@@ -137,6 +137,7 @@ class RuleBasedAnalyzer:
             "required_phone_boost": 200,
             # 追加: 設定化されたしきい値/トークン
             "email_fallback_min_score": 60,
+            "message_fallback_min_score": 65,
             "confirm_tokens": [
                 "confirm",
                 "confirmation",

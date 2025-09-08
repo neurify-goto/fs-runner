@@ -975,9 +975,7 @@ class FieldMapper:
                 best = (el, s, details, contexts)
 
         el, score, details, contexts = best
-        if el and score >= max(
-            65, int(self.settings.get("email_fallback_min_score", 60))
-        ):
+        if el and score >= int(self.settings.get("message_fallback_min_score", 65)):
             info = await self._create_enhanced_element_info(el, details, contexts)
             try:
                 info["source"] = "fallback"
@@ -1007,15 +1005,19 @@ class FieldMapper:
 
         patterns = self.field_patterns.get_pattern(target_field) or {}
         strict_tokens = {"メールアドレス", "メール", "email", "e-mail"}
-        confirm_tokens = {
-            "confirm",
-            "confirmation",
-            "確認",
-            "確認用",
-            "再入力",
-            "もう一度",
-            "再度",
-        }
+        # 設定の確認トークンを利用（マジックワード抑制）
+        confirm_tokens = set(
+            [t.lower() for t in self.settings.get("confirm_tokens", [])]
+            or [
+                "confirm",
+                "confirmation",
+                "確認",
+                "確認用",
+                "再入力",
+                "もう一度",
+                "再度",
+            ]
+        )
 
         candidates = []
         # 優先: email_inputs、その後 text_inputs/other_inputs（type="mail" 等の独自型を含む）
@@ -1089,6 +1091,9 @@ class FieldMapper:
                     )
                     attr_ok = ("email" in blob or "mail" in blob or "@" in blob)
                     if not (label_ok or attr_ok):
+                        continue
+                    # 確認欄の強い語が dom_label に含まれるケースも除外
+                    if any(k in label_blob for k in confirm_tokens):
                         continue
                     # input[type=email] は基本的に候補に含める（上の確認用除外に既に通している）
                     # スコア計算
@@ -1424,7 +1429,10 @@ class FieldMapper:
         )
         if not text_inputs:
             return
-        confirm_tokens = {"confirm", "confirmation", "確認用", "再入力", "もう一度", "再度", "mail2", "re_mail", "re-email"}
+        # 設定の確認トークンを利用（mail2等は追加で補強）
+        confirm_tokens = set(
+            [t.lower() for t in self.settings.get("confirm_tokens", [])]
+        ) | {"mail2", "re_mail", "re-email", "re-mail", "email2"}
         patterns = self.field_patterns.get_pattern(target) or {}
         best = (None, 0, None, [])
         for el in text_inputs:
@@ -1484,10 +1492,8 @@ class FieldMapper:
             label_blob = (best_txt + " " + (dom_label or "").lower())
             if any(tok in label_blob for tok in ["メール", "e-mail", "email", "mail"]):
                 # 確認用の強いシグナルのみ除外（単なる『ご確認ください』等は除外対象にしない）
-                strict_confirms = [
-                    "confirm", "confirmation", "確認用", "再入力", "もう一度", "再度", "mail2", "re_mail", "re-email"
-                ]
-                if any(k in (best_txt + " " + blob) for k in strict_confirms):
+                full_blob = (best_txt + " " + blob + " " + label_blob)
+                if any(k in full_blob for k in confirm_tokens):
                     continue
                 # スコアに依存しない救済（最低限の安全チェックは上で実施済み）
                 details = {"element_info": ei, "total_score": 80}
