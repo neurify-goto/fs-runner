@@ -44,6 +44,7 @@ from ..utils.button_config import (
     get_fallback_selectors,
     get_exclude_keywords,
 )
+from ..utils.privacy_consent_handler import PrivacyConsentHandler
 from ..security.log_sanitizer import LogSanitizer
 
 
@@ -1396,6 +1397,17 @@ class IsolatedFormWorker:
             except Exception:
                 pass  # タイムアウトしても続行
             
+            # 確認ページ遷移後のDOMコンテキスト（iframeなど）を再特定
+            try:
+                target_frame = await self._select_target_frame_for_analysis()
+                if target_frame:
+                    self._dom_context = target_frame
+                else:
+                    self._dom_context = getattr(self, '_dom_context', self.page) or self.page
+            except Exception as e:
+                logger.debug(f"Worker {self.worker_id}: Confirmation frame reselect skipped: {e}")
+                self._dom_context = getattr(self, '_dom_context', self.page) or self.page
+            
             # 確認ページで最終送信ボタンを探して実行
             return await self._find_and_submit_final_button()
             
@@ -1410,100 +1422,214 @@ class IsolatedFormWorker:
             }
     
     async def _find_and_submit_final_button(self) -> Dict[str, Any]:
-        """確認ページで最終送信ボタンを見つけて実行"""
+        """確認ページで最終送信ボタンを見つけて実行（網羅強化＋同意ON＋フォールバック）"""
         try:
-            # 送信ボタンのキーワード（最終送信用）
-            final_submit_keywords = ["送信", "submit", "send", "投稿", "完了", "決定", "確定"]
-            
-            # 各キーワードで送信ボタンを検索
-            for keyword in final_submit_keywords:
+            dom_ctx = getattr(self, '_dom_context', self.page)
+            if not dom_ctx:
+                dom_ctx = self.page
+            pre_submit_url = dom_ctx.url if dom_ctx else (self.page.url if self.page else "")
+
+            # 送信ボタンのキーワード（設定 + デフォルト）
+            kw_cfg = get_button_keywords_config()
+            base_final = ["送信", "submit", "send", "投稿", "完了", "決定", "確定"]
+            final_keywords = list({*(kw_cfg.get("final", []) or []), *base_final})
+
+            # SuccessJudge 初期化（送信前の状態を記録）
+            from ..analyzer.success_judge import SuccessJudge
+            sj = SuccessJudge(dom_ctx)
+            try:
+                await sj.initialize_before_submission()
+            except Exception as e:
+                logger.warning(f"Worker {self.worker_id}: SuccessJudge pre-initialize failed on confirmation: {e}")
+
+            async def _find_button_by_keyword(keyword: str):
+                # 1) role=button (アクセシブルネーム)
+                try:
+                    loc = dom_ctx.get_by_role("button", name=re.compile(keyword, re.IGNORECASE))
+                    if await loc.count():
+                        el = loc.first
+                        if await el.is_visible():
+                            return el, f"role=button[name~={keyword}]"
+                except Exception:
+                    pass
+                # 2) button/input かつテキスト一致
                 selectors = [
-                    f'input[type="submit"][value*="{keyword}"]',
                     f'button[type="submit"]:has-text("{keyword}")',
                     f'button:has-text("{keyword}")',
-                    f'input[value*="{keyword}"]'
+                    f'input[type="submit"][value*="{keyword}"]',
+                    f'input[value*="{keyword}"]',
                 ]
-                
                 for selector in selectors:
                     try:
-                        dom_ctx = getattr(self, '_dom_context', self.page)
-                        final_element = await dom_ctx.query_selector(selector)
-                        if final_element and await final_element.is_visible() and await final_element.is_enabled():
-                            logger.debug(f"Worker {self.worker_id}: Found final submit button with selector: {selector}")
-                            
-                            # SuccessJudge 初期化（送信前の状態を記録）
-                            from ..analyzer.success_judge import SuccessJudge
-                            sj = SuccessJudge(dom_ctx)
-                            try:
-                                await sj.initialize_before_submission()
-                            except Exception as e:
-                                logger.warning(f"Worker {self.worker_id}: SuccessJudge pre-initialize failed on confirmation: {e}")
-
-                            # 最終送信実行
-                            pre_submit_url = dom_ctx.url
-                            await final_element.click()
-                            
-                            # 送信結果の判定（SuccessJudgeに集約）
-                            await asyncio.sleep(3.0)
-                            try:
-                                await dom_ctx.wait_for_load_state('networkidle', timeout=10000)
-                            except Exception:
-                                pass
-
-                            try:
-                                sj_result = await sj.judge_submission_success(timeout=15)
-                                try:
-                                    page_content = await dom_ctx.content()
-                                except Exception:
-                                    page_content = ""
-                                return {
-                                    "success": bool(sj_result.get("success")),
-                                    "error_message": None if sj_result.get("success") else sj_result.get("message", "Submission verification failed"),
-                                    "has_url_change": pre_submit_url != self.page.url,
-                                    "page_content": page_content[:1000] if page_content else "",
-                                    "submit_selector": selector,
-                                    "bot_protection_detected": bool(sj_result.get('details', {}).get('bot_protection_detected', False)),
-                                    "judgment": sj_result,
-                                    "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
-                                    "original_url": pre_submit_url,
-                                }
-                            except Exception as e:
-                                logger.warning(f"Worker {self.worker_id}: SuccessJudge post-final failed: {e}")
-                                return {
-                                    "success": False,
-                                    "error_message": "Submission verification failed",
-                                    "has_url_change": pre_submit_url != self.page.url,
-                                    "page_content": "",
-                                    "submit_selector": selector,
-                                    "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
-                                    "original_url": pre_submit_url,
-                                }
-                            
+                        el = await dom_ctx.query_selector(selector)
+                        if el and await el.is_visible():
+                            return el, selector
                     except Exception:
                         continue
-            
-            # 最終送信ボタンが見つからない場合
-            logger.warning(f"Worker {self.worker_id}: No final submit button found on confirmation page")
-            return {
-                "success": False,
-                "error_message": "Final submit button not found on confirmation page",
-                "has_url_change": False,
-                "page_content": "",
-                "submit_selector": "",
-                "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
-                "original_url": pre_submit_url
-            }
-            
+                # 3) anchor/role/aria
+                selectors2 = [
+                    f'a[role="button"]:has-text("{keyword}")',
+                    f'[role="button"]:has-text("{keyword}")',
+                    f'a.button:has-text("{keyword}")',
+                    f'[aria-label*="{keyword}"]',
+                ]
+                for selector in selectors2:
+                    try:
+                        el = await dom_ctx.query_selector(selector)
+                        if el and await el.is_visible():
+                            return el, selector
+                    except Exception:
+                        continue
+                # 4) 画像ボタン/onclick
+                selectors3 = [
+                    f'input[type="image"][alt*="{keyword}"]',
+                    f'button[onclick*="submit"]:has-text("{keyword}")',
+                ]
+                for selector in selectors3:
+                    try:
+                        el = await dom_ctx.query_selector(selector)
+                        if el and await el.is_visible():
+                            return el, selector
+                    except Exception:
+                        continue
+                return None, None
+
+            found = None
+            used_selector = ""
+            for kw in final_keywords:
+                el, sel = await _find_button_by_keyword(kw)
+                if el:
+                    found = el
+                    used_selector = sel or ""
+                    break
+
+            if not found:
+                logger.warning(f"Worker {self.worker_id}: No final submit button found on confirmation page")
+                return {
+                    "success": False,
+                    "error_message": "Final submit button not found on confirmation page",
+                    "has_url_change": False,
+                    "page_content": "",
+                    "submit_selector": "",
+                    "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
+                    "original_url": pre_submit_url,
+                }
+
+            # 同意チェック（送信ボタン近傍）
+            try:
+                await PrivacyConsentHandler.ensure_near_button(dom_ctx, found, context_hint="final-submit")
+            except Exception as _consent_err:
+                logger.debug(f"Worker {self.worker_id}: Privacy consent ensure near final failed: {_consent_err}")
+
+            # クリック実行フォールバック
+            async def _click_with_fallback(el):
+                try:
+                    await el.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                try:
+                    if await el.is_enabled():
+                        await el.click()
+                        return True
+                except Exception:
+                    pass
+                try:
+                    await el.evaluate("el => el.click()")
+                    return True
+                except Exception:
+                    pass
+                try:
+                    await el.evaluate("el => { const f = el.closest('form'); if (f && f.requestSubmit) f.requestSubmit(el); else if (f) f.submit(); }")
+                    return True
+                except Exception:
+                    pass
+                try:
+                    if self.page:
+                        await el.focus()
+                        await self.page.keyboard.press("Enter")
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            # 確認ダイアログを自動承認
+            try:
+                async def _on_dialog(d):
+                    try:
+                        await d.accept()
+                    except Exception:
+                        pass
+                self.page.once("dialog", _on_dialog)
+            except Exception:
+                pass
+
+            clicked = await _click_with_fallback(found)
+            if not clicked:
+                return {
+                    "success": False,
+                    "error_message": "Final submit click failed",
+                    "has_url_change": False,
+                    "page_content": "",
+                    "submit_selector": used_selector,
+                    "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
+                    "original_url": pre_submit_url,
+                }
+
+            # 送信後待機（余裕値は設定から）
+            extra_ms = 2000
+            try:
+                extra_ms = int(self.config.get("worker_config", {}).get("final_submit", {}).get("confirmation_extra_wait_ms", 2000))
+            except Exception:
+                extra_ms = 2000
+            await asyncio.sleep(3.0 + max(0, extra_ms) / 1000.0)
+            try:
+                await dom_ctx.wait_for_load_state('networkidle', timeout=12000)
+            except Exception:
+                pass
+
+            try:
+                sj_result = await sj.judge_submission_success(timeout=20)
+                try:
+                    page_content = await dom_ctx.content()
+                except Exception:
+                    page_content = ""
+                return {
+                    "success": bool(sj_result.get("success")),
+                    "error_message": None if sj_result.get("success") else sj_result.get("message", "Submission verification failed"),
+                    "has_url_change": pre_submit_url != (dom_ctx.url if hasattr(dom_ctx, 'url') else (self.page.url if self.page else pre_submit_url)),
+                    "page_content": page_content[:1000] if page_content else "",
+                    "submit_selector": used_selector,
+                    "bot_protection_detected": bool(sj_result.get('details', {}).get('bot_protection_detected', False)),
+                    "judgment": sj_result,
+                    "final_url": (dom_ctx.url if hasattr(dom_ctx, 'url') else (self.page.url if self.page else "")),
+                    "original_url": pre_submit_url,
+                }
+            except Exception as e:
+                logger.warning(f"Worker {self.worker_id}: SuccessJudge post-final failed: {e}")
+                return {
+                    "success": False,
+                    "error_message": "Submission verification failed",
+                    "has_url_change": pre_submit_url != (dom_ctx.url if hasattr(dom_ctx, 'url') else (self.page.url if self.page else pre_submit_url)),
+                    "page_content": "",
+                    "submit_selector": used_selector,
+                    "final_url": (dom_ctx.url if hasattr(dom_ctx, 'url') else (self.page.url if self.page else "")),
+                    "original_url": pre_submit_url,
+                }
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Error finding final submit button: {e}")
+            try:
+                dom_ctx = getattr(self, '_dom_context', self.page)
+                final_url = dom_ctx.url if dom_ctx else (self.page.url if self.page else "")
+            except Exception:
+                final_url = self.page.url if hasattr(self, 'page') and self.page else ""
             return {
                 "success": False,
                 "error_message": f"Final button search error: {str(e)}",
                 "has_url_change": False,
                 "page_content": "",
                 "submit_selector": "",
-                "final_url": self.page.url if hasattr(self, 'page') and self.page else "",
-                "original_url": pre_submit_url
+                "final_url": final_url,
+                "original_url": pre_submit_url if 'pre_submit_url' in locals() else "",
             }
     
     # _analyze_final_submission_result: SuccessJudgeでの統一判定に置き換え済み（削除）

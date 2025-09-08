@@ -151,6 +151,10 @@
     "requeue_interval_seconds": 300,
     "requeue_stale_minutes": 15
   },
+  "final_submit": {
+    "confirmation_extra_wait_ms": 2000,
+    "_comment": "確認ページでの最終送信後に余裕を持って待機する追加ミリ秒（描画・遷移の安定化）"
+  },
   "_comment_form_finder": "Form-Finder用マルチプロセス設定（軽量フォーム探索処理に最適化）",
   "_comment_form_finder_priority": "設定優先順位: form_finder_multi_process専用設定を使用、フォールバックは旧multi_process設定",
   "form_finder_multi_process": {
