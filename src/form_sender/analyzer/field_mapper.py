@@ -335,11 +335,19 @@ class FieldMapper:
         await self._salvage_strict_email_by_attr(
             classified_elements, field_mapping, used_elements
         )
+        # 強化救済: ラベル/見出しテキストにメール語が含まれる input[type=text]
+        await self._salvage_email_by_label_context(
+            classified_elements, field_mapping, used_elements
+        )
         await self._fallback_map_postal_field(
             classified_elements, field_mapping, used_elements
         )
         # 住所の取りこぼし救済（placeholder/ラベル/属性から強い住所シグナルを検出）
         await self._fallback_map_address_field(
+            classified_elements, field_mapping, used_elements
+        )
+        # 最終救済: 旧式テーブル行ラベルからメール欄を強制採用
+        await self._force_map_email_from_table_label(
             classified_elements, field_mapping, used_elements
         )
         # 追加フォールバック: 氏名/件名の取りこぼし救済（安全側の厳格条件）
@@ -967,9 +975,7 @@ class FieldMapper:
                 best = (el, s, details, contexts)
 
         el, score, details, contexts = best
-        if el and score >= max(
-            65, int(self.settings.get("email_fallback_min_score", 60))
-        ):
+        if el and score >= int(self.settings.get("message_fallback_min_score", 65)):
             info = await self._create_enhanced_element_info(el, details, contexts)
             try:
                 info["source"] = "fallback"
@@ -999,15 +1005,19 @@ class FieldMapper:
 
         patterns = self.field_patterns.get_pattern(target_field) or {}
         strict_tokens = {"メールアドレス", "メール", "email", "e-mail"}
-        confirm_tokens = {
-            "confirm",
-            "confirmation",
-            "確認",
-            "確認用",
-            "再入力",
-            "もう一度",
-            "再度",
-        }
+        # 設定の確認トークンを利用（マジックワード抑制）
+        confirm_tokens = set(
+            [t.lower() for t in self.settings.get("confirm_tokens", [])]
+            or [
+                "confirm",
+                "confirmation",
+                "確認",
+                "確認用",
+                "再入力",
+                "もう一度",
+                "再度",
+            ]
+        )
 
         candidates = []
         # 優先: email_inputs、その後 text_inputs/other_inputs（type="mail" 等の独自型を含む）
@@ -1047,18 +1057,54 @@ class FieldMapper:
                         self.context_text_extractor.get_best_context_text(contexts)
                         or ""
                     ).lower()
+                    # 追加: テーブル行の左セルテキストを直接取得（thがない旧式table対応）
+                    dom_label = ""
+                    try:
+                        dom_label = await el.evaluate(
+                            "(el) => {\n"
+                            "  const td = el.closest('td');\n"
+                            "  if (!td) return '';\n"
+                            "  const tr = td.closest('tr');\n"
+                            "  if (!tr) return '';\n"
+                            "  const cells = Array.from(tr.children);\n"
+                            "  const idx = cells.indexOf(td);\n"
+                            "  if (idx > 0) {\n"
+                            "    const prev = cells[idx-1];\n"
+                            "    if (prev && prev.tagName && prev.tagName.toLowerCase()==='td') {\n"
+                            "      return (prev.textContent||'').trim();\n"
+                            "    }\n"
+                            "  } else if (cells.length >= 2) {\n"
+                            "    const first = cells[0];\n"
+                            "    if (first && first !== td && first.tagName && first.tagName.toLowerCase()==='td') {\n"
+                            "      return (first.textContent||'').trim();\n"
+                            "    }\n"
+                            "  }\n"
+                            "  return '';\n"
+                            "}"
+                        )
+                    except Exception:
+                        dom_label = ""
                     # ラベルに強い語、または属性ヒント（email/mail/@）のいずれかがあれば候補にする
+                    label_blob = (best_txt + " " + (dom_label or "").lower())
                     label_ok = any(
-                        tok in best_txt for tok in [t.lower() for t in strict_tokens]
+                        tok.lower() in label_blob for tok in strict_tokens
                     )
                     attr_ok = ("email" in blob or "mail" in blob or "@" in blob)
                     if not (label_ok or attr_ok):
+                        continue
+                    # 確認欄の強い語が dom_label に含まれるケースも除外
+                    if any(k in label_blob for k in confirm_tokens):
                         continue
                     # input[type=email] は基本的に候補に含める（上の確認用除外に既に通している）
                     # スコア計算
                     score, details = await self.element_scorer.calculate_element_score(
                         el, patterns, target_field
                     )
+                    # ラベル強一致時の底上げ（旧式tableでスコアが出ないケースを救済）
+                    if label_ok and score < int(self.settings.get("email_fallback_min_score", 55)):
+                        details = details or {}
+                        details["total_score"] = int(self.settings.get("email_fallback_min_score", 55))
+                        score = int(self.settings.get("email_fallback_min_score", 55))
                     if score <= 0:
                         continue
                     candidates.append((score, el, details, contexts))
@@ -1070,8 +1116,8 @@ class FieldMapper:
 
         candidates.sort(key=lambda x: x[0], reverse=True)
         score, el, details, contexts = candidates[0]
-        # 設定化した安全側の閾値
-        if score >= int(self.settings.get("email_fallback_min_score", 60)):
+        # 設定化した安全側の閾値（旧式サイト対応でやや緩和）
+        if score >= int(self.settings.get("email_fallback_min_score", 55)):
             info = await self._create_enhanced_element_info(el, details, contexts)
             try:
                 info["source"] = "fallback"
@@ -1197,7 +1243,7 @@ class FieldMapper:
         # ひらがな/カナなど人名指標が強いものは除外
         name_like_excl = ["ふりがな", "フリガナ", "カナ", "ひらがな"]
 
-        best = (None, 0, None, [])
+        candidates: list[tuple] = []  # (el, score, details, contexts)
         # 注文番号/各種番号など、住所と無関係なトークンを含む要素は除外
         order_like_tokens = [
             "注文番号", "order number", "受注番号", "予約番号", "伝票番号", "受付番号", "お問い合わせ番号", "tracking number",
@@ -1259,29 +1305,67 @@ class FieldMapper:
             score, details = await self.element_scorer.calculate_element_score(
                 el, patterns, target_field
             )
-            if score > best[1]:
-                best = (el, score, details, contexts)
+            # スコアがゼロ/マイナスは除外
+            if score <= 0:
+                continue
+            candidates.append((el, score, details, contexts, attr_hit, ctx_hit))
 
-        el, score, details, contexts = best
-        if not el:
+        if not candidates:
             return
+        # スコア降順で安定ソート
+        candidates.sort(key=lambda t: t[1], reverse=True)
         # 住所の誤検出リスクを下げるため、しきい値をやや高めに設定
         threshold = max(70, int(self.settings.get("email_fallback_min_score", 60)) + 5)
-        if score >= threshold:
+
+        mapped_count = 0
+        supplement_idx = 1
+        for el, score, details, contexts, attr_hit, ctx_hit in candidates:
+            if score < threshold:
+                break
+            # 既に他で利用済みの要素はスキップ
+            if id(el) in used_elements:
+                continue
+            # 役割推定（市区町村/詳細）に使う簡易トークン
+            try:
+                ei = details.get("element_info", {}) or {}
+                blob = " ".join([
+                    (ei.get("name", "") or ""),
+                    (ei.get("id", "") or ""),
+                    (ei.get("class", "") or ""),
+                    (ei.get("placeholder", "") or ""),
+                    (self.context_text_extractor.get_best_context_text(contexts) or ""),
+                ]).lower()
+            except Exception:
+                blob = ""
+            city_tokens = ["市区町村", "市区", "郡", "市", "city", "区", "町", "town", "丁目"]
+            detail_tokens = [
+                "番地", "丁目", "建物", "building", "マンション", "ビル", "部屋", "room", "apt", "apartment", "号室"
+            ]
+
+            # フィールド名の決定: 先頭は『住所』、以降は『住所_補助N』
+            fname = target_field if (mapped_count == 0 and target_field not in field_mapping) else f"住所_補助{supplement_idx}"
+            # 過剰マッピング抑制: 2つまで（市区町村+詳細）
+            if fname.startswith("住所_補助") and supplement_idx > 2:
+                break
+
             info = await self._create_enhanced_element_info(el, details, contexts)
             try:
                 info["source"] = "fallback"
             except Exception:
                 pass
-            tmp = self._generate_temp_field_value(target_field)
-            if self.duplicate_prevention.register_field_assignment(
-                target_field, tmp, score, info
-            ):
-                field_mapping[target_field] = info
+            tmp = self._generate_temp_field_value(fname)
+            if self.duplicate_prevention.register_field_assignment(fname, tmp, score, info):
+                field_mapping[fname] = info
                 used_elements.add(id(el))
+                mapped_count += 1
+                if fname.startswith("住所_補助"):
+                    supplement_idx += 1
                 logger.info(
-                    f"Fallback mapped '{target_field}' via label/attr/placeholder (score {score})"
+                    f"Fallback mapped '{fname}' via label/attr/placeholder (score {score})"
                 )
+            # 2フィールドまでで十分
+            if mapped_count >= 2:
+                break
 
     async def _salvage_strict_email_by_attr(
         self, classified_elements, field_mapping, used_elements
@@ -1325,6 +1409,114 @@ class FieldMapper:
                         used_elements.add(id(el))
                         logger.info("Salvaged 'メールアドレス' by strict name/id match = email")
                         return
+
+    async def _salvage_email_by_label_context(
+        self, classified_elements, field_mapping, used_elements
+    ):
+        """ラベル/見出しテキストからメール欄を救済（厳格属性が使えない古いサイト向け）。
+
+        安全条件:
+        - まだ『メールアドレス』が未確定
+        - input[type=text] などのテキスト入力
+        - 近傍の強いラベルテキストに『メール』『e-mail』『email』等が含まれる
+        - 『確認』『再入力』等の確認用語は含まれない
+        """
+        target = "メールアドレス"
+        if target in field_mapping:
+            return
+        text_inputs = (classified_elements.get("text_inputs") or []) + (
+            classified_elements.get("other_inputs") or []
+        )
+        if not text_inputs:
+            return
+        # 設定の確認トークンを利用（mail2等は追加で補強）
+        confirm_tokens = set(
+            [t.lower() for t in (self.settings.get("confirm_tokens", []) or [])]
+        ) | {"mail2", "re_mail", "re-email", "re-mail", "email2", "確認用", "再入力", "もう一度", "再度"}
+        patterns = self.field_patterns.get_pattern(target) or {}
+        best = (None, 0, None, [])
+        for el in text_inputs:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                ei = {}
+            typ = (ei.get("type") or "").lower()
+            if typ not in ["", "text"]:
+                continue
+            # 直接DOMからテーブル行の左セルテキストを取得（thが無い旧式table対応）
+            dom_label = ""
+            try:
+                dom_label = await el.evaluate(
+                    "(el) => {\n"
+                    "  const td = el.closest('td');\n"
+                    "  if (!td) return '';\n"
+                    "  const tr = td.closest('tr');\n"
+                    "  if (!tr) return '';\n"
+                    "  const cells = Array.from(tr.children);\n"
+                    "  const idx = cells.indexOf(td);\n"
+                    "  if (idx > 0) {\n"
+                    "    const prev = cells[idx-1];\n"
+                    "    if (prev && prev.tagName && prev.tagName.toLowerCase()==='td') {\n"
+                    "      return (prev.textContent||'').trim();\n"
+                    "    }\n"
+                    "  } else if (cells.length >= 2) {\n"
+                    "    const first = cells[0];\n"
+                    "    if (first && first !== td && first.tagName && first.tagName.toLowerCase()==='td') {\n"
+                    "      return (first.textContent||'').trim();\n"
+                    "    }\n"
+                    "  }\n"
+                    "  return '';\n"
+                    "}"
+                )
+            except Exception:
+                dom_label = ""
+            el_bounds = (
+                self._element_bounds_cache.get(str(el))
+                if hasattr(self, "_element_bounds_cache")
+                else None
+            )
+            contexts = await self.context_text_extractor.extract_context_for_element(
+                el, el_bounds
+            )
+            best_txt = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
+            # 属性由来のテキスト
+            attr_context = " ".join(
+                [
+                    (ei.get("name") or ""),
+                    (ei.get("id") or ""),
+                    (ei.get("class") or ""),
+                    (ei.get("placeholder") or ""),
+                ]
+            ).lower()
+            label_context = (best_txt + " " + (dom_label or "").lower())
+            label_blob = label_context
+            if any(tok in label_blob for tok in ["メール", "e-mail", "email", "mail"]):
+                # 確認用の強いシグナルを除外（ラベル・属性双方を対象）
+                full_context = (label_context + " " + attr_context)
+                if any(k in full_context for k in confirm_tokens):
+                    continue
+                # スコアに依存しない救済（最低限の安全チェックは上で実施済み）
+                details = {"element_info": ei, "total_score": 80}
+                best = (el, 80, details, contexts)
+                break
+        el, score, details, contexts = best
+        if el:
+            info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info["source"] = "salvage_label"
+            except Exception:
+                pass
+            tmp = self._generate_temp_field_value(target)
+            if self.duplicate_prevention.register_field_assignment(
+                target, tmp, score, info
+            ):
+                field_mapping[target] = info
+                used_elements.add(id(el))
+                logger.info(
+                    f"Salvaged '{target}' by label context (score {score})"
+                )
 
     async def _fallback_map_fullname_field(
         self, classified_elements, field_mapping, used_elements
@@ -1471,6 +1663,56 @@ class FieldMapper:
                     f"Fallback mapped '{target}' via label/attr (score {score})"
                 )
             return
+
+    async def _force_map_email_from_table_label(
+        self, classified_elements, field_mapping, used_elements
+    ):
+        target = "メールアドレス"
+        if target in field_mapping:
+            return
+        text_inputs = classified_elements.get("text_inputs", []) or []
+        for el in text_inputs:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                ei = {}
+            if not ei.get("visible", True):
+                continue
+            typ = (ei.get("type") or "").lower()
+            if typ not in ["", "text"]:
+                continue
+            try:
+                label = await el.evaluate(
+                    "(el) => {\n"
+                    "  const td = el.closest('td'); if (!td) return '';\n"
+                    "  const tr = td.closest('tr'); if (!tr) return '';\n"
+                    "  const cells = Array.from(tr.children); const idx = cells.indexOf(td);\n"
+                    "  const pick = (node) => (node && node.tagName && node.tagName.toLowerCase()==='td') ? (node.textContent||'').trim() : '';\n"
+                    "  let t=''; if (idx>0) t = pick(cells[idx-1]); if (!t && cells.length>=2) t = pick(cells[0]); return t;\n"
+                    "}"
+                )
+            except Exception:
+                label = ""
+            lab = str(label or "").lower()
+            if not lab:
+                continue
+            if not any(tok in lab for tok in ["メール", "e-mail", "email", "mail"]):
+                continue
+            if any(k in lab for k in ["確認用", "再入力", "もう一度", "再度", "confirm", "confirmation", "mail2", "re-mail", "re_email", "re email"]):
+                continue
+            info = await self._create_enhanced_element_info(el, {"element_info": ei, "total_score": 80}, [])
+            try:
+                info["source"] = "force_table_label"
+            except Exception:
+                pass
+            tmp = self._generate_temp_field_value(target)
+            if self.duplicate_prevention.register_field_assignment(target, tmp, 80, info):
+                field_mapping[target] = info
+                used_elements.add(id(el))
+                logger.info("Force-mapped 'メールアドレス' from table row label (left TD)")
+                return
 
         # 追加救済: name/id が 'sub' / 'subject' / 'title' の要素を安全に採用（罠トークンは除外）
         try:

@@ -1711,13 +1711,74 @@ class FieldMappingAnalyzer:
             # 抽出されるコンテンツ
             form_contents = []
 
-            # 通常のform要素を抽出
+            # 通常のform要素: 最も妥当な1件のみを選択して抽出（複数フォーム混在ページ対策）
             if form_elements:
-                for i, form in enumerate(form_elements):
-                    form_contents.append(f"<!-- Form {i+1} -->\n{str(form)}\n")
-                logger.info(
-                    f"Extracted {len(form_elements)} standard form element(s) from page source"
-                )
+                def _score_form(f) -> float:
+                    # 要素内の統計
+                    email = len(f.select('input[type="email"], input[type="mail"]'))
+                    text = len(f.select('input[type="text"], input:not([type])'))
+                    textarea = len(f.select('textarea'))
+                    select = len(f.select('select'))
+                    search = len(f.select('input[type="search"]'))
+                    hidden = len(f.select('input[type="hidden"]'))
+                    submit = len(f.select('input[type="submit"], button[type="submit"], button'))
+                    # メタ/ボタン文言
+                    action = (f.get('action') or '').lower()
+                    klass = (f.get('class') or [])
+                    klass_txt = ' '.join(klass).lower() if isinstance(klass, list) else str(klass).lower()
+                    fid = (f.get('id') or '').lower()
+                    role = (f.get('role') or '').lower()
+                    btn_texts = ' '.join([
+                        (b.get_text(strip=True) or '') for b in f.select('button')
+                    ] + [
+                        (b.get('value') or '') for b in f.select('input[type="submit"]')
+                    ]).lower()
+
+                    attr_text = f"{action} {klass_txt} {fid} {role} {btn_texts}"
+                    # 連絡/問い合わせ/subscribe のキーワード
+                    contact_keywords = ['contact', 'inquiry', 'お問い合わせ', '問い合わせ', 'toiawase', 'お問合せ', '問合せ']
+                    negative_action_keywords = ['search', 'order', 'checkout', 'cart', 'unsubscribe', '解除', '配信停止', '退会', '削除']
+
+                    score = 0.0
+                    score += email * 3.0
+                    score += textarea * 3.5
+                    score += text * 1.5
+                    score += select * 1.0
+                    score += min(submit, 3) * 0.2
+                    score -= search * 2.0
+                    score -= min(hidden, 10) * 0.05
+                    if any(k in attr_text for k in contact_keywords):
+                        score += 5.0
+                    # subscribe は微加点、unsubscribe/解除は強い減点
+                    if 'subscribe' in attr_text or '登録' in attr_text:
+                        score += 2.0
+                    if any(k in attr_text for k in negative_action_keywords):
+                        score -= 6.0
+                    # 必須項目数（簡易）
+                    try:
+                        req = len(f.select('[required], [aria-required="true"], .wpcf7-validates-as-required'))
+                        score += min(5.0, req * 0.5)
+                    except Exception:
+                        pass
+                    return score
+
+                # ベストフォームを選択
+                best = None
+                best_score = -1e9
+                for form in form_elements:
+                    try:
+                        s = _score_form(form)
+                    except Exception:
+                        s = 0.0
+                    if s > best_score:
+                        best = form
+                        best_score = s
+
+                if best is not None:
+                    form_contents.append(f"<!-- Selected Form (score={best_score:.2f}) -->\n{str(best)}\n")
+                    logger.info(
+                        f"Extracted 1 selected form element (score={best_score:.2f}) from page source"
+                    )
 
             # HubSpotフォームコンテナを抽出
             hubspot_count = 0

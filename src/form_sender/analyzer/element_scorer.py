@@ -1891,7 +1891,8 @@ class ElementScorer:
                         if (cls.includes('require') || cls.includes('required')) return true;
                         if (txt === '*' || txt === '＊' || txt.includes('必須')) return true;
                         // 『※』は注記と紛れるため短文(<=10文字)に限定
-                        if (txt.includes('※') && txt.length <= 10) return true;
+                        // 『※』単独は注記の可能性が高いため無効。『※必須』等の組合せのみ許可
+                        if ((/※\s*必須/.test(txt)) || ['*','＊'].includes(txt.trim())) return true;
                         return false;
                       };
                       let p = el.parentElement; let depth = 0;
@@ -1972,7 +1973,8 @@ class ElementScorer:
                           if (!txt) return false;
                           if (MARKS.some(m => txt.includes(m))) return true;
                           // 『※』は短文（<=10文字）のときのみ必須と判断
-                          if (txt.includes('※') && txt.length <= 10) return true;
+                          // 『※必須』のみ必須扱い（※単独は無効）、スターは許容
+                          if ((/※\s*必須/.test(txt)) || ['*','＊'].includes(txt.trim())) return true;
                           return false;
                         } catch { return false; }
                       };
@@ -2012,7 +2014,8 @@ class ElementScorer:
                             const txt = (node.innerText || node.textContent || '').trim();
                             if (!txt) return false;
                             if (MARKS.some(m => txt.includes(m))) return true;
-                            if (txt.includes('※') && txt.length <= 10) return true;
+                            // 『※必須』のみ必須扱い（※単独は無効）、スターは許容
+                            if ((/※\s*必須/.test(txt)) || ['*','＊'].includes(txt.trim())) return true;
                             return false;
                           };
                           for (const id of ids) {
@@ -2106,7 +2109,7 @@ class ElementScorer:
                 return False
 
             # 同じグループ内の非入力要素から必須マーカーを探す
-            # 『※』は注記用途が多く誤検出の原因になるため除外
+            # 『※』単独は注記用途が多く誤検出の原因になるため除外（『※必須』等は Context 判定側で許容）
             required_markers = [
                 "*",
                 "必須",
@@ -2281,10 +2284,13 @@ class ElementScorer:
                 text = context.text or ""
                 if any(tok in text for tok in optional_markers):
                     return False
-                if context.source_type in strong_sources and any(
-                    marker in text for marker in required_markers
-                ):
-                    return True
+                if context.source_type in strong_sources:
+                    # 明示マーカー（必須、*, ＊ など）
+                    if any(marker in text for marker in required_markers):
+                        return True
+                    # 『※』単独は許容しない（※必須のみ許容）。スターは許容。
+                    if text.strip() in {"*", "＊"}:
+                        return True
 
             # 2) 次善: 近傍の兄弟/親ラベル系
             for context in contexts:
@@ -2307,6 +2313,39 @@ class ElementScorer:
                         _is_strict_required_text(text)
                         and pos in {"above", "left"}
                         and dist <= 50
+                    ):
+                        return True
+
+            # 4) 旧式テーブル: 左隣のTDに必須表示（※/必須）がある場合
+            try:
+                left_td_text = await element.evaluate(
+                    """
+                    el => {
+                      const td = el.closest('td');
+                      if (!td) return '';
+                      const tr = td.closest('tr');
+                      if (!tr) return '';
+                      const cells = Array.from(tr.children);
+                      const idx = cells.indexOf(td);
+                      const pick = (node) => (node && node.tagName && node.tagName.toLowerCase()==='td') ? (node.textContent||'').trim() : '';
+                      let t='';
+                      if (idx>0) t = pick(cells[idx-1]);
+                      if (!t && cells.length>=2) t = pick(cells[0]);
+                      return t;
+                    }
+                """
+                )
+            except Exception:
+                left_td_text = ""
+            if left_td_text:
+                lt = left_td_text.strip()
+                # 任意/optional が含まれる場合は除外
+                if not any(x in lt for x in ["任意", "optional"]):
+                    if (
+                        "必須" in lt
+                        or lt in {"*", "＊"}
+                        or "※必須" in lt or "※ 必須" in lt
+                        or "(必須)" in lt or "（必須）" in lt or "[必須]" in lt or "［必須］" in lt
                     ):
                         return True
 

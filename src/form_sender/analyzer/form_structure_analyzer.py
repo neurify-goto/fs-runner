@@ -202,22 +202,24 @@ class FormStructureAnalyzer:
                 try:
                     is_visible = await form.is_visible()
 
-                    # 単発evaluateでカウントと主要属性を一括取得
+                    # 単発evaluateでカウントと主要属性を一括取得（拡張）
                     try:
                         data = await form.evaluate(
                             """
                             f => ({
                                 email: f.querySelectorAll('input[type="email"], input[type="mail"]').length,
-                                text: f.querySelectorAll('input[type="text"]').length,
+                                text: f.querySelectorAll('input[type="text"], input[type="tel"], input[type="url"], input[type="number"], input:not([type])').length,
                                 textarea: f.querySelectorAll('textarea').length,
                                 select: f.querySelectorAll('select').length,
                                 search: f.querySelectorAll('input[type="search"]').length,
                                 hidden: f.querySelectorAll('input[type="hidden"]').length,
-                                submit: f.querySelectorAll('input[type="submit"]').length,
+                                submit: f.querySelectorAll('input[type="submit"], button[type="submit"], button').length,
                                 action: f.getAttribute('action') || '',
                                 klass: f.getAttribute('class') || '',
                                 fid: f.getAttribute('id') || '',
-                                role: f.getAttribute('role') || ''
+                                role: f.getAttribute('role') || '',
+                                reqCount: f.querySelectorAll('[required], [aria-required="true"], .wpcf7-validates-as-required').length,
+                                btnText: (f.querySelector('button, input[type="submit"]')?.innerText || f.querySelector('input[type="submit"]')?.value || '')
                             })
                             """
                         )
@@ -225,7 +227,8 @@ class FormStructureAnalyzer:
                         data = {
                             'email': 0, 'text': 0, 'textarea': 0, 'select': 0,
                             'search': 0, 'hidden': 0, 'submit': 0,
-                            'action': '', 'klass': '', 'fid': '', 'role': ''
+                            'action': '', 'klass': '', 'fid': '', 'role': '',
+                            'reqCount': 0, 'btnText': ''
                         }
 
                     cnt_email = data['email']
@@ -242,10 +245,10 @@ class FormStructureAnalyzer:
                     role = data['role']
                     attr_text = f"{action} {form_class} {form_id} {role}".lower()
 
-                    # スコア計算（問い合わせフォームらしさ重視）
+                    # スコア計算（問い合わせフォームらしさ重視 + 誤選択抑止）
                     score = 0.0
                     score += cnt_email * 3.0
-                    score += cnt_textarea * 3.0
+                    score += cnt_textarea * 3.5  # textarea の存在は問い合わせ性が高い
                     score += cnt_text * 1.5
                     score += cnt_select * 1.0
                     score += min(cnt_submit, 3) * 0.2  # 送信ボタンは軽めの加点
@@ -254,8 +257,19 @@ class FormStructureAnalyzer:
 
                     if any(k in attr_text for k in contact_keywords):
                         score += 5.0
-                    if any(k in attr_text for k in negative_action_keywords):
-                        score -= 2.0
+                    # subscribe/unsubscribe の扱いを明確化
+                    btn_text = (data.get('btnText','') or '').lower()
+                    meta = (attr_text + ' ' + btn_text)
+                    if any(k in meta for k in ['subscribe','登録']):
+                        score += 2.0
+                    neg_keys = negative_action_keywords + ['unsubscribe','解除','配信停止','退会','削除']
+                    if any(k in meta for k in neg_keys):
+                        score -= 6.0
+                    # 必須項目の多さ（問い合わせフォームらしさ）
+                    try:
+                        score += min(5.0, float(data.get('reqCount',0)) * 0.5)
+                    except Exception:
+                        pass
 
                     if not is_visible:
                         score *= 0.1

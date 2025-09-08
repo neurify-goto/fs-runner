@@ -463,6 +463,22 @@ class ContextTextExtractor:
                                 }}
                                 let headerText = rowHeader;
                                 if (!headerText && colHeaders.length > ci) headerText = colHeaders[ci] || '';
+                                // Fallback: common layout with td(label)+td(input)
+                                if (!headerText) {{
+                                    try {{
+                                        const prev = cells[ci-1];
+                                        if (prev && prev.tagName && prev.tagName.toLowerCase() === 'td') {{
+                                            const t = (prev.textContent||'').trim();
+                                            if (t) headerText = t;
+                                        }} else if (ci === 0 && cells.length >= 2) {{
+                                            const maybeLabel = cells[0];
+                                            if (maybeLabel && maybeLabel !== c && maybeLabel.tagName && maybeLabel.tagName.toLowerCase() === 'td') {{
+                                                const t = (maybeLabel.textContent||'').trim();
+                                                if (t) headerText = t;
+                                            }}
+                                        }}
+                                    }} catch (e) {{}}
+                                }}
                                 records.push({{ x:r.left, y:r.top, width:r.width, height:r.height, text: headerText }});
                             }}
                         }}

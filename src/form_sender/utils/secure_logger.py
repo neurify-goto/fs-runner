@@ -64,6 +64,14 @@ class SecureLogger:
             if not isinstance(message, str):
                 message = str(message)
             
+            # 追加: LogSanitizer を併用して URL/企業名などを強力にマスク（CIでは特に重要）
+            try:
+                from form_sender.security.log_sanitizer import LogSanitizer
+                sanitizer = LogSanitizer()
+                message = sanitizer.sanitize_string(message)
+            except Exception:
+                pass
+
             # 各パターンでマスキング
             sanitized = message
             for pattern, replacement in self.compiled_patterns:
