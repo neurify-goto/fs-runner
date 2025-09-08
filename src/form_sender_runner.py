@@ -118,6 +118,8 @@ def jst_utc_bounds(d: date):
     return (start_jst.astimezone(timezone.utc), end_jst.astimezone(timezone.utc))
 
 
+
+
 def _build_supabase_client():
     url = os.environ.get('SUPABASE_URL')
     key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -551,6 +553,8 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             pass
         return True
 
+    # 3-a) 営業禁止事前チェックはワーカー側に統合（同一ページアクセスで実施）
+
     task_data = {
         'task_id': f'run-{run_id}-{company_id}',
         'task_type': 'process_company',
@@ -596,12 +600,41 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         if isinstance(base_detail, dict):
             # 根拠の追記（安全にマージ）
             bd = dict(base_detail)
+            # 営業禁止検出はコードを強制上書き（Runner側エビデンスの整合性確保）
+            try:
+                if isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
+                    bd.update({
+                        'code': 'PROHIBITION_DETECTED',
+                        'category': 'BUSINESS',
+                        'retryable': False,
+                        'cooldown_seconds': 0,
+                        'confidence': 1.0,
+                    })
+            except Exception:
+                pass
             if evidence:
                 bd['evidence'] = evidence
             classify_detail = bd
         else:
             # フォールバック
-            classify_detail = {'code': error_type or 'UNKNOWN', 'category': 'SYSTEM', 'retryable': False, 'cooldown_seconds': 0, 'confidence': 0.0, 'evidence': evidence}
+            if isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
+                classify_detail = {
+                    'code': 'PROHIBITION_DETECTED',
+                    'category': 'BUSINESS',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 1.0,
+                    'evidence': evidence,
+                }
+            else:
+                classify_detail = {
+                    'code': error_type or 'UNKNOWN',
+                    'category': 'SYSTEM',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 0.0,
+                    'evidence': evidence,
+                }
     else:
         # 成功時も根拠を保存（偽陽性/陰性検証のため）
         conf = None

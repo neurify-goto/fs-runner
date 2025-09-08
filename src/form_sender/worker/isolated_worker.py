@@ -645,6 +645,7 @@ class IsolatedFormWorker:
             target_frame = await self._select_target_frame_for_analysis()
             # Analyzerと入力・送信はいずれも同一DOMコンテキストで実行する（iframe対応）
             self._dom_context = target_frame or self.page
+
             analyzer = RuleBasedAnalyzer(self._dom_context)
             analysis_result = await analyzer.analyze_form(client_data)
             self._current_analysis_result = analysis_result
@@ -653,6 +654,37 @@ class IsolatedFormWorker:
                 error_message = analysis_result.get('error', 'Form analysis failed')
                 logger.warning(f"Worker {self.worker_id}: Form analysis failed: {error_message}")
                 return {"error": True, "record_id": record_id, "status": "failed", "error_type": "ANALYSIS_FAILED", "error_message": error_message}
+
+            # 営業禁止検出（Analyzerの結果を用いた早期中断）
+            try:
+                sp = analysis_result.get('sales_prohibition') or {}
+                has_prohibition = bool(sp.get('has_prohibition')) or bool(sp.get('prohibition_detected'))
+                if has_prohibition:
+                    matches = sp.get('matches') or []
+                    level = sp.get('prohibition_level') or sp.get('detection_method') or 'detected'
+                    logger.warning(f"Worker {self.worker_id}: Sales prohibition detected (record_id={record_id}, matches={len(matches)}, level={level})")
+                    return {
+                        "error": True,
+                        "record_id": record_id,
+                        "status": "failed",
+                        "error_type": "PROHIBITION_DETECTED",
+                        "error_message": "Sales prohibition detected",
+                        "additional_data": {
+                            "classify_context": {
+                                "stage": "pre_submission_check",
+                                "primary_error_type": "PROHIBITION_DETECTED",
+                                "is_bot_detected": False,
+                            },
+                            "prohibition_summary": {
+                                "detected": True,
+                                "level": level,
+                                "matches_count": len(matches),
+                                "detection_source": "RuleBasedAnalyzer",
+                            },
+                        },
+                    }
+            except Exception as _e:
+                logger.debug(f"Worker {self.worker_id}: sales prohibition early-check skipped: {_e}")
 
             # 1) まずは Analyzer の input_assignments（自動処理含む）を優先して入力
             input_assignments = analysis_result.get('input_assignments', {})
@@ -1840,6 +1872,8 @@ class IsolatedFormWorker:
 
         except Exception as e:
             logger.warning(f"Worker {self.worker_id}: Dynamic content loading warning: {e}")
+
+    
 
     async def _fill_form_field_isolated(self, field_name: str, field_config: Dict[str, Any]) -> None:
         """フォームフィールドへの入力実行（独立版）"""
