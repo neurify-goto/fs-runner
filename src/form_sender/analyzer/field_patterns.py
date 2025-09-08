@@ -438,6 +438,30 @@ class FieldPatterns:
             },
             
             # 住所フィールド (17-19) - GAS/スプレッドシート必須
+
+            # 16.5. 郵便番号（統合） - 単一入力の郵便番号
+            # 分割(郵便番号1/2) が存在する場合はそちらが優先されるが、
+            # 単一フィールドのみのサイトも多いため統合ラベルを定義
+            "郵便番号": {
+                "names": [
+                    "zip", "postal", "postcode", "zipcode", "郵便番号", "postal_code", "post_code"
+                ],
+                "ids": [
+                    "zip", "postal", "postcode", "zipcode", "postal_code", "post_code"
+                ],
+                "classes": ["zip", "postal", "postcode", "zipcode"],
+                "placeholders": ["郵便番号", "〒", "Zip", "Post"],
+                "types": ["tel", "text"],
+                "tags": ["input"],
+                "weight": 12,
+                # 明確に別種のフィールドは除外
+                "exclude_patterns": [
+                    "address", "住所", "addr", "street", "building", "市区町村", "都道府県", "prefecture",
+                    "phone", "tel", "電話", "fax", "メール", "email", "mail",
+                    "your-name", "your_name", "name", "お名前", "氏名", "fullname",
+                    "captcha", "verification", "confirm", "確認", "code"
+                ]
+            },
             
             # 17. 郵便番号1 (postal_code_1) - 前3桁
             "郵便番号1": {

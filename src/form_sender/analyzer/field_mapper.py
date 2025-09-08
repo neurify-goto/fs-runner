@@ -736,16 +736,25 @@ class FieldMapper:
         except Exception:
             pass
         # 必須マーカーのある要素は優先（汎用安全ボーナス）
+        # ただし『タグ一致のみ』の弱い候補には適用しない（誤マッピング抑止）
         try:
             if await self.element_scorer._detect_required_status(element):
-                # 設定で明示されたブースト値を使用（マジックナンバー排除）
-                boost = int(self.settings.get("required_boost", 40))
-                if field_name == "電話番号":
-                    boost = int(
-                        self.settings.get("required_phone_boost", 200)
-                    )  # 必須の電話番号を最優先
-                score += boost
-                score_details["score_breakdown"]["required_boost"] = boost
+                bd = score_details.get("score_breakdown", {})
+                # 強いシグナル群（tag を除外）。class は誤検出源になりやすいため除外。
+                strong_signals = (
+                    int(bd.get("type", 0))
+                    + int(bd.get("name", 0))
+                    + int(bd.get("id", 0))
+                    + int(bd.get("placeholder", 0))
+                    + int(bd.get("context", 0))
+                )
+                # いずれかの強いシグナルが存在する場合のみ必須ブーストを適用
+                if strong_signals > 0:
+                    boost = int(self.settings.get("required_boost", 40))
+                    if field_name == "電話番号":
+                        boost = int(self.settings.get("required_phone_boost", 200))
+                    score += boost
+                    score_details["score_breakdown"]["required_boost"] = boost
         except Exception:
             pass
         if score <= 0:
@@ -1109,7 +1118,9 @@ class FieldMapper:
         el, score, details, contexts = best
         if not el:
             return
-        threshold = max(60, int(self.settings.get("email_fallback_min_score", 60)))
+        # 郵便番号は attr/id/ラベルでの強い安全判定（_passes_postal）があるため、
+        # フォールバック閾値はやや緩め（>=50）に設定して取りこぼしを防ぐ。
+        threshold = 50
         # 追加の安全ガード: 郵便番号の文脈/属性検証
         try:
             from .mapping_safeguards import passes_safeguard as _passes
@@ -1699,8 +1710,8 @@ class FieldMapper:
 
         if tag == "input" and typ == "email":
             return "メールアドレス"
-        if tag == "input" and typ == "tel":
-            return "電話番号"
+        # 電話番号よりも先に郵便番号の可能性を評価する（zip系トークンが強いケースが多い）
+        # type=tel でも郵便番号用に実装されているサイトが多数あるため順序を変更
         if tag == "textarea":
             return "お問い合わせ本文"
 
@@ -1733,6 +1744,10 @@ class FieldMapper:
             blob = f"{name_id_cls} {ctx_text}"
             if any(tok in blob for tok in postal_tokens):
                 return "郵便番号"
+
+        # 郵便番号でない場合に限り、type=tel を電話番号として扱う
+        if tag == "input" and typ == "tel":
+            return "電話番号"
 
         # 住所の推定（都道府県/市区町村/番地/建物名などの語を包括）
         address_tokens = [

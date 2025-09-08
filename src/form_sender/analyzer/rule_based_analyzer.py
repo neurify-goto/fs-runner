@@ -301,6 +301,17 @@ class RuleBasedAnalyzer:
                 for k in promoted_kana:
                     auto_handled.pop(k, None)
 
+            # 追加: メール確認欄を field_mapping に昇格（必須セレクト等で弾かれないように）
+            try:
+                promoted_email_conf = await self.unmapped_handler.promote_email_confirmation_to_mapping(
+                    auto_handled, self.field_mapping
+                )
+                if promoted_email_conf:
+                    for k in promoted_email_conf:
+                        auto_handled.pop(k, None)
+            except Exception as e:
+                logger.debug(f"promote email confirm skipped: {e}")
+
             # 分割フィールドの検出は auto_handled も含めた集合で再計算（メール確認や分割入力に対応）
             try:
                 combined_for_split = {**self.field_mapping, **auto_handled}

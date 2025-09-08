@@ -2010,6 +2010,33 @@ class UnmappedElementHandler:
             }
         return handled
 
+    async def promote_email_confirmation_to_mapping(
+        self,
+        auto_handled: Dict[str, Dict[str, Any]],
+        field_mapping: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        """auto_email_confirm_* を field_mapping に昇格（確認欄が必須のサイト対策）。
+
+        - auto_handled で検出済みの確認用メール欄を、重複しない範囲で field_mapping に移す。
+        - 値の投入は assigner 側の copy_from ロジックに委譲する。
+        """
+        promoted_keys: List[str] = []
+        try:
+            for k, v in list(auto_handled.items()):
+                if not k.startswith("auto_email_confirm_"):
+                    continue
+                if not isinstance(v, dict):
+                    continue
+                # 既に同一セレクタが field_mapping に存在する場合は昇格不要
+                sel = v.get("selector")
+                if any((isinstance(fv, dict) and fv.get("selector") == sel) for fv in field_mapping.values()):
+                    continue
+                field_mapping[k] = v
+                promoted_keys.append(k)
+        except Exception:
+            return promoted_keys
+        return promoted_keys
+
     async def _auto_handle_split_name_arrays(
         self, text_inputs: List[Locator], mapped_element_ids: set
     ) -> Dict[str, Dict[str, Any]]:

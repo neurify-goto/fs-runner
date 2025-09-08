@@ -46,6 +46,52 @@ class RequiredRescue:
     ) -> None:
         # used_names_ids は先行救済ブロックでも参照されるため先に初期化
         used_names_ids = set()
+        # 先行救済: 郵便番号（単一フィールド）の取りこぼし対策
+        # - name/id/class/label に zip/postal/郵便番号 系トークンがある input[type=tel/text]
+        # - フィールド未確定時のみ
+        try:
+            if "郵便番号" not in field_mapping:
+                postal_candidates = (
+                    (classified_elements.get("tel_inputs") or [])
+                    + (classified_elements.get("text_inputs") or [])
+                )
+                for el in postal_candidates:
+                    if id(el) in used_elements:
+                        continue
+                    ei = await self.element_scorer._get_element_info(el)
+                    if not ei.get("visible", True):
+                        continue
+                    nm = (ei.get("name", "") or "").lower()
+                    ide = (ei.get("id", "") or "").lower()
+                    cls = (ei.get("class", "") or "").lower()
+                    attrs = f"{nm} {ide} {cls}"
+                    if not any(t in attrs for t in ["zip", "postal", "postcode", "zipcode", "郵便", "郵便番号", "〒"]):
+                        # ラベル側にもヒントが無ければ次へ
+                        contexts = await self.context_text_extractor.extract_context_for_element(el)
+                        best_txt = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
+                        if not any(t in best_txt for t in ["郵便番号", "郵便", "zip", "postal", "〒"]):
+                            continue
+                    # フィールド固有ガード（誤検出抑止）
+                    from .mapping_safeguards import passes_safeguard as _passes
+                    contexts = await self.context_text_extractor.extract_context_for_element(el)
+                    details = {"element_info": ei, "total_score": 85}
+                    if not _passes("郵便番号", details, contexts, self.context_text_extractor, {}, self.settings):
+                        continue
+                    info = await self._create_enhanced_element_info(el, details, contexts)
+                    try:
+                        info["source"] = "required_rescue_postal"
+                    except Exception:
+                        pass
+                    temp_value = self._generate_temp_field_value("郵便番号")
+                    if self.duplicate_prevention.register_field_assignment(
+                        "郵便番号", temp_value, 85, info
+                    ):
+                        field_mapping["郵便番号"] = info
+                        used_elements.add(id(el))
+                        used_names_ids.add((nm, ide))
+                        break
+        except Exception as e:
+            logger.debug(f"Required postal rescue skipped: {e}")
         # 先行救済: name/id='email' の必須入力を確実に登録（確認欄は除外）
         try:
             if "メールアドレス" not in field_mapping:
