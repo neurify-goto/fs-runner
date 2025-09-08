@@ -216,12 +216,17 @@ def _classify_failure_detail(err_msg: Optional[str], add_data: Optional[Dict[str
         if ent and isinstance(ent, dict) and (now_ts - ent.get('ts', 0) <= ttl):
             detail = ent.get('detail')
         else:
-            detail = ErrorClassifier.classify_detail(
-                error_message=err_msg or '',
-                page_content=page_content or '',
-                http_status=http_status,
-                context={'error_type_hint': error_type} if error_type else None,
-            )
+            try:
+                detail = ErrorClassifier.classify_detail(
+                    error_message=err_msg or '',
+                    page_content=page_content or '',
+                    http_status=http_status,
+                    context={'error_type_hint': error_type} if error_type else None,
+                )
+            except Exception as e:
+                # 失敗分類の例外は握りつぶし、処理継続を最優先
+                logger.warning(f"detail classification error (suppressed): {type(e).__name__}: {e}")
+                return None, None
             _CLASSIFY_CACHE[cache_key] = {'detail': detail, 'ts': now_ts}
             _prune_classify_cache(now_ts)
 
@@ -237,6 +242,10 @@ def _classify_failure_detail(err_msg: Optional[str], add_data: Optional[Dict[str
         return detail, bot_flag
     except RuntimeError as e:
         logger.warning(f"detail classification failed: {e}")
+        return None, None
+    except Exception as e:
+        # 予期せぬ例外も抑止し、分類不能として返す
+        logger.warning(f"failure detail unexpected error (suppressed): {type(e).__name__}: {e}")
         return None, None
 
 
