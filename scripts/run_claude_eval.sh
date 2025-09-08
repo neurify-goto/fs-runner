@@ -18,7 +18,7 @@ PAGE_HTML=$( { \
   awk 'match($0,/[^[:space:]]*page_source_[0-9_]{15}\.html/){m=substr($0,RSTART,RLENGTH)} END{if(m) print m}' "$LOG_FILE"; \
 } || true )
 
-# 互換: 旧パターン（/Users/..）でもう一度試行（念のため）
+# 互換: 旧パターン（/Users/..）でもう一度試行（念のため） - 失敗を許容
 if [[ -z "$MAP_JSON" ]]; then
   MAP_JSON=$( { grep -Eo '/[^\"]+/analysis_result_[0-9_]{15}\.json' "$LOG_FILE" | tail -n1; } || true )
 fi

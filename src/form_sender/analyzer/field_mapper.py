@@ -1431,8 +1431,8 @@ class FieldMapper:
             return
         # 設定の確認トークンを利用（mail2等は追加で補強）
         confirm_tokens = set(
-            [t.lower() for t in self.settings.get("confirm_tokens", [])]
-        ) | {"mail2", "re_mail", "re-email", "re-mail", "email2"}
+            [t.lower() for t in (self.settings.get("confirm_tokens", []) or [])]
+        ) | {"mail2", "re_mail", "re-email", "re-mail", "email2", "確認用", "再入力", "もう一度", "再度"}
         patterns = self.field_patterns.get_pattern(target) or {}
         best = (None, 0, None, [])
         for el in text_inputs:
@@ -1481,7 +1481,8 @@ class FieldMapper:
                 el, el_bounds
             )
             best_txt = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
-            blob = " ".join(
+            # 属性由来のテキスト
+            attr_context = " ".join(
                 [
                     (ei.get("name") or ""),
                     (ei.get("id") or ""),
@@ -1489,11 +1490,12 @@ class FieldMapper:
                     (ei.get("placeholder") or ""),
                 ]
             ).lower()
-            label_blob = (best_txt + " " + (dom_label or "").lower())
+            label_context = (best_txt + " " + (dom_label or "").lower())
+            label_blob = label_context
             if any(tok in label_blob for tok in ["メール", "e-mail", "email", "mail"]):
-                # 確認用の強いシグナルのみ除外（単なる『ご確認ください』等は除外対象にしない）
-                full_blob = (best_txt + " " + blob + " " + label_blob)
-                if any(k in full_blob for k in confirm_tokens):
+                # 確認用の強いシグナルを除外（ラベル・属性双方を対象）
+                full_context = (label_context + " " + attr_context)
+                if any(k in full_context for k in confirm_tokens):
                     continue
                 # スコアに依存しない救済（最低限の安全チェックは上で実施済み）
                 details = {"element_info": ei, "total_score": 80}

@@ -1892,7 +1892,7 @@ class ElementScorer:
                         if (txt === '*' || txt === '＊' || txt.includes('必須')) return true;
                         // 『※』は注記と紛れるため短文(<=10文字)に限定
                         // 『※』単独は注記の可能性が高いため無効。『※必須』等の組合せのみ許可
-                        if ((/※\s*必須/.test(txt)) || ['*','＊','※'].includes(txt.trim())) return true;
+                        if ((/※\s*必須/.test(txt)) || ['*','＊'].includes(txt.trim())) return true;
                         return false;
                       };
                       let p = el.parentElement; let depth = 0;
@@ -1973,8 +1973,8 @@ class ElementScorer:
                           if (!txt) return false;
                           if (MARKS.some(m => txt.includes(m))) return true;
                           // 『※』は短文（<=10文字）のときのみ必須と判断
-                          // 『※必須』のみ必須扱い（※単独は無効）
-                          if ((/※\s*必須/.test(txt)) || ['*','＊','※'].includes(txt.trim())) return true;
+                          // 『※必須』のみ必須扱い（※単独は無効）、スターは許容
+                          if ((/※\s*必須/.test(txt)) || ['*','＊'].includes(txt.trim())) return true;
                           return false;
                         } catch { return false; }
                       };
@@ -2014,8 +2014,8 @@ class ElementScorer:
                             const txt = (node.innerText || node.textContent || '').trim();
                             if (!txt) return false;
                             if (MARKS.some(m => txt.includes(m))) return true;
-                            // 『※必須』のみ必須扱い（※単独は無効）
-                            if ((/※\s*必須/.test(txt)) || ['*','＊','※'].includes(txt.trim())) return true;
+                            // 『※必須』のみ必須扱い（※単独は無効）、スターは許容
+                            if ((/※\s*必須/.test(txt)) || ['*','＊'].includes(txt.trim())) return true;
                             return false;
                           };
                           for (const id of ids) {
@@ -2288,9 +2288,8 @@ class ElementScorer:
                     # 明示マーカー（必須、*, ＊ など）
                     if any(marker in text for marker in required_markers):
                         return True
-                    # 例外的許容: ラベル直近に『※』単独が表示される慣習的UIを許容
-                    # （強いコンテキストに限定し、広域テキストには適用しない）
-                    if text.strip() in {"※", "*", "＊"}:
+                    # 『※』単独は許容しない（※必須のみ許容）。スターは許容。
+                    if text.strip() in {"*", "＊"}:
                         return True
 
             # 2) 次善: 近傍の兄弟/親ラベル系
@@ -2344,10 +2343,9 @@ class ElementScorer:
                 if not any(x in lt for x in ["任意", "optional"]):
                     if (
                         "必須" in lt
-                        or lt in {"※", "*", "＊"}
+                        or lt in {"*", "＊"}
                         or "※必須" in lt or "※ 必須" in lt
                         or "(必須)" in lt or "（必須）" in lt or "[必須]" in lt or "［必須］" in lt
-                        or "※" in lt  # 旧式サイトでは『※』+項目名の表記が多い
                     ):
                         return True
 
