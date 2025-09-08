@@ -1,6 +1,6 @@
 -- 当日分キュー投入（GAS から targeting_sql / ng_companies を受け取る）
 -- p_ng_companies はカンマ区切り ID 群（空文字可）
--- 注意: キュー作成上限はターゲット毎に一律5000件。
+-- 注意: キュー作成上限はターゲット毎に一律10000件。
 --       p_max_daily は互換性のため残置するが、上限には使用しない。
 create or replace function public.create_queue_for_targeting(
   p_target_date date,
@@ -17,7 +17,7 @@ declare
   v_sql text;
   v_ins integer := 0;
   v_ng_ids bigint[];
-  v_limit integer := 5000; -- 一律上限
+  v_limit integer := 10000; -- 一律上限
 begin
   -- 追加バリデーション: targeting_sql の危険断片を簡易拒否（防御的チェック）
   -- 備考: GAS側でもサニタイズ済みだが、サーバ側にも二重の防御を置く
@@ -45,7 +45,10 @@ begin
        select c.id
        from public.companies c
        left join public.submissions s
-         on s.targeting_id = $2 and s.company_id = c.id and s.success = true
+         on s.targeting_id = $2
+        and s.company_id = c.id
+        and s.submitted_at >= ($1::timestamp AT TIME ZONE ''Asia/Tokyo'')
+        and s.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
        where c.form_url is not null
          and coalesce(c.prohibition_detected, false) = false
          and s.id is null';
@@ -68,7 +71,7 @@ begin
     from candidates
     on conflict (target_date_jst, targeting_id, company_id) do nothing;';
 
-  -- p_max_daily は無視し、常に v_limit=5000 を使用
+  -- p_max_daily は無視し、常に v_limit=10000 を使用
   execute v_sql using p_target_date, p_targeting_id, v_ng_ids, v_limit, p_shards;
   get diagnostics v_ins = row_count;
   return v_ins;
