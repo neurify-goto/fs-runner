@@ -3,9 +3,9 @@ create table public.submissions (
   targeting_id bigint not null,
   company_id bigint not null,
   error_type text null,
-  classify_detail jsonb null,
   submitted_at timestamp with time zone null,
   success boolean null,
+  classify_detail jsonb null,
   constraint submissions_pkey primary key (id)
 ) TABLESPACE pg_default;
 
@@ -20,3 +20,5 @@ create index IF not exists idx_submissions_targeting_id on public.submissions us
 create index IF not exists idx_submissions_success on public.submissions using btree (success) TABLESPACE pg_default;
 
 create index IF not exists idx_submissions_targeting_company on public.submissions using btree (targeting_id, company_id, success) TABLESPACE pg_default;
+
+create index IF not exists idx_submissions_target_company_submitted on public.submissions using btree (targeting_id, company_id, submitted_at) TABLESPACE pg_default;
