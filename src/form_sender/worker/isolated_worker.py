@@ -477,6 +477,15 @@ class IsolatedFormWorker:
                     logger.warning(f"Failed to close page for record_id {record_id}: {e}")
                 self.page = None
 
+    # ===== small helpers =====
+    def _get_dom_context(self):
+        """現在のDOMコンテキスト（iframe対応）を取得"""
+        try:
+            dom_ctx = getattr(self, '_dom_context', None)
+            return dom_ctx or self.page
+        except Exception:
+            return self.page
+
     async def _process_instruction_isolated(
         self, company: Dict[str, Any], client_data: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -1403,10 +1412,10 @@ class IsolatedFormWorker:
                 if target_frame:
                     self._dom_context = target_frame
                 else:
-                    self._dom_context = getattr(self, '_dom_context', self.page) or self.page
+                    self._dom_context = self._get_dom_context()
             except Exception as e:
                 logger.debug(f"Worker {self.worker_id}: Confirmation frame reselect skipped: {e}")
-                self._dom_context = getattr(self, '_dom_context', self.page) or self.page
+                self._dom_context = self._get_dom_context()
             
             # 確認ページで最終送信ボタンを探して実行
             return await self._find_and_submit_final_button()
@@ -1424,15 +1433,13 @@ class IsolatedFormWorker:
     async def _find_and_submit_final_button(self) -> Dict[str, Any]:
         """確認ページで最終送信ボタンを見つけて実行（網羅強化＋同意ON＋フォールバック）"""
         try:
-            dom_ctx = getattr(self, '_dom_context', self.page)
-            if not dom_ctx:
-                dom_ctx = self.page
+            dom_ctx = self._get_dom_context()
             pre_submit_url = dom_ctx.url if dom_ctx else (self.page.url if self.page else "")
 
             # 送信ボタンのキーワード（設定 + デフォルト）
             kw_cfg = get_button_keywords_config()
-            base_final = ["送信", "submit", "send", "投稿", "完了", "決定", "確定"]
-            final_keywords = list({*(kw_cfg.get("final", []) or []), *base_final})
+            # デフォルトは button_config 側で付与されるため union は不要
+            final_keywords = list(dict.fromkeys(kw_cfg.get("final", [])))
 
             # SuccessJudge 初期化（送信前の状態を記録）
             from ..analyzer.success_judge import SuccessJudge
@@ -1450,8 +1457,8 @@ class IsolatedFormWorker:
                         el = loc.first
                         if await el.is_visible():
                             return el, f"role=button[name~={keyword}]"
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Worker {self.worker_id}: role search failed: {e}")
                 # 2) button/input かつテキスト一致
                 selectors = [
                     f'button[type="submit"]:has-text("{keyword}")',
@@ -1464,7 +1471,8 @@ class IsolatedFormWorker:
                         el = await dom_ctx.query_selector(selector)
                         if el and await el.is_visible():
                             return el, selector
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Worker {self.worker_id}: selector search failed: {selector} / {e}")
                         continue
                 # 3) anchor/role/aria
                 selectors2 = [
@@ -1478,7 +1486,8 @@ class IsolatedFormWorker:
                         el = await dom_ctx.query_selector(selector)
                         if el and await el.is_visible():
                             return el, selector
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Worker {self.worker_id}: anchor/aria search failed: {selector} / {e}")
                         continue
                 # 4) 画像ボタン/onclick
                 selectors3 = [
@@ -1490,7 +1499,8 @@ class IsolatedFormWorker:
                         el = await dom_ctx.query_selector(selector)
                         if el and await el.is_visible():
                             return el, selector
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Worker {self.worker_id}: image/onclick search failed: {selector} / {e}")
                         continue
                 return None, None
 
@@ -1552,16 +1562,20 @@ class IsolatedFormWorker:
                     pass
                 return False
 
-            # 確認ダイアログを自動承認
+            # 確認ダイアログの自動承認（クリーンアップ可）
+            dialog_task = None
             try:
-                async def _on_dialog(d):
-                    try:
-                        await d.accept()
-                    except Exception:
-                        pass
-                self.page.once("dialog", _on_dialog)
-            except Exception:
-                pass
+                if self.page:
+                    dialog_task = asyncio.create_task(self.page.wait_for_event('dialog'))
+                    async def _auto_accept_dialog():
+                        try:
+                            d = await asyncio.wait_for(dialog_task, timeout=5)
+                            await d.accept()
+                        except Exception as e:
+                            logger.debug(f"Worker {self.worker_id}: dialog wait/accept skipped: {e}")
+                    asyncio.create_task(_auto_accept_dialog())
+            except Exception as e:
+                logger.debug(f"Worker {self.worker_id}: setup dialog auto-accept failed: {e}")
 
             clicked = await _click_with_fallback(found)
             if not clicked:
@@ -1576,14 +1590,22 @@ class IsolatedFormWorker:
                 }
 
             # 送信後待機（余裕値は設定から）
-            extra_ms = 2000
+            # 追加待機（0〜20sにクランプ）
             try:
                 extra_ms = int(self.config.get("worker_config", {}).get("final_submit", {}).get("confirmation_extra_wait_ms", 2000))
             except Exception:
                 extra_ms = 2000
-            await asyncio.sleep(3.0 + max(0, extra_ms) / 1000.0)
+            extra_ms = max(0, min(extra_ms, 20000))
+            await asyncio.sleep(3.0 + extra_ms / 1000.0)
             try:
                 await dom_ctx.wait_for_load_state('networkidle', timeout=12000)
+            except Exception:
+                pass
+
+            # 使わなかった dialog 待機タスクを安全にキャンセル
+            try:
+                if dialog_task and not dialog_task.done():
+                    dialog_task.cancel()
             except Exception:
                 pass
 
