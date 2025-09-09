@@ -65,13 +65,18 @@ begin
     end if;
     v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
     v_sql := v_sql || ' order by c.id asc limit $5 ),
+      bp as (
+        select coalesce(max(priority), 0) as base
+          from public.send_queue
+         where target_date_jst = $1::date and targeting_id = $2
+      ),
       cand_agg as (
         select count(*)::int as cand_count, coalesce(max(id), $6) as cand_max from candidates
       ),
       ins as (
         insert into public.send_queue(target_date_jst, targeting_id, company_id, priority, shard_id, status, attempts, created_at)
         select $1::date, $2::bigint, id,
-               row_number() over (order by id),
+               (select base from bp) + row_number() over (order by id),
                (id % $4),
                ''pending'', 0, now()
           from candidates
@@ -121,13 +126,18 @@ begin
     end if;
     v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
     v_sql := v_sql || ' order by c.id asc limit $5 ),
+      bp as (
+        select coalesce(max(priority), 0) as base
+          from public.send_queue
+         where target_date_jst = $1::date and targeting_id = $2
+      ),
       cand_agg as (
         select count(*)::int as cand_count, coalesce(max(id), $6) as cand_max from candidates
       ),
       ins as (
         insert into public.send_queue(target_date_jst, targeting_id, company_id, priority, shard_id, status, attempts, created_at)
         select $1::date, $2::bigint, id,
-               row_number() over (order by id),
+               (select base from bp) + row_number() over (order by id),
                (id % $4),
                ''pending'', 0, now()
           from candidates
