@@ -39,6 +39,8 @@ Each GAS module follows the same pattern:
 
 ### **Git Management**
 
+* For new PR creation requests: When instructed to create a new Pull Request, do not ask the user to approve the contents one by one. Use your best judgment to compose the most appropriate title, description, and scope, and create the PR proactively.
+* For incidental local changes: If there are local modifications beyond what you personally implemented, review their contents and include them in the PR unless they are clearly inappropriate, incorrect, or risky.
 * When creating a PR, always explain the reasoning behind changes, not just what was changed.
 * When creating a PR, provide the Pull Request URL to the user.
 * Include relevant issue numbers when applicable.
@@ -137,6 +139,7 @@ Each GAS module follows the same pattern:
 
 ### **Task Execution Policy**
 
+* **User messaging timing:** Send any user-facing messages only after all instructed tasks have been fully completed. Avoid interim check-ins or status updates unless a blocking, high‑risk issue requires immediate clarification or approval.
 * **Continuous execution:** You must execute assigned tasks end-to-end without pausing for interim check-ins or status updates. Continue until the task is fully completed.
 * **Exceptions — major issues only:** Pausing or stopping is allowed only when a blocking or high‑risk issue occurs, such as safety/security concerns, legal or policy constraints, missing required access/approvals, risk of data loss or corruption, or unrecoverable environmental failures.
 * **If an exception occurs:** Surface a concise problem report that includes what was attempted, the exact blocker, and concrete next steps or a minimal, clearly scoped request for input/approval.
