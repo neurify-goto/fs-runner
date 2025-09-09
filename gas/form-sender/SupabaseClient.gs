@@ -115,6 +115,21 @@ function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCom
   });
 }
 
+/** チャンク投入: 単一ステージ(1/2)を after_id 以降 p_limit 件だけ投入 */
+function createQueueForTargetingStep(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, shards, limitPerCall, afterId, stage, idWindow) {
+  return callRpc_('create_queue_for_targeting_step', {
+    p_target_date: targetDateJst,
+    p_targeting_id: Number(targetingId),
+    p_targeting_sql: targetingSql || '',
+    p_ng_companies: ngCompaniesCsv || '',
+    p_shards: Number(shards || 8),
+    p_limit: Number(limitPerCall || 2000),
+    p_after_id: Number(afterId || 0),
+    p_stage: Number(stage || 1),
+    p_id_window: Number(idWindow || 50000)
+  });
+}
+
 /**
  * ng_companies列の値（企業名・ID混在可）を、RPCが受け付ける「カンマ区切りのID群」に正規化
  * - 数値トークンはそのままIDとして扱う

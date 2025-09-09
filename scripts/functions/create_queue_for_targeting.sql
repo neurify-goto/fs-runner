@@ -34,8 +34,7 @@ begin
   perform set_config('statement_timeout', '180000', true);  -- milliseconds (3 minutes)
   -- 競合ロックによる待ちを短くするために lock_timeout も軽く設定（待ちすぎで statement_timeout に達しないように）
   perform set_config('lock_timeout', '10000', true);        -- milliseconds (10 seconds)
-  -- NOTICE を確実に出す（環境により無視される場合あり）
-  perform set_config('log_min_messages', 'notice', true);
+  -- NOTICE 出力レベルの変更は Supabase では権限不足になるため実施しない
 
   -- デバッグ計測用タイムスタンプ
   v_t0 := clock_timestamp();
@@ -189,13 +188,11 @@ begin
    where target_date_jst = p_target_date
      and targeting_id    = p_targeting_id;
 
-  -- 観測用 NOTICE（件数内訳）
-  raise notice 'CQT:END date=%, targeting_id=%, current_total_before_stage2=%, stage1_inserted=%, stage2_inserted=%, total_final=%, total_ms=%',
-    p_target_date, p_targeting_id, v_current_total, (v_ins - coalesce(v_ins2,0)), coalesce(v_ins2,0), v_total_final;
-  -- 合計時間
+  -- 合計時間を先に算出し、NOTICEに埋め込む
   v_elapsed_ms := extract(epoch from (clock_timestamp() - v_t0)) * 1000;
-  -- 直前の NOTICE とまとめて観測
-  perform 1;
+  -- 観測用 NOTICE（件数内訳 + 総時間）
+  raise notice 'CQT:END date=%, targeting_id=%, current_total_before_stage2=%, stage1_inserted=%, stage2_inserted=%, total_final=%, total_ms=%',
+    p_target_date, p_targeting_id, v_current_total, (v_ins - coalesce(v_ins2,0)), coalesce(v_ins2,0), v_total_final, v_elapsed_ms::bigint;
 
   return v_ins;
 end;

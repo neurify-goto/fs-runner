@@ -69,6 +69,8 @@ const CONFIG = {
   RETRY_DELAY: 2000,
   GITHUB_API_BASE: 'https://api.github.com',
   DEFAULT_TARGETING_ID: 1, // デフォルトのターゲティングID
+  // 当日キュー作成対象のホワイトリスト（未設定/空配列なら全アクティブ対象）
+  QUEUE_TARGETING_IDS: [],
   JST_OFFSET: 9 * 60 * 60 * 1000, // JST のオフセット（ミリ秒）
   // 1ワークフロー内で起動するPythonワーカー数（1〜4）
   // GitHub Actions で --num-workers に反映されます
@@ -501,8 +503,28 @@ function resetSendQueueAllDaily() {
 /**
  * targeting毎に当日キューを生成
  */
-function buildSendQueueForTargeting(targetingId) {
+function buildSendQueueForTargeting(targetingId = null) {
   try {
+    // targetingId が未指定のとき: CONFIG.QUEUE_TARGETING_IDS を優先
+    if (targetingId === null || typeof targetingId === 'undefined') {
+      const ids = Array.isArray(CONFIG.QUEUE_TARGETING_IDS) ? CONFIG.QUEUE_TARGETING_IDS : [];
+      if (ids.length > 0) {
+        console.log(JSON.stringify({ level: 'info', event: 'queue_build_configured_list_start', ids }));
+        let total = 0;
+        const details = [];
+        for (const id of ids) {
+          const r = buildSendQueueForTargeting(id);
+          if (r && r.success) total += Number(r.inserted || r.inserted_total || 0);
+          details.push(Object.assign({ targeting_id: id }, r));
+        }
+        console.log(JSON.stringify({ level: 'info', event: 'queue_build_configured_list_done', total, count: ids.length }));
+        return { success: details.every(d => d && d.success), inserted_total: total, details };
+      } else {
+        // フォールバック: 単一ID（DEFAULT_TARGETING_ID）
+        targetingId = CONFIG.DEFAULT_TARGETING_ID;
+      }
+    }
+
     const cfg = getTargetingConfig(targetingId); // 既存ロジックを流用
     if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
     const t = cfg.targeting;
@@ -522,17 +544,27 @@ function buildSendQueueForTargeting(targetingId) {
 
     // キュー上限は一律10000件（max_daily_sendsは送信成功数の上限としてRunner側で使用）
     const startedMs = Date.now();
-    const inserted = createQueueForTargeting(
-      targetingId,
-      dateJst,
-      t.targeting_sql || '',
-      (t.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
-      10000,
-      8
-    );
-    const elapsedMs = Date.now() - startedMs;
-    console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: Number(inserted) || 0, elapsed_ms: elapsedMs }));
-    return { success: true, inserted };
+    try {
+      const inserted = createQueueForTargeting(
+        targetingId,
+        dateJst,
+        t.targeting_sql || '',
+        (t.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
+        10000,
+        8
+      );
+      const elapsedMs = Date.now() - startedMs;
+      console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: Number(inserted) || 0, elapsed_ms: elapsedMs }));
+      return { success: true, inserted };
+    } catch (e) {
+      const msg = String(e || '');
+      const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
+      if (!isStmtTimeout) throw e;
+      // フォールバック: チャンク分割投入（Stage1→Stage2）
+      console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked', targeting_id: targetingId, reason: 'statement_timeout' }));
+      const result = buildSendQueueForTargetingChunked_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''));
+      return result;
+    }
   } catch (e) {
     console.error('buildSendQueueForTargeting error:', e);
     return { success: false, error: String(e) };
@@ -553,13 +585,25 @@ function buildSendQueueForAllTargetings() {
       return { success: false, message: 'アクティブtargetingなし', processed: 0 };
     }
 
+    // CONFIG.QUEUE_TARGETING_IDS が設定されている場合はそのID群に限定
+    let targetList = activeTargetings;
+    if (Array.isArray(CONFIG.QUEUE_TARGETING_IDS) && CONFIG.QUEUE_TARGETING_IDS.length > 0) {
+      const allow = new Set(CONFIG.QUEUE_TARGETING_IDS.map(Number));
+      targetList = activeTargetings.filter(t => allow.has(Number(t.targeting_id || t.id || t)));
+      console.log(JSON.stringify({ level: 'info', event: 'queue_build_whitelist_filter', total_active: activeTargetings.length, filtered: targetList.length, ids: CONFIG.QUEUE_TARGETING_IDS }));
+      if (targetList.length === 0) {
+        console.log('ホワイトリストに該当するアクティブtargetingがありません');
+        return { success: false, message: 'whitelist対象なし', processed: 0 };
+      }
+    }
+
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     let processed = 0;
     let failed = 0;
     let totalInserted = 0;
     const details = [];
 
-    for (const t of activeTargetings) {
+    for (const t of targetList) {
       const targetingId = t.targeting_id || t.id || t;
       try {
         // 2シート構造を確認
@@ -581,20 +625,37 @@ function buildSendQueueForAllTargetings() {
           }
         }));
 
-        const inserted = createQueueForTargeting(
-          targetingId,
-          dateJst,
-          targeting.targeting_sql || '',
-          (targeting.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
-          10000,
-          8
-        );
-        const elapsedMs = Date.now() - dateStartMs;
-        const n = Number(inserted) || 0;
-        totalInserted += n;
-        processed += 1;
-        details.push({ targeting_id: targetingId, inserted: n, success: true });
-        console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: n, elapsed_ms: elapsedMs }));
+        let n = 0;
+        try {
+          const inserted = createQueueForTargeting(
+            targetingId,
+            dateJst,
+            targeting.targeting_sql || '',
+            (targeting.ng_companies || ''),
+            10000,
+            8
+          );
+          n = Number(inserted) || 0;
+          const elapsedMs = Date.now() - dateStartMs;
+          totalInserted += n;
+          processed += 1;
+          details.push({ targeting_id: targetingId, inserted: n, success: true });
+          console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: n, elapsed_ms: elapsedMs }));
+        } catch (e) {
+          const msg = String(e || '');
+          const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
+          if (!isStmtTimeout) throw e;
+          console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked', targeting_id: targetingId, reason: 'statement_timeout' }));
+          const res = buildSendQueueForTargetingChunked_(targetingId, dateJst, targeting.targeting_sql || '', (targeting.ng_companies || ''));
+          if (res && res.success) {
+            n = Number(res.inserted_total || 0);
+            totalInserted += n;
+            processed += 1;
+            details.push({ targeting_id: targetingId, inserted: n, success: true, mode: 'chunked' });
+          } else {
+            throw new Error(res && res.error ? res.error : 'chunked_fallback_failed');
+          }
+        }
       } catch (e) {
         failed += 1;
         details.push({ targeting_id: targetingId, success: false, error: String(e) });
@@ -616,6 +677,70 @@ function buildSendQueueForAllTargetings() {
     console.error('当日キュー一括生成エラー:', e);
     return { success: false, error: String(e) };
   }
+}
+
+/**
+ * 内部: チャンク分割投入の実装（Stage1→Stage2 を順に上限10000件まで）
+ */
+function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, ngCompaniesCsv) {
+  const MAX_TOTAL = 10000;
+  let total = 0;
+  const shards = 8;
+  let limit = 2000; // 2,000件から開始し、タイムアウト時は段階的に縮小
+  const minLimit = 250;
+  let idWindow = 50000; // 1回のスキャン範囲（ID連番のウィンドウ）
+  // Stage1, Stage2 の順で実行
+  for (let stage = 1; stage <= 2; stage++) {
+    let afterId = 0;
+    let guard = 0;
+    while (total < MAX_TOTAL && guard < 100) { // 安全ガード
+      guard++;
+      // 1回のステップ実行
+      const started = Date.now();
+      try {
+        const res = createQueueForTargetingStep(targetingId, dateJst, targetingSql, ngCompaniesCsv, shards, limit, afterId, stage, idWindow);
+        const elapsed = Date.now() - started;
+        const inserted = Number((res && res[0] && res[0].inserted) || 0);
+        const lastId = Number((res && res[0] && res[0].last_id) || afterId);
+        const hasMore = !!(res && res[0] && res[0].has_more);
+        // 次の afterId の決定: hasMore=false でもウィンドウ端まで到達している可能性があるため、
+        // lastId がウィンドウ終端付近ならウィンドウを前進させる
+        if (!hasMore && lastId <= afterId) {
+          afterId = afterId + idWindow; // 候補無しで詰んだときはウィンドウを強制前進
+        } else {
+          afterId = lastId;
+        }
+        total += inserted;
+        console.log(JSON.stringify({ level: 'info', event: 'queue_chunk_step', targeting_id: targetingId, stage, limit, after_id: afterId, inserted, total, elapsed_ms: elapsed, has_more: hasMore }));
+        if (total >= MAX_TOTAL) break; // 上限達成
+        if (!hasMore && inserted === 0) continue; // このウィンドウに候補がなかった→次ウィンドウへ
+        if (!hasMore) continue; // ウィンドウを進めて継続
+        // 余裕があるなら少しlimitを戻す（適応制御）
+        if (elapsed < 3000 && limit < 4000) limit = Math.min(4000, Math.floor(limit * 1.25));
+      } catch (e) {
+        const msg = String(e || '');
+        const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
+        console.warn(JSON.stringify({ level: 'warning', event: 'queue_chunk_step_failed', targeting_id: targetingId, stage, limit, after_id: afterId, error: msg }));
+        if (isStmtTimeout) {
+          if (limit > minLimit) {
+            // まずはチャンクサイズを半分に
+            limit = Math.max(minLimit, Math.floor(limit / 2));
+            Utilities.sleep(500);
+            continue;
+          }
+          // さらに厳しい場合はIDウィンドウも狭める
+          if (idWindow > 10000) {
+            idWindow = Math.max(10000, Math.floor(idWindow / 2));
+            Utilities.sleep(500);
+            continue;
+          }
+        }
+        // リトライ不能ならステージを断念
+        return { success: false, error: msg, inserted_total: total, targeting_id: targetingId };
+      }
+    }
+  }
+  return { success: true, inserted_total: total, targeting_id: targetingId };
 }
 
 
