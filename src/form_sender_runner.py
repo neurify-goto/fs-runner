@@ -686,16 +686,14 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         company = comp.data[0]
     except Exception as e:
         logger.error(f"fetch company error ({company_id}): {e}")
-        # mark failed quickly
-        try:
-            # 代表コードで詳細分類を付与
-            classify_detail = {
-                'code': 'NOT_FOUND',
-                'category': 'HTTP',
-                'retryable': False,
-                'cooldown_seconds': 0,
-                'confidence': 1.0,
-            }
+        # mark failed quickly（代表コードで詳細分類を付与）
+        classify_detail = {
+            'code': 'NOT_FOUND',
+            'category': 'HTTP',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': 1.0,
+        }
         # mark_done（run_id検証付き）を呼び出し。未デプロイ時は旧シグネチャへフォールバック。
         _md_args = {
             'p_target_date': str(target_date),
@@ -715,14 +713,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             # 従来版
             _md_args.pop('p_run_id', None)
             supabase.rpc('mark_done', _md_args).execute()
-            # 失敗完了ログ
-            try:
-                wid = getattr(worker, 'worker_id', 0)
-                _get_lifecycle_logger().info(
-                    f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=NOT_FOUND"
-                )
-            except Exception:
-                pass
+        # 失敗完了ログ
+        try:
+            wid = getattr(worker, 'worker_id', 0)
+            _get_lifecycle_logger().info(
+                f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=NOT_FOUND"
+            )
         except Exception:
             pass
         return True
