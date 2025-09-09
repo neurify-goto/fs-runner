@@ -194,7 +194,7 @@ def _passes_address(ei: Dict[str, Any], best_txt: str) -> bool:
     attrs = _attrs_blob(ei)
     # 許可トークン
     pos_tokens = [
-        "住所", "address", "addr", "street", "city", "prefecture", "都道府県", "市区町村",
+        "住所", "所在地", "address", "addr", "street", "city", "prefecture", "都道府県", "市区町村",
         "p-region", "p-locality", "p-street-address", "p-extended-address",
     ]
     # 不許可トークン（かな/部署/認証系）

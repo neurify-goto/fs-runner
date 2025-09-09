@@ -98,7 +98,7 @@ class FieldPatterns:
                     # 追加: 所属/所属先・Affiliation の表記ゆれ
                     "所属", "ご所属", "所属先", "ご所属先", "Affiliation"
                 ],
-                "types": ["tel", "text"],
+                "types": ["text"],
                 "tags": ["input"],
                 "weight": 25,  # 重要度最高レベル（メール22より高い）
                 "strict_patterns": ["会社", "会社名", "団体名", "company", "corporation", "firm", "enterprise", "business"],
