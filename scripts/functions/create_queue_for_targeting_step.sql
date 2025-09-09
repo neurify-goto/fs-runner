@@ -47,6 +47,26 @@ begin
   v_t0 := clock_timestamp();
   raise notice 'CQT_STEP:BEGIN stage=%, after_id=%, limit=%, id_window=%, shards=%, targeting_id=%, date=%', v_stage, p_after_id, p_limit, p_id_window, v_shards, p_targeting_id, p_target_date;
 
+  -- targeting_sql の防御的バリデーション（create_queue_for_targeting と同等）
+  if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
+    declare
+      v_forbidden_token text;
+      v_forbidden_stmt  text;
+    begin
+      select (regexp_matches(trim(p_targeting_sql), '(;|--|/\*|\*/|\\x00)', 'i'))[1]
+        into v_forbidden_token;
+      if v_forbidden_token is not null then
+        raise exception 'Invalid targeting_sql contains forbidden token: %', v_forbidden_token;
+      end if;
+
+      select (regexp_matches(trim(p_targeting_sql), '(\m(insert|update|delete|drop|alter|create|grant|revoke|truncate|commit|rollback|with|union)\M)', 'i'))[1]
+        into v_forbidden_stmt;
+      if v_forbidden_stmt is not null then
+        raise exception 'Invalid targeting_sql contains forbidden statement: %', v_forbidden_stmt;
+      end if;
+    end;
+  end if;
+
   if v_stage = 1 then
     -- Stage1: 未送信（履歴なし）
     v_sql :=
