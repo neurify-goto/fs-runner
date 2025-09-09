@@ -562,18 +562,34 @@ class ProhibitionDetectionTester:
             return "moderate", "high", 80.0, 2
 
     def _evaluate_against_thresholds(self, parsed: Tuple[str, str, float, int], thresholds: Tuple[str, str, float, int]) -> Tuple[bool, Dict[str, Any]]:
+        """検出結果を early_abort しきい値で評価
+
+        注意:
+        - 検出器は 'prohibition_level' に 'none'|'mild'|'moderate'|'strict' を返す。
+          これまで 'none' が未知レベルとして 'moderate' と同等に扱われ、偽陽性の中断が発生していた。
+          'none' は 'weak' 未満として扱う必要がある。
+        - 未知レベルは最小とみなす（中断根拠としない）。
+        """
         level_l, conf_level, conf_score, matches_count = parsed
         lvl_min, conf_lvl_min, score_min, matches_min = thresholds
-        order = {"weak": 0, "mild": 1, "moderate": 2, "strict": 3}
+
+        # レベル順位（小さいほど弱い）
+        order = {"none": -1, "weak": 0, "mild": 1, "moderate": 2, "strict": 3}
         lvl_min_idx = order.get(lvl_min, 2)
-        level_idx = order.get(level_l, order.get("moderate", 2))
+        level_idx = order.get(level_l, -1)  # 未知/none は最小とする
+
         should_abort = False
-        if level_idx >= lvl_min_idx:
+
+        # 1) レベルがしきい値以上
+        if level_idx >= lvl_min_idx and level_idx >= 0:
             should_abort = True
-        elif conf_level == conf_lvl_min or conf_score >= score_min:
+        # 2) 信頼度レベル一致 or スコア到達
+        elif (conf_level or "").lower() == (conf_lvl_min or "").lower() or conf_score >= score_min:
             should_abort = True
+        # 3) マッチ件数到達
         elif matches_count >= matches_min:
             should_abort = True
+
         summary = {
             "level": level_l,
             "confidence_level": conf_level or None,
