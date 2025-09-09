@@ -26,7 +26,7 @@ try:
     from bs4 import BeautifulSoup  # type: ignore
 
     HAS_BEAUTIFULSOUP = True
-except Exception:
+except ImportError:
     HAS_BEAUTIFULSOUP = False
 
 # プロジェクトパスを import path に追加
@@ -173,6 +173,66 @@ class ProhibitionDetectionTester:
             logger.error(f"Supabase initialization failed: {e}")
             raise
 
+    # --- helpers (DRY) ---
+    def _build_browser_extra_args(self, engine: str, headless: bool) -> List[str]:
+        extra_args: List[str] = []
+        if engine == "chromium":
+            is_linux = sys.platform.startswith("linux")
+            extra_args = ["--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
+            if is_linux:
+                extra_args += ["--no-sandbox", "--disable-setuid-sandbox"]
+            if headless:
+                extra_args += ["--disable-gpu"]
+        return extra_args
+
+    async def _install_popup_hooks(self):
+        if not self.context:
+            return
+        await self.context.add_init_script(
+            """
+            (() => { try {
+              const noop = () => false;
+              Object.defineProperty(window, 'close', { value: noop, configurable: true });
+              const _open = window.open;
+              Object.defineProperty(window, 'open', { value: (url, target, features) => {
+                try { window.location.href = url; } catch {}
+                return window;
+              }, configurable: true });
+            } catch {} })();
+            """
+        )
+
+    async def _install_network_routing(self):
+        if not self.context:
+            return
+        async def handle_route(route):
+            r = route.request
+            rtype = r.resource_type
+            url = r.url.lower()
+            if rtype in ["image", "media", "font", "manifest", "other"]:
+                await route.abort()
+                return
+            if rtype == "stylesheet":
+                await route.abort()
+                return
+            if rtype == "script":
+                trackers = [
+                    "googletagmanager.com",
+                    "google-analytics.com",
+                    "doubleclick.net",
+                    "googlesyndication.com",
+                    "facebook.net",
+                    "connect.facebook.net",
+                    "hotjar.com",
+                    "mixpanel.com",
+                    "amplitude.com",
+                ]
+                if any(k in url for k in trackers):
+                    await route.abort()
+                    return
+            await route.continue_()
+        await self.context.route("**/*", handle_route)
+
     async def _initialize_browser(self):
         try:
             self.playwright = await async_playwright().start()
@@ -188,14 +248,7 @@ class ProhibitionDetectionTester:
             if engine not in engine_map:
                 logger.warning(f"Unknown PLAYWRIGHT_ENGINE='{engine}', falling back to chromium")
 
-            extra_args: List[str] = []
-            if engine == "chromium":
-                is_linux = sys.platform.startswith("linux")
-                extra_args = ["--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
-                if is_linux:
-                    extra_args += ["--no-sandbox", "--disable-setuid-sandbox"]
-                if headless:
-                    extra_args += ["--disable-gpu"]
+            extra_args = self._build_browser_extra_args(engine, headless)
 
             launch_kwargs = dict(headless=headless, args=extra_args)
             if engine == "chromium":
@@ -213,49 +266,8 @@ class ProhibitionDetectionTester:
                 viewport={"width": 1366, "height": 900},
             )
 
-            await self.context.add_init_script(
-                """
-                (() => { try {
-                  const noop = () => false;
-                  Object.defineProperty(window, 'close', { value: noop, configurable: true });
-                  const _open = window.open;
-                  Object.defineProperty(window, 'open', { value: (url, target, features) => {
-                    try { window.location.href = url; } catch {}
-                    return window;
-                  }, configurable: true });
-                } catch {} })();
-                """
-            )
-
-            # 軽量ブロッキング（追跡系のみ）
-            async def handle_route(route):
-                r = route.request
-                rtype = r.resource_type
-                url = r.url.lower()
-                if rtype in ["image", "media", "font", "manifest", "other"]:
-                    await route.abort()
-                    return
-                if rtype == "stylesheet":
-                    await route.abort()
-                    return
-                if rtype == "script":
-                    trackers = [
-                        "googletagmanager.com",
-                        "google-analytics.com",
-                        "doubleclick.net",
-                        "googlesyndication.com",
-                        "facebook.net",
-                        "connect.facebook.net",
-                        "hotjar.com",
-                        "mixpanel.com",
-                        "amplitude.com",
-                    ]
-                    if any(k in url for k in trackers):
-                        await route.abort()
-                        return
-                await route.continue_()
-
-            await self.context.route("**/*", handle_route)
+            await self._install_popup_hooks()
+            await self._install_network_routing()
 
             self.context.set_default_navigation_timeout(30000)
             self.page = await self.context.new_page()
@@ -273,52 +285,12 @@ class ProhibitionDetectionTester:
         try:
             if self.context is None:
                 return
-            await self.context.add_init_script(
-                """
-                (() => { try {
-                  const noop = () => false;
-                  Object.defineProperty(window, 'close', { value: noop, configurable: true });
-                  const _open = window.open;
-                  Object.defineProperty(window, 'open', { value: (url, target, features) => {
-                    try { window.location.href = url; } catch {}
-                    return window;
-                  }, configurable: true });
-                } catch {} })();
-                """
-            )
+            await self._install_popup_hooks()
             await self.context.set_extra_http_headers(
                 {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
             )
             self.context.set_default_navigation_timeout(30000)
-
-            async def handle_route(route):
-                r = route.request
-                rtype = r.resource_type
-                url = r.url.lower()
-                if rtype in ["image", "media", "font", "manifest", "other"]:
-                    await route.abort()
-                    return
-                if rtype == "stylesheet":
-                    await route.abort()
-                    return
-                if rtype == "script":
-                    trackers = [
-                        "googletagmanager.com",
-                        "google-analytics.com",
-                        "doubleclick.net",
-                        "googlesyndication.com",
-                        "facebook.net",
-                        "connect.facebook.net",
-                        "hotjar.com",
-                        "mixpanel.com",
-                        "amplitude.com",
-                    ]
-                    if any(k in url for k in trackers):
-                        await route.abort()
-                        return
-                await route.continue_()
-
-            await self.context.route("**/*", handle_route)
+            await self._install_network_routing()
             self.page = await self.context.new_page()
             self.page.on("close", lambda: logger.debug("Active page closed (event)"))
         except Exception as e:
@@ -386,8 +358,12 @@ class ProhibitionDetectionTester:
                 logger.info("✅ Test company selected via threshold search", extra={"summary": True})
 
             logger.info(f"🎯 Target company_id: {company['id']}", extra={"summary": True})
-            logger.info("   Company: ***COMPANY_REDACTED***")
-            logger.info("   Form URL: ***URL_REDACTED***")
+            # LogSanitizer に委譲（CIでは自動マスクされる）
+            try:
+                logger.info(f"   Company: {company.get('company_name', '')}")
+                logger.info(f"   Form URL: {company.get('form_url', '')}")
+            except Exception:
+                pass
             return company
         except Exception as e:
             logger.error(f"Failed to fetch test form URL: {e}")
@@ -429,6 +405,7 @@ class ProhibitionDetectionTester:
                 assert self.page is not None
                 await self.page.goto(url, wait_until="domcontentloaded", timeout=25000)
             else:
+                logger.error(f"Goto error: {type(e).__name__}: {e}")
                 raise
 
     async def _stabilize_after_navigation(self) -> None:
@@ -552,15 +529,12 @@ class ProhibitionDetectionTester:
         logger.info(f"📄 Page source saved: {path}", extra={"summary": True})
         return path
 
-    def _evaluate_prohibition_detection(self, sp: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-        """実行系(Worker)と同等の基準で早期中断要否を評価"""
+    def _parse_detection_result(self, sp: Dict[str, Any]) -> Tuple[str, str, float, int]:
         if not isinstance(sp, dict):
-            return False, {"level": "none", "confidence_level": "none", "confidence_score": 0.0, "matches_count": 0}
-
-        matches = sp.get("matches") or []
+            return "none", "none", 0.0, 0
         level = (sp.get("prohibition_level") or sp.get("detection_method") or "detected")
         level_l = str(level).lower()
-        conf_level = str(sp.get("confidence_level") or "").lower()
+        conf_level = str(sp.get("confidence_level") or "none").lower()
         try:
             conf_score = float(sp.get("confidence_score") or 0.0)
         except Exception:
@@ -569,25 +543,30 @@ class ProhibitionDetectionTester:
             conf_score = 0.0
         if conf_score > 100:
             conf_score = 100.0
+        matches = sp.get("matches")
         try:
             matches_count = int(sp.get("summary", {}).get("total_matches"))
         except Exception:
-            matches_count = len(matches)
+            matches_count = len(matches) if isinstance(matches, (list, tuple)) else 0
+        return level_l, conf_level, conf_score, matches_count
 
-        # しきい値は config/worker_config.json と一致させる
+    def _load_thresholds(self) -> Tuple[str, str, float, int]:
         try:
             det = (get_worker_config() or {}).get("detectors", {}).get("prohibition", {})
             lvl_min = str(det.get("early_abort", {}).get("min_level", "moderate")).lower()
             conf_lvl_min = str(det.get("early_abort", {}).get("min_confidence_level", "high")).lower()
             score_min = float(det.get("early_abort", {}).get("min_score", 80))
             matches_min = int(det.get("early_abort", {}).get("min_matches", 2))
+            return lvl_min, conf_lvl_min, score_min, matches_min
         except Exception:
-            lvl_min, conf_lvl_min, score_min, matches_min = "moderate", "high", 80.0, 2
+            return "moderate", "high", 80.0, 2
 
+    def _evaluate_against_thresholds(self, parsed: Tuple[str, str, float, int], thresholds: Tuple[str, str, float, int]) -> Tuple[bool, Dict[str, Any]]:
+        level_l, conf_level, conf_score, matches_count = parsed
+        lvl_min, conf_lvl_min, score_min, matches_min = thresholds
         order = {"weak": 0, "mild": 1, "moderate": 2, "strict": 3}
         lvl_min_idx = order.get(lvl_min, 2)
         level_idx = order.get(level_l, order.get("moderate", 2))
-
         should_abort = False
         if level_idx >= lvl_min_idx:
             should_abort = True
@@ -595,14 +574,19 @@ class ProhibitionDetectionTester:
             should_abort = True
         elif matches_count >= matches_min:
             should_abort = True
-
         summary = {
-            "level": level,
+            "level": level_l,
             "confidence_level": conf_level or None,
             "confidence_score": conf_score if conf_score > 0 else None,
             "matches_count": matches_count,
         }
         return should_abort, summary
+
+    def _evaluate_prohibition_detection(self, sp: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        """実行系(Worker)と同等の基準で早期中断要否を評価"""
+        parsed = self._parse_detection_result(sp)
+        thresholds = self._load_thresholds()
+        return self._evaluate_against_thresholds(parsed, thresholds)
 
     async def run_single_test(self, company_id: Optional[int] = None) -> bool:
         try:
@@ -668,17 +652,24 @@ class ProhibitionDetectionTester:
             logger.error(f"Detection test failed: {e}")
             return False
 
-    def _make_json_serializable(self, obj: Any) -> Any:
-        """検出結果をJSONシリアライズ可能な形へ再帰的に変換"""
+    def _make_json_serializable(self, obj: Any, depth: int = 0, max_depth: Optional[int] = None) -> Any:
+        """検出結果をJSONシリアライズ可能な形へ再帰的に変換（深さ制限付き）"""
+        if max_depth is None:
+            try:
+                max_depth = int((get_worker_config() or {}).get("storage", {}).get("sanitize_max_depth", 6))
+            except Exception:
+                max_depth = 6
+        if depth >= (max_depth or 6):
+            return "<max_depth_reached>"
         try:
             if obj is None or isinstance(obj, (str, int, float, bool)):
                 return obj
             if isinstance(obj, dict):
-                return {str(k): self._make_json_serializable(v) for k, v in obj.items()}
+                return {str(k): self._make_json_serializable(v, depth + 1, max_depth) for k, v in obj.items()}
             if isinstance(obj, (list, tuple, set)):
-                return [self._make_json_serializable(v) for v in obj]
+                return [self._make_json_serializable(v, depth + 1, max_depth) for v in obj]
             if is_dataclass(obj):
-                return self._make_json_serializable(asdict(obj))
+                return self._make_json_serializable(asdict(obj), depth + 1, max_depth)
             # 最後の手段: 文字列化
             return str(obj)
         except Exception:
