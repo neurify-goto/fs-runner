@@ -258,6 +258,20 @@ class FieldMapper:
                         map_ok = False
                 except Exception:
                     pass
+            # 分割電話（電話1/2/3）にも電話の安全ガードを適用
+            if map_ok and field_name in {"電話1", "電話2", "電話3"}:
+                try:
+                    if not passes_safeguard(
+                        "電話番号",
+                        best_score_details,
+                        best_context,
+                        self.context_text_extractor,
+                        field_patterns,
+                        self.settings,
+                    ):
+                        map_ok = False
+                except Exception:
+                    map_ok = False
 
             # 郵便番号の安全ガード（CAPTCHA誤検出/汎用テキストへの誤割当て対策）
             if map_ok and field_name == "郵便番号":
@@ -302,6 +316,21 @@ class FieldMapper:
                         map_ok = False
                 except Exception:
                     pass
+
+            # 住所の安全ガード（フリガナ/部署等への誤割当て抑止）
+            if map_ok and field_name == "住所":
+                try:
+                    if not passes_safeguard(
+                        field_name,
+                        best_score_details,
+                        best_context,
+                        self.context_text_extractor,
+                        field_patterns,
+                        self.settings,
+                    ):
+                        map_ok = False
+                except Exception:
+                    map_ok = False
 
             # 汎用のセーフガード呼び出し（上記以外のフィールドは常に True だが、将来拡張に備えて共通化）
             if map_ok and field_name not in {"メールアドレス", "電話番号", "郵便番号", "都道府県"}:
@@ -444,12 +473,20 @@ class FieldMapper:
                         "ひらがな",
                     ]
                 )
+                # ラベル/周辺テキストにも手がかりがあれば許容（属性にカナ語が無いフォーム対策）
                 if not has_kana:
-                    continue
-                last_found = last_found or any(t in blob for t in ["セイ", "姓", "sei", "lastname", "family"])
+                    try:
+                        ctxs = await self.context_text_extractor.extract_context_for_element(el)
+                    except Exception:
+                        ctxs = []
+                    ctx_blob = " ".join([(getattr(c, 'text', '') or '') for c in (ctxs or [])])
+                    has_kana = any(t in ctx_blob for t in ["フリガナ", "ふりがな", "カナ", "ひらがな"]) or False
+                    if not has_kana:
+                        continue
+                last_found = last_found or any(t in blob for t in ["セイ", "せい", "姓", "sei", "lastname", "family"]) or ("セイ" in ctx_blob or "姓" in ctx_blob)
                 first_found = first_found or any(
-                    t in blob for t in ["メイ", "名", "mei", "firstname", "given"]
-                )
+                    t in blob for t in ["メイ", "めい", "名", "mei", "firstname", "given"]
+                ) or ("メイ" in ctx_blob or "名" in ctx_blob)
                 if last_found and first_found:
                     return True
             return False
@@ -2408,8 +2445,6 @@ class FieldMapper:
             "統合氏名カナ",
             "姓カナ",
             "名カナ",
-            # 会社情報
-            "会社名",
             # 連絡手段
             "メールアドレス",
             # 本文・内容

@@ -55,7 +55,7 @@ class FieldPatterns:
                 ],
                 "classes": ["kana", "katakana", "furigana"],
                 "placeholders": ["フリガナ", "ふりがな", "カタカナ", "セイ メイ", "セイ　メイ"],
-                "types": ["tel", "text"],
+                "types": ["text"],
                 "tags": ["input"],
                 "weight": 18,
                 "strict_patterns": ["フリガナ", "カタカナ", "kana", "furigana"],

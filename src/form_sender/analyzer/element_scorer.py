@@ -393,8 +393,8 @@ class ElementScorer:
                     element_info.get("placeholder", "") or "",
                 ])
                 # セイ/メイの強い手掛かり（カタカナ表記）
-                has_sei_hint = any(tok in blob_attr for tok in ["セイ", "姓", "sei", "lastname"])
-                has_mei_hint = any(tok in blob_attr for tok in ["メイ", "名", "mei", "firstname"])
+                has_sei_hint = any(tok in blob_attr for tok in ["セイ", "せい", "姓", "sei", "lastname"])
+                has_mei_hint = any(tok in blob_attr for tok in ["メイ", "めい", "名", "mei", "firstname"])
 
                 if field_name in {"姓カナ", "姓ひらがな"} and has_mei_hint and not has_sei_hint:
                     score_details["total_score"] = -999
@@ -1425,6 +1425,11 @@ class ElementScorer:
             # FAXは明確に不適合
             if any(k in context_lower for k in ["fax", "ファックス", "ファクス"]):
                 return -80
+        # 追加: 電話系（分割含む）が『氏名/お名前/フリガナ/カナ/ひらがな』文脈に反応しない
+        if field_name in {"電話番号", "電話1", "電話2", "電話3"}:
+            name_like_ctx = ["氏名", "お名前", "名前", "フリガナ", "ふりがな", "カナ", "ひらがな", "セイ", "メイ"]
+            if any(t.lower() in context_lower for t in name_like_ctx):
+                return -80
 
         # 特別ガード: メールアドレスの文脈に『電話』『tel』『お電話』『phone』が含まれる場合は負スコア
         # 特別ガード: 氏名(カナ以外)に『カナ/ふりがな/ひらがな』が含まれる場合は除外（誤割当抑止）
@@ -1438,6 +1443,10 @@ class ElementScorer:
                 for k in ["電話", "お電話", "tel", "phone", "telephone"]
             ):
                 return -60
+        # 追加ガード: 名前系フィールドがメールアドレス文脈に反応しないよう強く否定
+        if field_name in {"姓", "名", "統合氏名"}:
+            if any(k in context_lower for k in ["メール", "mail", "email", "e-mail", "アドレス"]):
+                return -80
 
         # 特別ガード: 会社名の文脈で『管理会社』『竣工』『年月日』などは不適切
         if field_name == "会社名":

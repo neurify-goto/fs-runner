@@ -75,7 +75,13 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
                 str(element_info.get("id") or ""),
                 str(element_info.get("class") or ""),
             ]).lower()
-            neg = ["建物名", "建物", "マンション", "アパート", "部屋番号", "号室", "room", "apartment", "building"]
+            neg = [
+                "建物名", "建物", "マンション", "アパート", "部屋番号", "号室", "room", "apartment", "building",
+                # 部署/部門系（住所の取り違えを抑止）
+                "部署", "部門", "課", "係", "department", "dept", "division", "section", "team",
+                # ふりがな・カナ系（住所→フリガナの取り違え抑止）
+                "フリガナ", "ふりがな", "カナ", "kana", "katakana", "hiragana", "セイ", "メイ",
+            ]
             if any(t in ph for t in neg) or any(t in name_id_cls for t in neg):
                 return False
             # 住所に無関係な『注文番号』等のトークンは除外

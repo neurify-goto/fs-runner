@@ -250,6 +250,29 @@ class InputValueAssigner:
         except Exception:
             pass
 
+        # 重複アサイン解消: 統合氏名カナと分割カナ（姓/名）が同一セレクタに向いている場合、
+        # 分割側（姓/名）のアサインを削除して重複入力を避ける。
+        try:
+            sel_u = (input_assignments.get("統合氏名カナ", {}) or {}).get("selector")
+            if sel_u:
+                for k in ["姓", "名"]:
+                    sel_k = (input_assignments.get(k, {}) or {}).get("selector")
+                    if sel_k and sel_k == sel_u:
+                        input_assignments.pop(k, None)
+                        logger.info(f"Removed duplicate assignment '{k}' sharing selector with 統合氏名カナ")
+            # 統合氏名（auto_fullname_label_1 等）と分割姓名（姓/名）が同一セレクタなら、分割側を削除
+            sel_full = (input_assignments.get("統合氏名", {}) or {}).get("selector") or (
+                input_assignments.get("auto_fullname_label_1", {}) or {}
+            ).get("selector")
+            if sel_full:
+                for k in ["姓", "名"]:
+                    sel_k = (input_assignments.get(k, {}) or {}).get("selector")
+                    if sel_k and sel_k == sel_full:
+                        input_assignments.pop(k, None)
+                        logger.info(f"Removed duplicate assignment '{k}' sharing selector with 統合氏名/auto_fullname")
+        except Exception:
+            pass
+
         return input_assignments
 
     def _should_input_field(self, field_name: str, field_info: Dict[str, Any]) -> bool:

@@ -297,6 +297,39 @@ class RequiredRescue:
                         )
                     )
                     field_name = self._infer_logical_field_name_for_required(ei, contexts)
+                    # 追加補正A: 『住所』と推定されたが、属性/ラベルがフリガナ/カナ系を示唆する場合は『統合氏名カナ』に補正
+                    try:
+                        if field_name == "住所":
+                            nic = (
+                                (ei.get("name", "") or "")
+                                + " "
+                                + (ei.get("id", "") or "")
+                                + " "
+                                + (ei.get("class", "") or "")
+                            ).lower()
+                            ctx_all = " ".join([(getattr(c, 'text', '') or '') for c in (contexts or [])]).lower()
+                            kana_hints = ["フリガナ", "ふりがな", "カナ", "kana", "katakana", "hiragana", "furi", "セイ", "メイ"]
+                            if any(k.lower() in nic for k in kana_hints) or any(k.lower() in ctx_all for k in kana_hints):
+                                field_name = "統合氏名カナ"
+                    except Exception:
+                        pass
+
+                    # 追加補正B: カナ系ヒントが強いのにカナ以外が推定された場合は『統合氏名カナ』に矯正
+                    try:
+                        nic = (
+                            (ei.get("name", "") or "")
+                            + " "
+                            + (ei.get("id", "") or "")
+                            + " "
+                            + (ei.get("class", "") or "")
+                        ).lower()
+                        ctx_all = " ".join([(getattr(c, 'text', '') or '') for c in (contexts or [])]).lower()
+                        kana_hints = ["フリガナ", "ふりがな", "カナ", "kana", "katakana", "hiragana", "furi", "セイ", "メイ"]
+                        non_kana = field_name not in {"統合氏名カナ", "姓カナ", "名カナ", "姓ひらがな", "名ひらがな"}
+                        if non_kana and (any(k.lower() in nic for k in kana_hints) or any(k.lower() in ctx_all for k in kana_hints)):
+                            field_name = "統合氏名カナ"
+                    except Exception:
+                        pass
                     # テキストエリア誤判定救済: 住所系テキストエリアを『お問い合わせ本文』にしない
                     try:
                         if field_name == "お問い合わせ本文":
@@ -327,7 +360,7 @@ class RequiredRescue:
 
                     # 重要フィールドはセーフガードを通す
                     try:
-                        if field_name in {"メールアドレス", "電話番号", "郵便番号", "都道府県", "お問い合わせ本文"}:
+                        if field_name in {"メールアドレス", "電話番号", "郵便番号", "都道府県", "お問い合わせ本文", "住所"}:
                             from .mapping_safeguards import passes_safeguard as _pass
                             # 簡易スコア詳細（最低限）
                             details_tmp = {"element_info": ei, "total_score": 60}
@@ -463,7 +496,27 @@ class RequiredRescue:
                             while f"住所_補助{suffix}" in field_mapping:
                                 suffix += 1
                             field_name = f"住所_補助{suffix}"
-                        elif self._is_confirmation_field(ei, contexts) or any(
+                        # CAPTCHA/クイズ/認証系は救済しない（住所誤判定の最終ブレーキ）
+                        try:
+                            nic_all = (
+                                (ei.get("name", "") or "")
+                                + " "
+                                + (ei.get("id", "") or "")
+                                + " "
+                                + (ei.get("class", "") or "")
+                            ).lower()
+                            ctx_all = " ".join([(getattr(c, 'text', '') or '') for c in (contexts or [])]).lower()
+                            neg_auth = [
+                                "captcha", "verification", "token", "otp", "confirm", "確認", "認証",
+                                "quiz", "wpcf7-quiz", "security", "セキュリティ", "画像認証",
+                                "文字を入力", "次の文字", "表示されている文字", "上の文字",
+                            ]
+                            if field_name.startswith("住所") and (any(t in nic_all for t in neg_auth) or any(t in ctx_all for t in neg_auth)):
+                                # 認証系の可能性が高い。今回の要素は救済対象から除外。
+                                continue
+                        except Exception:
+                            pass
+                        if self._is_confirmation_field(ei, contexts) or any(
                             t
                             in (
                                 (ei.get("name", "").lower())
