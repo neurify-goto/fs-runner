@@ -2132,12 +2132,16 @@ class UnmappedElementHandler:
         try:
             if not handled:
                 primary_sel = (field_mapping.get("メールアドレス", {}) or {}).get("selector", "")
-                email_like: list[tuple] = []  # (el, info, best_ctx)
+                email_like: list[tuple] = []  # (el, info, best_ctx, sel)
                 for el in candidates:
                     if id(el) in mapped_element_ids:
                         continue
                     info = await self.element_scorer._get_element_info(el)
                     if not info.get("visible", True):
+                        continue
+                    etype = (info.get("type", "") or "").lower()
+                    # 型で明確にメールでないものは除外
+                    if etype in ("number", "tel", "url", "password", "date", "time"):
                         continue
                     nm = (info.get("name", "") or "").lower()
                     ide = (info.get("id", "") or "").lower()
@@ -2146,16 +2150,35 @@ class UnmappedElementHandler:
                     attrs_blob = " ".join([nm, ide, cls, ph])
                     contexts = await self.context_text_extractor.extract_context_for_element(el)
                     best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
-                    if any(t in attrs_blob for t in ["email", "e-mail", "mail", "メール"]) or any(
-                        t in best for t in ["email", "mail", "メール"]
-                    ):
-                        sel = await self._generate_playwright_selector(el)
-                        # 既に主メールと同一セレクタは除外
-                        if primary_sel and sel == primary_sel:
-                            continue
-                        email_like.append((el, info, best, sel))
-                if len(email_like) >= 1:
-                    # 第1候補を確認欄とみなし、copy_from を設定
+                    email_tokens = ["email", "e-mail", "mail", "メール"]
+                    # 1) メール系の指標
+                    email_hit = (etype == "email") or any(t in attrs_blob for t in email_tokens) or any(
+                        t in best for t in email_tokens
+                    )
+                    if not email_hit:
+                        continue
+                    # 2) 確認系の指標（属性 or コンテキスト or 主メール名/IDのバリアント）
+                    confirm_attr = any(p in attrs_blob for p in confirmation_attr_patterns)
+                    confirm_ctx = any(t.lower() in best for t in [c.lower() for c in confirmation_ctx_tokens])
+                    variant_hit = False
+                    try:
+                        if primary_name:
+                            if nm in {f"_{primary_name}", f"{primary_name}2", f"{primary_name}_confirm"}:
+                                variant_hit = True
+                        if primary_id and not variant_hit:
+                            if ide in {f"_{primary_id}", f"{primary_id}2", f"{primary_id}_confirm"}:
+                                variant_hit = True
+                    except Exception:
+                        variant_hit = False
+                    if not (confirm_attr or confirm_ctx or variant_hit):
+                        continue
+                    sel = await self._generate_playwright_selector(el)
+                    # 既に主メールと同一セレクタは除外
+                    if primary_sel and sel == primary_sel:
+                        continue
+                    email_like.append((el, info, best, sel))
+                if email_like:
+                    # 最初の適合候補のみ採用
                     el, info, best, sel = email_like[0]
                     required = await self.element_scorer._detect_required_status(el)
                     handled["auto_email_confirm_1"] = {
@@ -2169,10 +2192,10 @@ class UnmappedElementHandler:
                         "auto_action": "copy_from",
                         "copy_from_field": "メールアドレス",
                         "default_value": "",
-                        "required": True if best else bool(required),
+                        "required": bool(required or best),
                         "auto_handled": True,
                     }
-        except Exception as e:
+        except Exception:
             # フォールバックでの例外は抑制（他ロジックに影響させない）
             pass
 
@@ -2184,14 +2207,29 @@ class UnmappedElementHandler:
                 seq = [(fe.selector, fe) for fe in (form_structure.elements or []) if getattr(fe, 'selector', '')]
                 idx = next((i for i,(sel,fe) in enumerate(seq) if sel == primary_sel), -1)
                 if idx >= 0:
-                    # 次以降の最初の input を確認欄とみなす（checkbox/radioは除外）
                     for j in range(idx+1, min(idx+6, len(seq))):
                         sel, fe = seq[j]
                         if fe.tag_name != 'input':
                             continue
-                        if fe.element_type in ('checkbox','radio','number'):
+                        if fe.element_type in ('checkbox','radio','number','tel','url','password'):
                             continue
                         if any((isinstance(v,dict) and v.get('selector')==sel) for v in field_mapping.values()):
+                            continue
+                        # メール指標 + 確認指標の双方が必要
+                        attrs_blob = " ".join([
+                            (fe.name or '').lower(),
+                            (fe.id or '').lower(),
+                            (fe.class_name or '').lower(),
+                            (fe.placeholder or '').lower(),
+                            (fe.label_text or '').lower(),
+                            (fe.associated_text or '').lower(),
+                        ])
+                        email_tokens = ["email","e-mail","mail","メール"]
+                        email_hit = (fe.element_type or '').lower() == 'email' or any(t in attrs_blob for t in email_tokens)
+                        confirm_hit = any(t in attrs_blob for t in [c.lower() for c in [
+                            "確認","確認用","再入力","もう一度","confirm","confirmation","re_email","re_mail","email2","mail2"
+                        ]])
+                        if not (email_hit and confirm_hit):
                             continue
                         handled['auto_email_confirm_structural'] = {
                             'element': fe.locator,
