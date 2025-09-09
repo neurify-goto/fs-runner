@@ -13,30 +13,24 @@ class AnalysisValidator:
 
     async def validate_final_assignments(self, input_assignments: Dict[str, Any], 
                                          field_mapping: Dict[str, Any], 
-                                         form_type_info: Dict[str, Any]) -> Tuple[bool, List[str]]:
+                                         form_type_info: Dict[str, Any],
+                                         dom_has_email: bool = False) -> Tuple[bool, List[str]]:
         self.duplicate_prevention.clear_assignments()
         validation_issues = []
 
         if form_type_info.get('primary_type') in ['search_form', 'feedback_form', 'order_form', 'newsletter_form', 'other_form', 'auth_form']:
             return True, []
 
-        # 必須検証: フォーム種別に依存しつつ、実在しない項目は要求しない（偽陽性抑止）
-        # - お問い合わせ本文: contact_form では原則必須（textarea/labelが無い非常に短い問い合わせフォームは除外されることがある）
-        # - メールアドレス: DOMに存在しない/検出できないケースでは必須要求しない
+        # 必須検証: フォーム種別に依存しつつ、DOM構造に基づく厳格判定
+        # - お問い合わせ本文: contact_form では原則必須
+        # - メールアドレス: DOMに email 欄が存在するのにマッピングされていなければ必須欠落とみなす
         require_message = True
-        require_email = False
-        try:
-            # 既にマッピングされていれば当然必須
-            require_email = ('メールアドレス' in field_mapping)
-            # input_assignments に email が含まれている場合も必須
-            require_email = require_email or ('メールアドレス' in (input_assignments or {}))
-        except Exception:
-            pass
-
-        if require_email and 'メールアドレス' not in field_mapping:
-            validation_issues.append("Required field 'メールアドレス' is missing")
         if require_message and 'お問い合わせ本文' not in field_mapping:
             validation_issues.append("Required field 'お問い合わせ本文' is missing")
+
+        if dom_has_email:
+            if 'メールアドレス' not in field_mapping and 'メールアドレス' not in (input_assignments or {}):
+                validation_issues.append("Required field 'メールアドレス' is missing (email field exists in DOM)")
 
         for field_name, assignment in input_assignments.items():
             value = assignment.get('value', '')

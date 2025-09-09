@@ -397,9 +397,44 @@ class RuleBasedAnalyzer:
             except Exception:
                 pass
 
+            # DOM にメール欄が存在するか（型/属性/ラベルの簡易検出）
+            def _dom_has_email_field() -> bool:
+                try:
+                    # 1) classifier 結果（type=email）があれば即 True
+                    #    （classified_elements はこのスコープに存在）
+                    if (classified_elements.get('email_inputs') or []):
+                        return True
+                except Exception:
+                    pass
+                # 2) 構造要素の属性/ラベルから簡易検出
+                try:
+                    tokens = ["email", "e-mail", "mail", "メール", "Mail"]
+                    for fe in (structured_elements or []):
+                        try:
+                            if (fe.tag_name or '').lower() != 'input':
+                                continue
+                            t = (fe.element_type or '').lower()
+                            if t == 'hidden' or t == 'submit' or t == 'button' or t == 'image':
+                                continue
+                            if t == 'email':
+                                return True
+                            blob = ' '.join([
+                                fe.name or '', fe.id or '', fe.class_name or '', fe.placeholder or '',
+                                fe.label_text or '', fe.associated_text or ''
+                            ]).lower()
+                            if any(tok in blob for tok in ["email", "e-mail", "mail", "メール"]):
+                                return True
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                return False
+
+            dom_has_email = _dom_has_email_field()
+
             is_valid, validation_issues = (
                 await self.validator.validate_final_assignments(
-                    input_assignment, self.field_mapping, form_type_info
+                    input_assignment, self.field_mapping, form_type_info, dom_has_email
                 )
             )
             if not is_valid:
