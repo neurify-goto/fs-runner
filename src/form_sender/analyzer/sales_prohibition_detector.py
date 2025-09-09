@@ -8,6 +8,7 @@
 import logging
 from typing import Dict, List, Any
 from dataclasses import dataclass
+from config.manager import get_worker_config
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,16 @@ class SalesProhibitionDetector:
             page_or_frame: PlaywrightのPageまたはFrameオブジェクト
         """
         self.page = page_or_frame
-        
+
+        # 高度検出器（HTML全体 + 正規化 + 除外ルール）を利用
+        try:
+            # 循環依存を避けるためローカルインポート
+            from ..detection.prohibition_detector import ProhibitionDetector
+            self._advanced_detector = ProhibitionDetector()
+        except Exception:
+            self._advanced_detector = None
+
+        # 旧: パターンマッチ（後方互換/フォールバック用）
         # 営業禁止文言パターン（既存の定義を継承・拡張）
         self.prohibition_patterns = {
             '直接的な営業禁止': [
@@ -83,27 +93,81 @@ class SalesProhibitionDetector:
             }
         """
         logger.info("Starting sales prohibition text detection")
-        
+
+        # 1) 高度検出（HTML全体 + 正規化 + 除外ルール + 信頼度）
+        if self._advanced_detector is not None:
+            try:
+                html = await self.page.content()
+                detected, phrases, conf_level, conf_score = self._advanced_detector.detect_with_confidence(html)
+
+                # 互換のためのマッチ配列を生成（位置/文脈は簡易）
+                adv_matches: List[ProhibitionMatch] = []
+                try:
+                    c = max(0.0, min(1.0, float(conf_score) / 100.0))
+                except Exception:
+                    # 設定からフォールバック信頼度を取得（既定: 0.8）
+                    try:
+                        det_cfg = get_worker_config().get('detectors', {}).get('prohibition', {})
+                        c_fallback = float(det_cfg.get('default_missing_confidence', 0.8))
+                    except Exception:
+                        c_fallback = 0.8
+                    c = c_fallback if detected else 0.0
+                for p in phrases[:50]:
+                    adv_matches.append(ProhibitionMatch(text=p, position="document", confidence=c, context=""))
+
+                # 信頼度→レベルへマップ
+                level_map = {
+                    'high': 'strict',
+                    'medium': 'moderate',
+                    'low': 'mild',
+                    'very_low': 'weak',
+                    'none': 'none',
+                    'error': 'weak'
+                }
+                prohibition_level = level_map.get(str(conf_level).lower(), 'weak' if detected else 'none')
+
+                result = {
+                    'has_prohibition': bool(detected),
+                    'prohibition_detected': bool(detected),
+                    'matches': adv_matches,
+                    'prohibition_level': prohibition_level,
+                    'summary': {
+                        'total_matches': len(phrases),
+                        'max_confidence': c,
+                        'avg_confidence': c,
+                        'categories_found': [],
+                    },
+                    # 追加: ワーカー側で参照できるよう信頼度を露出
+                    'confidence_level': conf_level,
+                    'confidence_score': conf_score,
+                    'detection_method': 'ProhibitionDetector(v2, html_full)',
+                }
+                logger.info(
+                    f"Prohibition detection completed by advanced detector: level={prohibition_level}, matches={len(phrases)}, conf={conf_level}/{conf_score:.1f}"
+                )
+                return result
+            except Exception as e:
+                logger.warning(f"Advanced prohibition detection failed; falling back to legacy matcher: {e}")
+
+        # 2) フォールバック: 旧パターンマッチ（限定要素スキャン）
         try:
-            # ページ全体のテキスト収集
             text_contents = await self._collect_page_text()
-            
-            # パターンマッチング実行
             matches = self._match_prohibition_patterns(text_contents)
-            
-            # 検出結果の評価
             result = self._evaluate_prohibition_level(matches)
-            
-            logger.info(f"Prohibition detection completed: {result['prohibition_level']} level with {len(matches)} matches")
+            logger.info(
+                f"Prohibition detection completed by legacy matcher: level={result['prohibition_level']}, matches={len(matches)}"
+            )
             return result
-            
         except Exception as e:
-            logger.error(f"Error in prohibition text detection: {e}")
+            logger.error(f"Error in fallback prohibition text detection: {e}")
             return {
                 'has_prohibition': False,
                 'matches': [],
                 'prohibition_level': 'none',
-                'summary': {'error': str(e)}
+                'summary': {'error': str(e)},
+                'confidence_level': 'none',
+                'confidence_score': 0.0,
+                'detection_method': 'legacy-matcher-error'
             }
     
     async def _collect_page_text(self) -> List[Dict[str, Any]]:

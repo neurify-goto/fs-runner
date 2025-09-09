@@ -50,6 +50,8 @@ class SuccessJudge:
         self.prohibition_detector = ProhibitionDetector()
         self.prohibition_detected = False
         self.prohibition_phrases = []
+        self.prohibition_confidence_level = 'none'
+        self.prohibition_confidence_score = 0.0
         
         # トレーシング機能
         self.enable_tracing = enable_tracing
@@ -238,12 +240,17 @@ class SuccessJudge:
             
             # ページのHTMLコンテンツを取得
             html_content = await self.page.content()
-            
-            # ProhibitionDetectorによる高度な検出を実行
-            detected, phrases = self.prohibition_detector.detect(html_content)
-            
+
+            # ProhibitionDetector（信頼度付き）で検出
+            detected, phrases, conf_level, conf_score = self.prohibition_detector.detect_with_confidence(html_content)
+
             self.prohibition_detected = detected
             self.prohibition_phrases = phrases
+            self.prohibition_confidence_level = conf_level
+            try:
+                self.prohibition_confidence_score = float(conf_score)
+            except Exception:
+                self.prohibition_confidence_score = 0.0
             
             if detected:
                 logger.warning(f"営業禁止文言を検出しました: {len(phrases)}件")
@@ -257,6 +264,8 @@ class SuccessJudge:
             # エラー時はfalseに設定（送信を継続）
             self.prohibition_detected = False
             self.prohibition_phrases = []
+            self.prohibition_confidence_level = 'error'
+            self.prohibition_confidence_score = 0.0
             
     def _track_response(self, response: Response):
         """レスポンス履歴を記録"""
@@ -302,7 +311,9 @@ class SuccessJudge:
                         'prohibition_detected': True,
                         'prohibition_phrases': self.prohibition_phrases,
                         'phrases_count': len(self.prohibition_phrases),
-                        'detection_method': 'Form Analyzer準拠高度検出'
+                        'detection_method': 'Form Analyzer準拠高度検出',
+                        'confidence_level': self.prohibition_confidence_level,
+                        'confidence_score': self.prohibition_confidence_score,
                     },
                     'message': f'営業禁止文言が検出されました ({len(self.prohibition_phrases)}件)',
                     'prohibition_detected': True,

@@ -7,10 +7,19 @@ Form Analyzerから移植した高度な営業禁止文言検出機能。
 
 import logging
 import re
+import time
+import unicodedata
 from functools import lru_cache
 from typing import List, Tuple
 
 from bs4 import BeautifulSoup, Comment
+try:
+    # 一部の環境でのみ提供
+    from bs4 import FeatureNotFound
+except Exception:  # pragma: no cover
+    FeatureNotFound = Exception
+
+from config.manager import get_worker_config
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +175,26 @@ class ProhibitionDetector:
             f"(?:営業|勧誘|セールス).*?(?:等|など).*?(?:{DECLINE_KEYWORDS}|{POLITE_DECLINE})",
         ])
 
+        # 英語サイト向けの直接禁止/丁寧否定パターンを追加（偽陰性低減）
+        patterns.extend([
+            # 直接的禁止
+            r"\bno\s+(sales|solicitations?|cold\s*calls?|telemarketing|vendor\s+solicitations?)\b",
+            r"\bno\s+vendor(s)?\s*(contact|calls|emails)\b",
+            r"\bno\s+cold\s*calls?\b",
+            # 受け付けない/許可しない
+            r"\b(do\s*not|don't|we\s*do\s*not|we\s*don't|not)\s+(accept|take|allow|permit)\s+(sales|solicitations?|vendor\s+(contacts?|inquiries?)|cold\s*calls?|telemarketing)\b",
+            r"\b(sales|solicitations?|telemarketing|cold\s*calls?|vendor\s+inquiries?)\s+(are|is)\s+(not\s+accepted|prohibited|forbidden)\b",
+            r"\bunsolicited\s+(sales|offers|proposals|marketing)\s+(are|is)\s+(not\s+accepted|prohibited|forbidden)\b",
+            r"\bplease\s+do\s+not\s+contact\s+us\s+for\s+(sales|marketing|business\s+proposals?)\b",
+            r"\bdo\s+not\s+use\s+this\s+form\s+for\s+(sales|solicitations?)\b",
+            # 緩やかな拒否
+            r"\bwe\s+are\s+not\s+(accepting|taking)\s+(sales|solicitations?|vendor\s+inquiries?)\b",
+        ])
+
         # パフォーマンス最適化：LRUキャッシュでコンパイル済みパターンをキャッシュ
         # リストをタプルに変換（ハッシュ可能にするため）
-        patterns_tuple = tuple(patterns)
+        # 並び順の違いによるキャッシュミスを避けるためソート
+        patterns_tuple = tuple(sorted(patterns))
         return self._get_cached_compiled_patterns(patterns_tuple)
 
     @lru_cache(maxsize=256)
@@ -219,6 +245,7 @@ class ProhibitionDetector:
             return False, []
 
         try:
+            _t0 = time.perf_counter()
             # Phase 1: 重要HTML要素での限定検索（高速・高精度）
             detected_result = self._detect_context_texts_targeted_with_confidence(html_content)
             
@@ -255,6 +282,16 @@ class ProhibitionDetector:
             return False, [], "none", 0.0
 
         try:
+            _t0 = time.perf_counter()
+            # オプション: 高速プリチェック（設定で有効化。偽陰性防止のためデフォルト無効）
+            try:
+                det_cfg = get_worker_config().get('detectors', {}).get('prohibition', {})
+                fast_precheck = bool(det_cfg.get('fast_precheck_enabled', False))
+            except Exception:
+                fast_precheck = False
+            if fast_precheck and not self._fast_precheck(html_content):
+                return False, [], "none", 0.0
+
             # Phase 1: 重要HTML要素での限定検索（高速・高精度）
             detected_result = self._detect_context_texts_targeted_with_confidence(html_content)
             
@@ -273,10 +310,14 @@ class ProhibitionDetector:
                 logger.info(f"営業禁止文言を検出: {len(detected_texts)}件 (信頼度: {confidence_level}, スコア: {confidence_score:.1f}%)")
                 for i, text in enumerate(detected_texts[:3]):  # 最初の3件をログ出力
                     logger.info(f"検出文言{i+1}: {text[:100]}...")
-            
+            _elapsed = (time.perf_counter() - _t0) * 1000.0
+            logger.debug(f"prohibition_detect_with_confidence: texts={len(detected_texts)}, conf={confidence_level}/{confidence_score:.1f}, elapsed_ms={_elapsed:.1f}")
             return len(detected_texts) > 0, detected_texts, confidence_level, confidence_score
+        except FeatureNotFound as e:
+            logger.error(f"HTML解析エラー(FeatureNotFound): {e}", exc_info=True)
+            return False, [], "error", 0.0
         except Exception as e:
-            logger.error(f"HTML解析エラー: {e}")
+            logger.error(f"HTML解析エラー({type(e).__name__}): {e}", exc_info=True)
             return False, [], "error", 0.0
     
     def _detect_context_texts_targeted_with_confidence(self, html_content: str) -> dict:
@@ -333,16 +374,22 @@ class ProhibitionDetector:
         
         # 検出されたテキストの品質分析
         for text in detected_texts:
-            # 否定文の存在チェック
-            negative_patterns = ['ません', 'できません', 'しておりません', 'お断り', 'ご遠慮', 'お控え']
+            # 否定文の存在チェック（英語も含めて強化）
+            negative_patterns = [
+                # 日本語
+                'ません', 'できません', 'しておりません', 'お断り', 'ご遠慮', 'お控え',
+                # 英語
+                "do not", "don't", 'no ', 'not accept', 'not be accepted',
+                'not allowed', 'not permitted', 'no cold call', 'no solicitation', 'no sales'
+            ]
             if any(pattern in text for pattern in negative_patterns):
                 base_score += 10.0
                 if "negative_structure" not in multiplier_factors:
                     multiplier_factors.append("negative_structure")
             
             # 複数キーワードの組み合わせチェック
-            sales_terms = ['営業', 'セールス', '勧誘', '販売']
-            contact_terms = ['問い合わせ', '連絡', '電話', 'メール']
+            sales_terms = ['営業', 'セールス', '勧誘', '販売', 'sales', 'solicitation', 'telemarketing']
+            contact_terms = ['問い合わせ', '連絡', '電話', 'メール', 'contact', 'call', 'phone', 'email']
             
             sales_count = sum(1 for term in sales_terms if term in text)
             contact_count = sum(1 for term in contact_terms if term in text)
@@ -412,7 +459,10 @@ class ProhibitionDetector:
                 # 注意・警告関連
                 '[class*="notice"]', '[id*="notice"]',
                 '[class*="warning"]', '[id*="warning"]',
-                '[class*="alert"]', '[id*="alert"]'
+                '[class*="alert"]', '[id*="alert"]',
+
+                # 見出し・リスト（利用注意や禁止事項が記載されがち）
+                'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'
             ]
             
             # 対象要素からテキストを収集
@@ -555,11 +605,32 @@ class ProhibitionDetector:
                 comment.extract()
             # テキストを抽出
             text_content = soup.get_text(separator=' ', strip=True)
+            # 文字正規化（全角記号/英数字 → 半角、互換統合）し、英語表現の揺れを低減
+            try:
+                text_content = unicodedata.normalize('NFKC', text_content)
+            except Exception:
+                pass
+            # 英語パターン検出の頑健化（日本語への影響は軽微）
+            text_content = text_content.lower()
             # 空白を正規化
             return re.sub(r'\s+', ' ', text_content)
         except Exception as e:
-            logger.warning(f"HTMLクリーニングエラー: {e} - 元のHTMLを返します")
-            return html_content
+            logger.warning(f"HTMLクリーニングエラー: {type(e).__name__}: {e} - 空文字で返却", exc_info=True)
+            return ""
+
+    def _fast_precheck(self, html: str) -> bool:
+        """軽量プリチェック：正規化済みHTMLに対する主要語彙の粗検索。"""
+        try:
+            text = unicodedata.normalize('NFKC', html).lower()
+        except Exception:
+            text = (html or '').lower()
+        if len(text) < 10:
+            return False
+        hints = [
+            '営業', 'セールス', '勧誘', '販売',
+            'no sales', 'no solicitation', 'no solicitations', 'cold call', 'telemarketing', 'unsolicited'
+        ]
+        return any(h in text for h in hints)
 
     def _split_into_sentences(self, text: str) -> List[str]:
         """テキストを文章に分割"""
