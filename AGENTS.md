@@ -43,8 +43,9 @@ Each GAS module follows the same pattern:
 * When creating a PR, provide the Pull Request URL to the user.
 * Include relevant issue numbers when applicable.
 * Maintain consistency with existing commit message style in the repository.
-* **PR pre-push comment (strict order):** Always follow this exact sequence — **implement → commit → comment → push**. After committing locally and before pushing, post a PR comment that summarizes the additional changes introduced by the commit(s). **Do not post the comment after pushing.**
-* **Comment style (past tense only):** Write the pre-push comment in past tense, factually describing what you implemented (e.g., "Replaced X with Y", "Fixed A by updating B"). Avoid future-tense or intention statements such as "about to push", "will push", or "going to".
+* **PR pre-push comment（適用範囲の明確化）:** 新規PRの作成時はプレプッシュコメントは不要です。通常どおりPRを作成してください。
+* **既存PRの追加push時のみ必須（順序厳守）:** 既にオープンしているPRをアップデートするために追加のコミットをpushする場合に限り、次の順序に従ってください — **implement → commit → comment → push**。ローカルでコミットした後、pushする前に、PRに今回の追加コミットで導入した変更点を要約するコメントを1件投稿します。**push後にコメントを追加しないでください。**
+* **コメント文体（過去形・事実ベース）:** 上記の追加push時に投稿するコメントは過去形で事実のみを簡潔に記述します（例: "X を Y に置き換えた", "A を B の更新で修正した"）。"about to push"、"will push" などの未来時制や意図表明は避けてください。
 * **PR Review Handling:** When receiving user review feedback on a Pull Request, do not blindly accept all suggestions. Critically evaluate each proposed improvement individually, determining whether it should be implemented based on technical merit and alignment with project standards. Only implement changes that are genuinely necessary and beneficial.
 * **Pull Request descriptions must report all changed files.** To ensure traceability, the description must list all created, modified, and deleted files using the following format:
   ```
