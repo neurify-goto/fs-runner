@@ -106,6 +106,13 @@ class IsolatedFormWorker:
 
     def _evaluate_prohibition_detection(self, sp: Dict[str, Any]) -> (bool, Dict[str, Any]):
         """営業禁止検出の早期中断要否を判定（設定値で閾値を調整可能）。"""
+        if not isinstance(sp, dict):
+            return False, {
+                'level': 'none',
+                'confidence_level': 'none',
+                'confidence_score': 0.0,
+                'matches_count': 0,
+            }
         matches = sp.get('matches') or []
         level = (sp.get('prohibition_level') or sp.get('detection_method') or 'detected')
         level_l = str(level).lower()
@@ -137,9 +144,9 @@ class IsolatedFormWorker:
 
         # 早期中断判定
         should_abort = False
-        if level_l in {lvl_min, 'strict'}:
+        if level_l == 'strict' or level_l == lvl_min:
             should_abort = True
-        elif conf_level in {conf_lvl_min} or conf_score >= score_min:
+        elif conf_level == conf_lvl_min or conf_score >= score_min:
             should_abort = True
         elif matches_count >= matches_min:
             should_abort = True

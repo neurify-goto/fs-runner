@@ -19,6 +19,8 @@ try:
 except Exception:  # pragma: no cover
     FeatureNotFound = Exception
 
+from config.manager import get_worker_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -280,6 +282,15 @@ class ProhibitionDetector:
             return False, [], "none", 0.0
 
         try:
+            # オプション: 高速プリチェック（設定で有効化。偽陰性防止のためデフォルト無効）
+            try:
+                det_cfg = get_worker_config().get('detectors', {}).get('prohibition', {})
+                fast_precheck = bool(det_cfg.get('fast_precheck_enabled', False))
+            except Exception:
+                fast_precheck = False
+            if fast_precheck and not self._fast_precheck(html_content):
+                return False, [], "none", 0.0
+
             # Phase 1: 重要HTML要素での限定検索（高速・高精度）
             detected_result = self._detect_context_texts_targeted_with_confidence(html_content)
             
@@ -603,8 +614,22 @@ class ProhibitionDetector:
             # 空白を正規化
             return re.sub(r'\s+', ' ', text_content)
         except Exception as e:
-            logger.warning(f"HTMLクリーニングエラー: {type(e).__name__}: {e} - 元のHTMLを返します", exc_info=True)
-            return html_content
+            logger.warning(f"HTMLクリーニングエラー: {type(e).__name__}: {e} - 空文字で返却", exc_info=True)
+            return ""
+
+    def _fast_precheck(self, html: str) -> bool:
+        """軽量プリチェック：正規化済みHTMLに対する主要語彙の粗検索。"""
+        try:
+            text = unicodedata.normalize('NFKC', html).lower()
+        except Exception:
+            text = (html or '').lower()
+        if len(text) < 10:
+            return False
+        hints = [
+            '営業', 'セールス', '勧誘', '販売',
+            'no sales', 'no solicitation', 'no solicitations', 'cold call', 'telemarketing', 'unsolicited'
+        ]
+        return any(h in text for h in hints)
 
     def _split_into_sentences(self, text: str) -> List[str]:
         """テキストを文章に分割"""
