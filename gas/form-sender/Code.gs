@@ -589,20 +589,10 @@ function buildSendQueueForAllTargetings() {
       return { success: false, message: 'アクティブtargetingなし', processed: 0 };
     }
 
-    // CONFIG.QUEUE_TARGETING_IDS が設定されている場合はそのID群に限定
+    // 要件: targetingシートのactive=trueのもの全てを対象
+    // ここではCONFIG.QUEUE_TARGETING_IDSによる絞り込みは行わない
     let targetList = activeTargetings;
-    if (Array.isArray(CONFIG.QUEUE_TARGETING_IDS) && CONFIG.QUEUE_TARGETING_IDS.length > 0) {
-      const whitelist = CONFIG.QUEUE_TARGETING_IDS
-        .map(function(x){ return Number(x); })
-        .filter(function(x){ return Number.isFinite(x) && x > 0; });
-      const allow = new Set(whitelist);
-      targetList = activeTargetings.filter(t => allow.has(Number(t.targeting_id || t.id || t)));
-      console.log(JSON.stringify({ level: 'info', event: 'queue_build_whitelist_filter', total_active: activeTargetings.length, filtered: targetList.length, ids: whitelist }));
-      if (targetList.length === 0) {
-        console.log('ホワイトリストに該当するアクティブtargetingがありません');
-        return { success: false, message: 'whitelist対象なし', processed: 0 };
-      }
-    }
+    console.log(JSON.stringify({ level: 'info', event: 'queue_build_target_all_active', total_active: activeTargetings.length }));
 
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     let processed = 0;
@@ -683,6 +673,8 @@ function buildSendQueueForAllTargetings() {
     return { success: false, error: String(e) };
   }
 }
+
+
 
 /**
  * 内部: チャンク分割投入の実装（Stage1→Stage2 を順に上限10000件まで）
