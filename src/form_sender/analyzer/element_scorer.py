@@ -173,6 +173,10 @@ class ElementScorer:
             # フォールバック（コンパイル失敗時は None）
             self._cjk_re = None
 
+        # 軽量正規化キャッシュ（ホットパス最適化用）。
+        # キー: 元文字列、値: NFKC+lower 文字列。サイズ上限を超えたらクリアする簡易方式。
+        self._norm_cache: Dict[str, str] = {}
+
         # email/phone 等の構造的プレースホルダー用パターン（高速化のため事前コンパイル）
         try:
             # RFC準拠までは厳密にせず、実務上の判定（*@*.* を包含）
@@ -235,12 +239,26 @@ class ElementScorer:
             return (token or "").lower() in (text or "").lower()
 
     def _normalize(self, s: str) -> str:
-        """比較用の正規化: NFKC + lower（全角/半角差異を吸収）。"""
+        """比較用の正規化: NFKC + lower（全角/半角差異を吸収）。簡易キャッシュ付き。"""
         try:
-            return unicodedata.normalize("NFKC", s or "").lower()
+            key = s or ""
+            v = self._norm_cache.get(key)
+            if v is not None:
+                return v
+            v = unicodedata.normalize("NFKC", key).lower()
+            # 簡易サイズ制御（過剰成長抑制）
+            if len(self._norm_cache) > 4096:
+                self._norm_cache.clear()
+            self._norm_cache[key] = v
+            return v
         except Exception:
             try:
-                return (s or "").lower()
+                key = s or ""
+                v = (key).lower()
+                if len(self._norm_cache) > 4096:
+                    self._norm_cache.clear()
+                self._norm_cache[key] = v
+                return v
             except Exception:
                 return ""
 
