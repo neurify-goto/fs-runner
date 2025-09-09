@@ -40,44 +40,69 @@ logger = setup_sanitized_logging(__name__)
 
 
 def _sanitize_field_mapping_for_storage(field_mapping: Dict[str, Any]) -> Dict[str, Any]:
-    """submissions.field_mapping に保存可能な最小構造へサニタイズ。
+    """submissions.field_mapping に『マッピング結果全体』を保存できるようJSON安全化する。
 
-    - Playwright の Locator など非シリアライズ要素を除去（element 等）
-    - スコア詳細や文脈テキストの巨大構造は保存しない（ログ肥大防止）
-    - 主要属性のみホワイトリストで保存
+    仕様変更（保存対象の拡張）:
+    - これまでの最小構造保存から方針を改め、スコア詳細・文脈なども含めた
+      可能な限り“全体像”を保存する。
+    - ただし Playwright の Locator など JSON 非対応のオブジェクトは除去する。
+    - dict/list は再帰的に処理し、シリアライズ不能な値は文字列化または無視する。
     """
+    import math
+
     if not isinstance(field_mapping, dict):
         return {}
 
-    allowed_keys = {
-        'selector',
-        'input_type',
-        'tag_name',
-        'name',
-        'id',
-        'class',
-        'placeholder',
-        'required',
-        'visible',
-        'enabled',
-        'default_value',
-        'source',  # 由来メタ（promote_split 等）
-    }
+    DROP_KEYS = {"element"}  # 非シリアライズ（Playwright Locator など）
 
-    sanitized: Dict[str, Any] = {}
+    def to_json_safe(value):
+        # プリミティブ
+        if value is None or isinstance(value, (str, bool, int)):
+            return value
+        if isinstance(value, float):
+            # NaN/Inf は null に落とす
+            return value if math.isfinite(value) else None
+        # 配列系
+        if isinstance(value, (list, tuple, set)):
+            return [to_json_safe(v) for v in list(value)]
+        # 連想配列
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                # キーは文字列化（JSON仕様）
+                try:
+                    k_str = str(k)
+                except Exception:
+                    k_str = "__invalid_key__"
+                if k_str in DROP_KEYS:
+                    continue
+                if k in DROP_KEYS:
+                    continue
+                out[k_str] = to_json_safe(v)
+            return out
+        # それ以外は文字列化（代表値として保持）
+        try:
+            s = str(value)
+        except Exception:
+            s = "<unserializable>"
+        # 文字列が極端に長い場合でもDBのTOASTに任せる（カットはしない）
+        return s
+
+    out: Dict[str, Any] = {}
     for fname, info in field_mapping.items():
-        if not isinstance(fname, str) or not isinstance(info, dict):
+        if not isinstance(fname, str):
+            try:
+                fname = str(fname)
+            except Exception:
+                continue
+        if not isinstance(info, dict):
+            # 想定外だがそのままJSON化して格納
+            out[fname] = to_json_safe(info)
             continue
-        safe: Dict[str, Any] = {}
-        for k in allowed_keys:
-            v = info.get(k)
-            # プリミティブのみ許可（list/dict は保存しない）
-            if isinstance(v, (str, int, float, bool)) or v is None:
-                safe[k] = v
-        # selector が無いものはスキップ（最小限の一貫性）
-        if safe.get('selector'):
-            sanitized[fname] = safe
-    return sanitized
+        # フィールドごとに JSON 安全化（element キーは除去）
+        cleaned = to_json_safe({k: v for k, v in info.items() if k not in DROP_KEYS})
+        out[fname] = cleaned
+    return out
 
 
 class _LifecycleOnlyFilter(logging.Filter):
@@ -760,20 +785,19 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             except Exception:
                 pass
 
-        # submissions.field_mapping へ書き込むマッピング結果を決定（非シリアライズ要素を除去して保存）
+        # submissions.field_mapping へ書き込むマッピング結果を決定（非シリアライズ要素のみ除去し、全体を保存）
         field_mapping_to_store = None
         try:
-            if not (isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED'):
-                ar = getattr(worker, '_current_analysis_result', None)
-                if isinstance(ar, dict):
-                    fm = ar.get('field_mapping')
-                    if isinstance(fm, dict):
-                        sanitized = _sanitize_field_mapping_for_storage(fm)
-                        # 空でなければ保存
-                        if sanitized:
-                            # 念のため JSON シリアライズ検証
-                            json.dumps(sanitized, ensure_ascii=False)
-                            field_mapping_to_store = sanitized
+            ar = getattr(worker, '_current_analysis_result', None)
+            if isinstance(ar, dict):
+                fm = ar.get('field_mapping')
+                if isinstance(fm, dict):
+                    sanitized = _sanitize_field_mapping_for_storage(fm)
+                    # 空でなく JSON 化できる場合は保存
+                    if sanitized is not None:
+                        # 念のため JSON シリアライズ検証
+                        json.dumps(sanitized, ensure_ascii=False)
+                        field_mapping_to_store = sanitized
         except Exception:
             field_mapping_to_store = None
 
