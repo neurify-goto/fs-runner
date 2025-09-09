@@ -612,6 +612,11 @@ class FieldMapper:
             except Exception:
                 pass
             field_mapping[f"郵便番号{idx}"] = info
+            # 重複割当て防止用に使用済みへ登録
+            try:
+                used_elements.add(id(el))
+            except Exception:
+                pass
         # 統合『郵便番号』が存在する場合は重複入力を避けるため削除
         try:
             field_mapping.pop("郵便番号", None)
