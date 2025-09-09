@@ -15,6 +15,9 @@ declare
   v_start_utc timestamp with time zone;
   v_end_utc   timestamp with time zone;
   v_today_success integer := 0;
+  v_today_assigned integer := 0;
+  v_effective_limit integer := 0;
+  v_date_key integer := 0;
 begin
   -- パラメータ境界チェック（過大値の誤設定を抑止）
   if coalesce(p_max_daily, 0) > 10000 then
@@ -23,19 +26,34 @@ begin
   -- JST境界のUTC時刻
   v_start_utc := (p_target_date::timestamp AT TIME ZONE 'Asia/Tokyo');
   v_end_utc   := ((p_target_date::timestamp + interval '1 day') AT TIME ZONE 'Asia/Tokyo');
+  v_date_key  := (to_char(p_target_date, 'YYYYMMDD'))::integer;
+
+  -- 同一 targeting_id / 日付のクレームを直列化し、上限の厳密順守を担保
+  perform pg_advisory_xact_lock(p_targeting_id, v_date_key);
 
   -- 当日成功数を集計し、上限に達していれば0件返却
   if coalesce(p_max_daily, 0) > 0 then
+    -- 成功済み + 現在割当中(assigned) を予約として考慮
     select count(*) into v_today_success
       from public.submissions s
      where s.targeting_id = p_targeting_id
        and s.success = true
        and s.submitted_at >= v_start_utc
        and s.submitted_at <  v_end_utc;
-    if v_today_success >= p_max_daily then
-      raise notice 'claim_next_batch: daily cap reached (targeting_id=%, today=%/%).', p_targeting_id, v_today_success, p_max_daily;
+
+    select count(*) into v_today_assigned
+      from public.send_queue sq
+     where sq.target_date_jst = p_target_date
+       and sq.targeting_id    = p_targeting_id
+       and sq.status          = 'assigned';
+
+    v_effective_limit := greatest(0, least(p_limit, p_max_daily - v_today_success - v_today_assigned));
+    if v_effective_limit <= 0 then
+      raise notice 'claim_next_batch: capacity exhausted (targeting_id=%, success=% assigned=% / cap=%).', p_targeting_id, v_today_success, v_today_assigned, p_max_daily;
       return;
     end if;
+  else
+    v_effective_limit := p_limit;
   end if;
 
   return query
@@ -53,7 +71,7 @@ begin
       and (p_shard_id is null or sq.shard_id = p_shard_id)
       and s.id is null
     order by sq.priority, sq.id
-    limit p_limit
+    limit v_effective_limit
     for update of sq skip locked
   ), upd as (
     update public.send_queue sq
