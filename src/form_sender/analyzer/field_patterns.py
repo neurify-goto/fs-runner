@@ -54,8 +54,8 @@ class FieldPatterns:
                     "your-name-kana", "name_kana", "fullname_kana", "furigana", "kana", "katakana"
                 ],
                 "classes": ["kana", "katakana", "furigana"],
-                "placeholders": ["フリガナ", "カタカナ", "セイ メイ", "セイ　メイ"],
-                "types": ["text"],
+                "placeholders": ["フリガナ", "ふりがな", "カタカナ", "セイ メイ", "セイ　メイ"],
+                "types": ["tel", "text"],
                 "tags": ["input"],
                 "weight": 18,
                 "strict_patterns": ["フリガナ", "カタカナ", "kana", "furigana"],
@@ -93,7 +93,7 @@ class FieldPatterns:
                     "企業名", "組織名", "法人名", "会社・団体名", "Corporate Name",
                     "Business Name", "Organization", "社名", "御社名", "貴社名"
                 ],
-                "types": ["text"],
+                "types": ["tel", "text"],
                 "tags": ["input"],
                 "weight": 25,  # 重要度最高レベル（メール22より高い）
                 "strict_patterns": ["会社", "会社名", "団体名", "company", "corporation", "firm", "enterprise", "business"],
@@ -534,7 +534,7 @@ class FieldPatterns:
                 "placeholders": ["住所", "Address", "都道府県", "市区町村", "番地・建物名", 
                                "東京都新宿区", "1-1-1", "Street Address", "区・町名", "番地",
                                "建物名・部屋番号", "ビル・マンション名", "部屋番号"],
-                "types": [],
+                "types": ["text"],
                 "tags": ["input", "select"],  # 都道府県はselectが多い
                 "weight": 13,
                 "exclude_patterns": ["your-name", "your_name", "name", "お名前", "氏名", "fullname", 

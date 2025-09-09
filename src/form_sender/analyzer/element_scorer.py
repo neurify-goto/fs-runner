@@ -1875,7 +1875,7 @@ class ElementScorer:
             except Exception:
                 dt_class = ""
             if isinstance(dt_class, str) and any(
-                k in dt_class for k in ["need", "required", "必須"]
+                k in dt_class for k in ["need", "required", "必須", "must", "mandatory"]
             ):
                 return True
 
@@ -1888,7 +1888,8 @@ class ElementScorer:
                         if (!node) return false;
                         const txt = (node.innerText || node.textContent || '').trim();
                         const cls = (node.getAttribute && (node.getAttribute('class') || '').toLowerCase()) || '';
-                        if (cls.includes('require') || cls.includes('required')) return true;
+                        // よくある表記ゆれを網羅（must/need/mandatory/is-required/required-mark等）
+                        if (cls.includes('require') || cls.includes('required') || cls.includes('must') || cls.includes('need') || cls.includes('mandatory') || cls.includes('is-required') || cls.includes('required-mark')) return true;
                         if (txt === '*' || txt === '＊' || txt.includes('必須')) return true;
                         // 『※』は注記と紛れるため短文(<=10文字)に限定
                         // 『※』単独は注記の可能性が高いため無効。『※必須』等の組合せのみ許可
@@ -1898,7 +1899,7 @@ class ElementScorer:
                       let p = el.parentElement; let depth = 0;
                       while (p && depth < 2) { // 直近の親までに限定（セクション跨ぎの誤検出防止）
                         // 親内の強調要素のみを走査（兄弟ブロックは走査しない：誤検出抑止）
-                        const spans = p.querySelectorAll('span.require, span.required, i, em, b, strong');
+                        const spans = p.querySelectorAll('span.require, span.required, span.must, span.mandatory, span.required-mark, i, em, b, strong');
                         for (const sp of spans) { if (hasMark(sp)) return true; }
                         p = p.parentElement; depth++;
                       }
@@ -2029,7 +2030,42 @@ class ElementScorer:
                     )
                 except Exception:
                     aria_found = False
-                if aria_found:
+            if aria_found:
+                return True
+
+            # 6.7) aria-describedby の参照先に必須表示/マークがあるか確認
+            try:
+                aria_desc = await element.get_attribute("aria-describedby")
+            except Exception:
+                aria_desc = None
+            if aria_desc:
+                try:
+                    ids = [s.strip() for s in str(aria_desc).split() if s.strip()]
+                    described_found = await element.evaluate(
+                        """
+                        (el, ids) => {
+                          const MARKS = ['必須','required','Required','MANDATORY','Mandatory','Must'];
+                          const hasReq = (node) => {
+                            if (!node) return false;
+                            const txt = (node.innerText || node.textContent || '').trim();
+                            const cls = (node.getAttribute && (node.getAttribute('class') || '').toLowerCase()) || '';
+                            if (MARKS.some(m => txt.includes(m))) return true;
+                            if (cls.includes('require') || cls.includes('required') || cls.includes('must') || cls.includes('mandatory') || cls.includes('is-required') || cls.includes('required-mark')) return true;
+                            if ((/※\s*必須/.test(txt)) || ['*','＊'].includes(txt.trim())) return true;
+                            return false;
+                          };
+                          for (const id of ids) {
+                            const n = document.getElementById(id);
+                            if (n && hasReq(n)) return true;
+                          }
+                          return false;
+                        }
+                        """,
+                        ids,
+                    )
+                except Exception:
+                    described_found = False
+                if described_found:
                     return True
 
             # 祖先クラスのヒントのみがあるケースを限定的に許可
@@ -2316,18 +2352,18 @@ class ElementScorer:
                     ):
                         return True
 
-            # 4) 旧式テーブル: 左隣のTDに必須表示（※/必須）がある場合
+            # 4) 旧式テーブル: 左隣のセル（TD/TH）に必須表示（※/必須）がある場合
             try:
                 left_td_text = await element.evaluate(
                     """
                     el => {
-                      const td = el.closest('td');
-                      if (!td) return '';
-                      const tr = td.closest('tr');
+                      const cell = el.closest('td,th');
+                      if (!cell) return '';
+                      const tr = cell.closest('tr');
                       if (!tr) return '';
                       const cells = Array.from(tr.children);
-                      const idx = cells.indexOf(td);
-                      const pick = (node) => (node && node.tagName && node.tagName.toLowerCase()==='td') ? (node.textContent||'').trim() : '';
+                      const idx = cells.indexOf(cell);
+                      const pick = (node) => (node && node.tagName && ['td','th'].includes(node.tagName.toLowerCase())) ? (node.textContent||'').trim() : '';
                       let t='';
                       if (idx>0) t = pick(cells[idx-1]);
                       if (!t && cells.length>=2) t = pick(cells[0]);

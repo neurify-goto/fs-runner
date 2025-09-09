@@ -18,7 +18,7 @@ class FieldMapper:
     """フィールドのマッピング処理を担当するクラス"""
 
     # 非必須だが高信頼であれば入力価値が高い項目（汎用・安全）
-    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所", "郵便番号"}
+    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所", "郵便番号", "郵便番号1", "郵便番号2"}
 
     def __init__(
         self,
@@ -173,11 +173,15 @@ class FieldMapper:
             # 自動送信の成功率向上に寄与するため。
             # 注意: フォーム特化の条件は追加しない（汎用改善のみ）。
             if (not should_map_field) and best_element:
-                if (
-                    field_name in self.OPTIONAL_HIGH_PRIORITY_FIELDS
-                    and best_score >= dynamic_threshold
-                ):
-                    should_map_field = True
+                if field_name in self.OPTIONAL_HIGH_PRIORITY_FIELDS:
+                    # 高優先度任意項目は動的閾値が高すぎて取りこぼすことがあるため、
+                    # ベース閾値以上かつ文脈が十分であれば採用を許可（汎用安全）
+                    if best_score >= dynamic_threshold:
+                        should_map_field = True
+                    else:
+                        base_threshold = self.settings.get("min_score_threshold", 70)
+                        if best_score >= base_threshold:
+                            should_map_field = True
 
             # マッピング判定ロジック（精度向上版）
             map_ok = False
@@ -347,6 +351,10 @@ class FieldMapper:
         )
         # 追加救済: name/id が 'email' の入力を確実に採用（確認欄は除外）
         await self._salvage_strict_email_by_attr(
+            classified_elements, field_mapping, used_elements
+        )
+        # 追加救済: 郵便番号の2分割（zip1/zip2 等）を name/id から直接補完
+        await self._salvage_postal_split_by_attr(
             classified_elements, field_mapping, used_elements
         )
         # 強化救済: ラベル/見出しテキストにメール語が含まれる input[type=text]
@@ -552,7 +560,54 @@ class FieldMapper:
                 info["source"] = "promote_split"
             except Exception:
                 pass
-            field_mapping[fname] = info
+        field_mapping[fname] = info
+
+    async def _salvage_postal_split_by_attr(self, classified_elements, field_mapping, used_elements):
+        """zip1/zip2 等の明示的な2分割郵便番号を直接補完（汎用救済）。
+
+        - 既に『郵便番号1/2』が存在する場合は何もしない。
+        - name/id に zip1/zip2, postal1/postal2, postcode1/postcode2 等が含まれる input を検出。
+        - 安全ガード（passes_safeguard('郵便番号')）に合格した場合のみ採用。
+        """
+        if ("郵便番号1" in field_mapping) or ("郵便番号2" in field_mapping):
+            return
+        cands = (classified_elements.get("tel_inputs") or []) + (
+            classified_elements.get("text_inputs") or []
+        )
+        part1, part2 = None, None
+        for el in cands:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                ei = {}
+            nm = (ei.get("name", "") or "").lower()
+            ide = (ei.get("id", "") or "").lower()
+            blob = f"{nm} {ide}"
+            if any(k in blob for k in ["zip1", "postal1", "postcode1", "zipcode1", "zip_1", "postal_code_1", "postcode_1", "zipcode_1"]):
+                part1 = (el, ei)
+            if any(k in blob for k in ["zip2", "postal2", "postcode2", "zipcode2", "zip_2", "postal_code_2", "postcode_2", "zipcode_2"]):
+                part2 = (el, ei)
+        if not (part1 and part2):
+            return
+        from .mapping_safeguards import passes_safeguard
+        for idx, (el, ei) in enumerate([part1, part2], start=1):
+            contexts = await self.context_text_extractor.extract_context_for_element(el)
+            # 簡易スコアで安全ガード判定
+            details = {"element_info": ei, "total_score": 85}
+            if not passes_safeguard("郵便番号", details, contexts, self.context_text_extractor, {}, self.settings):
+                return
+        # 採用
+        for idx, (el, ei) in enumerate([part1, part2], start=1):
+            contexts = await self.context_text_extractor.extract_context_for_element(el)
+            details = {"element_info": ei, "total_score": 85}
+            info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info["source"] = "salvage_postal_split"
+            except Exception:
+                pass
+            field_mapping[f"郵便番号{idx}"] = info
 
     async def _remap_prefecture_to_select_if_available(
         self, classified_elements, field_mapping

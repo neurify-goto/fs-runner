@@ -298,7 +298,8 @@ class FormPreProcessor:
 
             # auth: password/otp/captcha/login tokens
             # 強い指標: input[type=password] が存在
-            if any(' password ' in f' {tok} ' for tok in tokens) or any('otp' in tok or 'captcha' in tok for tok in tokens):
+            # 'captcha' は問い合わせフォームでも一般的なため認証判定から除外
+            if any(' password ' in f' {tok} ' for tok in tokens) or any('otp' in tok for tok in tokens):
                 scores['auth_form'] += 1.0
             try:
                 pwd_count = sum(1 for el in structured_elements if el.tag_name == 'input' and (el.element_type or '').lower() == 'password')
@@ -306,7 +307,8 @@ class FormPreProcessor:
                 pwd_count = 0
             if pwd_count > 0:
                 scores['auth_form'] += 3.0
-            auth_kw = ['login', 'signin', 'sign-in', 'sign_in', 'auth', 'authentication', 'ログイン', 'サインイン', 'パスワード', '認証', '二段階', 'ワンタイム', '確認コード', '認証コード', 'captcha', 'otp', 'mfa']
+            # 誤検出抑止: 'confirm/確認' は問い合わせフォームでも頻出のため除外
+            auth_kw = ['login', 'signin', 'sign-in', 'sign_in', 'auth', 'authentication', 'ログイン', 'サインイン', 'パスワード', '認証', '二段階', 'ワンタイム', '確認コード', '認証コード', 'otp', 'mfa']
             if any_token(auth_kw) or has_any(form_attr_text, auth_kw):
                 scores['auth_form'] += 2.0
 

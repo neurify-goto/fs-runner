@@ -930,7 +930,27 @@ class ContextTextExtractor:
                         // 最初のth要素のテキストを取得
                         return ths[0].textContent?.trim() || null;
                     }
-                    
+
+                    // Fallback: 一部サイトでは th ではなく td が見出しセルとして使われる
+                    // 例: <td class="form_index">ご住所</td><td class="list_value"><input ...></td>
+                    const cells = Array.from(tr.children);
+                    const tdIndex = cells.indexOf(td);
+                    if (tdIndex > 0) {
+                        // 直前セル、もしくは先頭セルをラベル候補として採用
+                        const pickLabelTd = (node) => {
+                          if (!node || !node.tagName) return '';
+                          const tag = node.tagName.toLowerCase();
+                          if (tag !== 'td') return '';
+                          const txt = (node.textContent||'').trim();
+                          // 短すぎる/必須インジケータのみのセルは除外
+                          if (!txt || txt.replace(/\s+/g,'').length < 2) return '';
+                          return txt;
+                        };
+                        let t = pickLabelTd(cells[tdIndex-1]);
+                        if (!t) t = pickLabelTd(cells[0]);
+                        if (t) return t;
+                    }
+
                     // 同じ行にthがない場合、前の行のth要素を探す
                     let prevTr = tr.previousElementSibling;
                     while (prevTr) {

@@ -651,6 +651,7 @@ class FieldMappingAnalyzer:
             )
 
             # HTMLから必須フィールド情報を抽出
+            # 必須フィールドを抽出（厳密化）
             required_fields_info = self._extract_required_fields(form_content)
             analysis_result["required_fields_info"] = required_fields_info
 

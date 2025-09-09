@@ -273,9 +273,10 @@ class InputValueAssigner:
             "電話番号",
             "会社名",
             "郵便番号",
+            "住所",
         ]
-        # 分割電話（電話番号1/2/3）は統合電話と同等に扱う（フォーム側が分割要求の場合）
-        if field_name in core_fields or field_name in {"電話番号1", "電話番号2", "電話番号3"}:
+        # 分割電話（電話番号1/2/3）と分割郵便番号（郵便番号1/2）は統合と同等に扱う
+        if field_name in core_fields or field_name in {"電話番号1", "電話番号2", "電話番号3", "郵便番号1", "郵便番号2"}:
             return True
         return field_info.get("required", False)
 
