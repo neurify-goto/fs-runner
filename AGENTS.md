@@ -101,7 +101,7 @@ Each GAS module follows the same pattern:
 * **Logging Policy:** Adhere to a clear logging policy. Use appropriate log levels (e.g., INFO, WARNING, ERROR) and ensure sensitive information (like personal data) is never logged.
 
 #### **Security and Privacy in Logging**
-* **Sensitive Data Protection:** Never log sensitive information including:
+* **Sensitive Data Protection (CI/CD 環境):** GitHub Actions 等のCI/CDログでは、以下の機微情報を記録しない（または必ずマスキングする）:
   * Company names and URLs (企業名・URL)
   * Client configuration data (クライアント設定データ)
   * Personal information (個人情報)
@@ -115,8 +115,10 @@ Each GAS module follows the same pattern:
 * **Test Environment:** Ensure test files do not expose real company data in logs
 * **LogSanitizer Usage:** Utilize the existing LogSanitizer class to automatically mask sensitive information in logs
 
-#### GAS Projects (Private Environments)
-- GAS projects for this system are operated in private, internal environments. Therefore, masking of company names and URLs is NOT required in GAS logs. Keep masking and redaction strictly enforced in CI/CD (GitHub Actions) logs.
+#### GAS Projects (Private Environments) — マスキング対象外の明記
+- 本システムの GAS プロジェクトは私的な内部環境で運用されます。したがって、GAS の実行ログは「企業名・URLのマスキング対象外」です（機能検証に必要な範囲で、企業名やURL等をそのまま出力可能）。
+- ただし、CI/CD（GitHub Actions）ログでは従来通りマスキングと秘匿を厳格に適用します（上記「Sensitive Data Protection (CI/CD環境)」が優先）。
+- どちらの環境でも、必要最小限のログにとどめ、個人情報や資格情報は記録しません。
 
 ### **File Organization Standards**
 
