@@ -537,13 +537,11 @@ function buildSendQueueForTargeting(targetingId = null) {
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     // デバッグ: パラメータ要約
     const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
-    const sqlPreview = (t.targeting_sql || '').slice(0, 300);
     console.log(JSON.stringify({
       level: 'info', event: 'queue_build_start', targeting_id: targetingId, date_jst: dateJst,
       param_summary: {
         shards: 8, limit: 10000,
         targeting_sql_len: (t.targeting_sql || '').length,
-        targeting_sql_preview: sqlPreview,
         ng_companies_tokens: ngTokens.length
       }
     }));
@@ -623,13 +621,11 @@ function buildSendQueueForAllTargetings() {
         const dateStartMs = Date.now();
         // 追加の詳細デバッグ: 各targetingのパラメータと長さ
         const ngTokens = (targeting.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
-        const sqlPreview = (targeting.targeting_sql || '').slice(0, 300);
         console.log(JSON.stringify({
           level: 'info', event: 'queue_build_start', targeting_id: targetingId, date_jst: dateJst,
           param_summary: {
             shards: 8, limit: 10000,
             targeting_sql_len: (targeting.targeting_sql || '').length,
-            targeting_sql_preview: sqlPreview,
             ng_companies_tokens: ngTokens.length
           }
         }));
