@@ -8,6 +8,7 @@
 import logging
 from typing import Dict, List, Any
 from dataclasses import dataclass
+from config.manager import get_worker_config
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,13 @@ class SalesProhibitionDetector:
                 try:
                     c = max(0.0, min(1.0, float(conf_score) / 100.0))
                 except Exception:
-                    c = 0.8 if detected else 0.0
+                    # 設定からフォールバック信頼度を取得（既定: 0.8）
+                    try:
+                        det_cfg = get_worker_config().get('detectors', {}).get('prohibition', {})
+                        c_fallback = float(det_cfg.get('default_missing_confidence', 0.8))
+                    except Exception:
+                        c_fallback = 0.8
+                    c = c_fallback if detected else 0.0
                 for p in phrases[:50]:
                     adv_matches.append(ProhibitionMatch(text=p, position="document", confidence=c, context=""))
 

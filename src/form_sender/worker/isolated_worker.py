@@ -104,6 +104,54 @@ class IsolatedFormWorker:
         except Exception:
             self._content_sanitizer = None
 
+    def _evaluate_prohibition_detection(self, sp: Dict[str, Any]) -> (bool, Dict[str, Any]):
+        """営業禁止検出の早期中断要否を判定（設定値で閾値を調整可能）。"""
+        matches = sp.get('matches') or []
+        level = (sp.get('prohibition_level') or sp.get('detection_method') or 'detected')
+        level_l = str(level).lower()
+        conf_level = str(sp.get('confidence_level') or '').lower()
+        try:
+            conf_score = float(sp.get('confidence_score') or 0.0)
+        except Exception:
+            conf_score = 0.0
+        # 0..100 にクランプ
+        if conf_score < 0:
+            conf_score = 0.0
+        if conf_score > 100:
+            conf_score = 100.0
+        # 件数（summary優先）
+        try:
+            matches_count = int(sp.get('summary', {}).get('total_matches'))
+        except Exception:
+            matches_count = len(matches)
+
+        # 設定から閾値を取得（無ければデフォルト）
+        try:
+            det = (self.config.get('worker_config') or {}).get('detectors', {}).get('prohibition', {})
+            lvl_min = str(det.get('early_abort', {}).get('min_level', 'moderate')).lower()
+            conf_lvl_min = str(det.get('early_abort', {}).get('min_confidence_level', 'high')).lower()
+            score_min = float(det.get('early_abort', {}).get('min_score', 80))
+            matches_min = int(det.get('early_abort', {}).get('min_matches', 2))
+        except Exception:
+            lvl_min, conf_lvl_min, score_min, matches_min = 'moderate', 'high', 80.0, 2
+
+        # 早期中断判定
+        should_abort = False
+        if level_l in {lvl_min, 'strict'}:
+            should_abort = True
+        elif conf_level in {conf_lvl_min} or conf_score >= score_min:
+            should_abort = True
+        elif matches_count >= matches_min:
+            should_abort = True
+
+        summary = {
+            'level': level,
+            'confidence_level': conf_level or None,
+            'confidence_score': conf_score if conf_score > 0 else None,
+            'matches_count': matches_count,
+        }
+        return should_abort, summary
+
     def _determine_http_status(self, response_analysis: Dict[str, Any]) -> Optional[int]:
         """HTTPステータスを優先順位で決定する: 429 > 403 > 5xx > その他（最後）"""
         try:
@@ -636,6 +684,8 @@ class IsolatedFormWorker:
     ) -> Dict[str, Any]:
         """ルールベースフォーム入力実行"""
         try:
+            
+            
             # 追加入力用にクライアントデータと初回入力セレクタを保持
             self._current_client_data = client_data
             self._initial_filled_selectors = set()
@@ -660,32 +710,10 @@ class IsolatedFormWorker:
                 sp = analysis_result.get('sales_prohibition') or {}
                 has_prohibition = bool(sp.get('has_prohibition') or sp.get('prohibition_detected'))
                 if has_prohibition:
-                    matches = sp.get('matches') or []
-                    level = (sp.get('prohibition_level') or sp.get('detection_method') or 'detected')
-                    level_l = str(level).lower()
-                    conf_level = str(sp.get('confidence_level') or '').lower()
-                    try:
-                        conf_score = float(sp.get('confidence_score') or 0.0)
-                    except Exception:
-                        conf_score = 0.0
-                    # サマリの件数優先（なければ matches 長）
-                    try:
-                        matches_count = int(sp.get('summary', {}).get('total_matches'))
-                    except Exception:
-                        matches_count = len(matches)
-
-                    # 早期中断の閾値: 誤検出を抑えつつ偽陰性ゼロ運用
-                    should_abort = False
-                    if level_l in {"moderate", "strict"}:
-                        should_abort = True
-                    elif conf_level in {"high"} or conf_score >= 80.0:
-                        should_abort = True
-                    elif matches_count >= 2:
-                        should_abort = True
-
+                    should_abort, summary = self._evaluate_prohibition_detection(sp)
                     if should_abort:
                         logger.warning(
-                            f"Worker {self.worker_id}: Sales prohibition detected (record_id={record_id}, matches={matches_count}, level={level}, conf={conf_level}/{conf_score:.1f})"
+                            f"Worker {self.worker_id}: Sales prohibition detected (record_id={record_id}, matches={summary.get('matches_count')}, level={summary.get('level')}, conf={summary.get('confidence_level')}/{summary.get('confidence_score')})"
                         )
                         return {
                             "error": True,
@@ -701,17 +729,14 @@ class IsolatedFormWorker:
                                 },
                                 "prohibition_summary": {
                                     "detected": True,
-                                    "level": level,
-                                    "matches_count": matches_count,
-                                    "confidence_level": conf_level or None,
-                                    "confidence_score": conf_score if conf_score > 0 else None,
+                                    **summary,
                                     "detection_source": "RuleBasedAnalyzer",
                                 },
                             },
                         }
                     else:
                         logger.info(
-                            f"Worker {self.worker_id}: sales prohibition signals detected but below early-abort threshold (record_id={record_id}, level={level}, conf={conf_level}/{conf_score:.1f}, matches={matches_count})"
+                            f"Worker {self.worker_id}: sales prohibition signals detected but below early-abort threshold (record_id={record_id}, level={summary.get('level')}, conf={summary.get('confidence_level')}/{summary.get('confidence_score')}, matches={summary.get('matches_count')})"
                         )
             except Exception as _e:
                 logger.debug(f"Worker {self.worker_id}: sales prohibition early-check skipped: {_e}")

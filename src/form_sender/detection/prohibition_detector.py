@@ -7,11 +7,17 @@ Form Analyzerから移植した高度な営業禁止文言検出機能。
 
 import logging
 import re
+import time
 import unicodedata
 from functools import lru_cache
 from typing import List, Tuple
 
 from bs4 import BeautifulSoup, Comment
+try:
+    # 一部の環境でのみ提供
+    from bs4 import FeatureNotFound
+except Exception:  # pragma: no cover
+    FeatureNotFound = Exception
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +191,8 @@ class ProhibitionDetector:
 
         # パフォーマンス最適化：LRUキャッシュでコンパイル済みパターンをキャッシュ
         # リストをタプルに変換（ハッシュ可能にするため）
-        patterns_tuple = tuple(patterns)
+        # 並び順の違いによるキャッシュミスを避けるためソート
+        patterns_tuple = tuple(sorted(patterns))
         return self._get_cached_compiled_patterns(patterns_tuple)
 
     @lru_cache(maxsize=256)
@@ -236,6 +243,7 @@ class ProhibitionDetector:
             return False, []
 
         try:
+            _t0 = time.perf_counter()
             # Phase 1: 重要HTML要素での限定検索（高速・高精度）
             detected_result = self._detect_context_texts_targeted_with_confidence(html_content)
             
@@ -290,10 +298,14 @@ class ProhibitionDetector:
                 logger.info(f"営業禁止文言を検出: {len(detected_texts)}件 (信頼度: {confidence_level}, スコア: {confidence_score:.1f}%)")
                 for i, text in enumerate(detected_texts[:3]):  # 最初の3件をログ出力
                     logger.info(f"検出文言{i+1}: {text[:100]}...")
-            
+            _elapsed = (time.perf_counter() - _t0) * 1000.0
+            logger.debug(f"prohibition_detect_with_confidence: texts={len(detected_texts)}, conf={confidence_level}/{confidence_score:.1f}, elapsed_ms={_elapsed:.1f}")
             return len(detected_texts) > 0, detected_texts, confidence_level, confidence_score
+        except FeatureNotFound as e:
+            logger.error(f"HTML解析エラー(FeatureNotFound): {e}", exc_info=True)
+            return False, [], "error", 0.0
         except Exception as e:
-            logger.error(f"HTML解析エラー: {e}")
+            logger.error(f"HTML解析エラー({type(e).__name__}): {e}", exc_info=True)
             return False, [], "error", 0.0
     
     def _detect_context_texts_targeted_with_confidence(self, html_content: str) -> dict:
@@ -591,7 +603,7 @@ class ProhibitionDetector:
             # 空白を正規化
             return re.sub(r'\s+', ' ', text_content)
         except Exception as e:
-            logger.warning(f"HTMLクリーニングエラー: {e} - 元のHTMLを返します")
+            logger.warning(f"HTMLクリーニングエラー: {type(e).__name__}: {e} - 元のHTMLを返します", exc_info=True)
             return html_content
 
     def _split_into_sentences(self, text: str) -> List[str]:

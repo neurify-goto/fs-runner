@@ -151,6 +151,20 @@
     "requeue_interval_seconds": 300,
     "requeue_stale_minutes": 15
   },
+  "detectors": {
+    "prohibition": {
+      "default_missing_confidence": 0.8,
+      "early_abort": {
+        "min_level": "moderate",
+        "min_confidence_level": "high",
+        "min_score": 80,
+        "min_matches": 2
+      }
+    }
+  },
+  "storage": {
+    "sanitize_max_depth": 6
+  },
   "final_submit": {
     "confirmation_extra_wait_ms": 2000,
     "_comment": "確認ページでの最終送信後に余裕を持って待機する追加ミリ秒（描画・遷移の安定化）"

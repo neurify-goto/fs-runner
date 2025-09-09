@@ -49,13 +49,22 @@ def _sanitize_field_mapping_for_storage(field_mapping: Dict[str, Any]) -> Dict[s
     - dict/list は再帰的に処理し、シリアライズ不能な値は文字列化または無視する。
     """
     import math
+    # 最大再帰深さ（安全弁）
+    try:
+        max_depth = int(get_worker_config().get('storage', {}).get('sanitize_max_depth', 6))
+        if max_depth < 1:
+            max_depth = 1
+    except Exception:
+        max_depth = 6
 
     if not isinstance(field_mapping, dict):
         return {}
 
     DROP_KEYS = {"element"}  # 非シリアライズ（Playwright Locator など）
 
-    def to_json_safe(value):
+    def to_json_safe(value, depth: int = 0):
+        if depth >= max_depth:
+            return "<max_depth_reached>"
         # プリミティブ
         if value is None or isinstance(value, (str, bool, int)):
             return value
@@ -64,7 +73,7 @@ def _sanitize_field_mapping_for_storage(field_mapping: Dict[str, Any]) -> Dict[s
             return value if math.isfinite(value) else None
         # 配列系
         if isinstance(value, (list, tuple, set)):
-            return [to_json_safe(v) for v in list(value)]
+            return [to_json_safe(v, depth + 1) for v in list(value)]
         # 連想配列
         if isinstance(value, dict):
             out = {}
@@ -78,7 +87,7 @@ def _sanitize_field_mapping_for_storage(field_mapping: Dict[str, Any]) -> Dict[s
                     continue
                 if k in DROP_KEYS:
                     continue
-                out[k_str] = to_json_safe(v)
+                out[k_str] = to_json_safe(v, depth + 1)
             return out
         # それ以外は文字列化（代表値として保持）
         try:
@@ -279,10 +288,11 @@ def _prune_classify_cache(now_ts: float) -> None:
     """TTL とサイズに基づいて簡易的にキャッシュを整理。"""
     try:
         max_size, ttl = _get_classify_cache_limits()
-        # TTL 期限切れを最大16件だけ掃除（イテレータで軽掃除）
+        # TTL 期限切れを最大16件だけ掃除（安全のためキーを一度リスト化）
         import itertools
         removed = 0
-        for k in itertools.islice(_CLASSIFY_CACHE.keys(), 64):
+        keys_snapshot = list(_CLASSIFY_CACHE.keys())[:64]
+        for k in keys_snapshot:
             ent = _CLASSIFY_CACHE.get(k)
             if not isinstance(ent, dict):
                 _CLASSIFY_CACHE.pop(k, None)
@@ -295,7 +305,8 @@ def _prune_classify_cache(now_ts: float) -> None:
         # サイズ超過なら古い順に削除
         while len(_CLASSIFY_CACHE) > max_size:
             try:
-                _CLASSIFY_CACHE.pop(next(iter(_CLASSIFY_CACHE)))
+                oldest_key = next(iter(_CLASSIFY_CACHE))
+                _CLASSIFY_CACHE.pop(oldest_key, None)
             except StopIteration:
                 break
     except Exception:
