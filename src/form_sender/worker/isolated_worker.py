@@ -142,9 +142,13 @@ class IsolatedFormWorker:
         except Exception:
             lvl_min, conf_lvl_min, score_min, matches_min = 'moderate', 'high', 80.0, 2
 
-        # 早期中断判定
+        # 早期中断判定（レベルは序数比較: weak < mild < moderate < strict）
+        order = {'weak': 0, 'mild': 1, 'moderate': 2, 'strict': 3}
+        lvl_min_idx = order.get(lvl_min, 2)
+        level_idx = order.get(level_l, order.get('moderate', 2))
+
         should_abort = False
-        if level_l == 'strict' or level_l == lvl_min:
+        if level_idx >= lvl_min_idx:
             should_abort = True
         elif conf_level == conf_lvl_min or conf_score >= score_min:
             should_abort = True

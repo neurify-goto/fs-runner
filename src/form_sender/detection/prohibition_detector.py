@@ -282,6 +282,7 @@ class ProhibitionDetector:
             return False, [], "none", 0.0
 
         try:
+            _t0 = time.perf_counter()
             # オプション: 高速プリチェック（設定で有効化。偽陰性防止のためデフォルト無効）
             try:
                 det_cfg = get_worker_config().get('detectors', {}).get('prohibition', {})
