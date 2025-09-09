@@ -626,7 +626,18 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_shard_id': shard_id,
         }
         try:
-            resp = supabase.rpc('claim_next_batch', params).execute()
+            # 日次上限が設定されている場合は、同名の拡張版（p_max_daily付き）で呼び出し。
+            max_daily = _extract_max_daily_sends(client_data)
+            if max_daily is not None and max_daily > 0:
+                cap_params = dict(params)
+                cap_params['p_max_daily'] = max_daily
+                try:
+                    resp = supabase.rpc('claim_next_batch', cap_params).execute()
+                except Exception:
+                    # 旧シグネチャへフォールバック
+                    resp = supabase.rpc('claim_next_batch', params).execute()
+            else:
+                resp = supabase.rpc('claim_next_batch', params).execute()
             rows = resp.data or []
         except Exception as e:
             logger.error(f"claim_next_batch RPC error: {e}")
@@ -680,17 +691,25 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 'cooldown_seconds': 0,
                 'confidence': 1.0,
             }
-            supabase.rpc('mark_done', {
-                'p_target_date': str(target_date),
-                'p_targeting_id': targeting_id,
-                'p_company_id': company_id,
-                'p_success': False,
-                'p_error_type': 'NOT_FOUND',
-                'p_classify_detail': classify_detail,
-                'p_field_mapping': None,
-                'p_bot_protection': False,
-                'p_submitted_at': jst_now().isoformat()
-            }).execute()
+        # mark_done（run_id検証付き）を呼び出し。未デプロイ時は旧シグネチャへフォールバック。
+        _md_args = {
+            'p_target_date': str(target_date),
+            'p_targeting_id': targeting_id,
+            'p_company_id': company_id,
+            'p_success': False,
+            'p_error_type': 'NOT_FOUND',
+            'p_classify_detail': classify_detail,
+            'p_field_mapping': None,
+            'p_bot_protection': False,
+            'p_submitted_at': jst_now().isoformat(),
+            'p_run_id': run_id,
+        }
+        try:
+            supabase.rpc('mark_done', _md_args).execute()
+        except Exception:
+            # 従来版
+            _md_args.pop('p_run_id', None)
+            supabase.rpc('mark_done', _md_args).execute()
             # 失敗完了ログ
             try:
                 wid = getattr(worker, 'worker_id', 0)
@@ -713,7 +732,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'cooldown_seconds': 0,
             'confidence': 1.0,
         }
-        supabase.rpc('mark_done', {
+        _md_args = {
             'p_target_date': str(target_date),
             'p_targeting_id': targeting_id,
             'p_company_id': company_id,
@@ -722,8 +741,14 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_classify_detail': classify_detail,
             'p_field_mapping': None,
             'p_bot_protection': False,
-            'p_submitted_at': jst_now().isoformat()
-        }).execute()
+            'p_submitted_at': jst_now().isoformat(),
+            'p_run_id': run_id,
+        }
+        try:
+            supabase.rpc('mark_done', _md_args).execute()
+        except Exception:
+            _md_args.pop('p_run_id', None)
+            supabase.rpc('mark_done', _md_args).execute()
         # 失敗完了ログ
         try:
             wid = getattr(worker, 'worker_id', 0)
@@ -833,7 +858,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         except Exception:
             field_mapping_to_store = None
 
-        supabase.rpc('mark_done', {
+        _md_args = {
             'p_target_date': str(target_date),
             'p_targeting_id': targeting_id,
             'p_company_id': company_id,
@@ -842,8 +867,14 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_classify_detail': classify_detail,
             'p_field_mapping': field_mapping_to_store,
             'p_bot_protection': bool(bp),
-            'p_submitted_at': jst_now().isoformat()
-        }).execute()
+            'p_submitted_at': jst_now().isoformat(),
+            'p_run_id': run_id,
+        }
+        try:
+            supabase.rpc('mark_done', _md_args).execute()
+        except Exception:
+            _md_args.pop('p_run_id', None)
+            supabase.rpc('mark_done', _md_args).execute()
         # 成功時は当日成功数キャッシュを無効化（最新値を反映させる）
         if is_success:
             try:
