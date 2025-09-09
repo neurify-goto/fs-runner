@@ -122,7 +122,7 @@ class ElementScorer:
         # フィールド名ベースの語彙集合（placeholder等の曖昧表現を拾うための軽量辞書）
         # 汎用性重視: 日本の代表的な表記ゆれ・言い換えを幅広くカバー
         self.japanese_patterns = {
-            "会社名": ["会社", "企業", "法人", "団体", "組織", "社名", "会社名"],
+            "会社名": ["会社", "企業", "法人", "団体", "組織", "社名", "会社名", "所属", "ご所属", "所属先", "ご所属先"],
             "メールアドレス": [
                 "メール",
                 "メールアドレス",
@@ -1219,6 +1219,33 @@ class ElementScorer:
                 getattr(context, "source_type", "") in strong_sources
                 for context in contexts
             ):
+                # 追加ガード: 強いラベルが『ふりがな/カナ/ひらがな』系を示すのに
+                # 非カナ氏名フィールド（姓/名/統合氏名）を評価している場合は強制的に負スコア
+                try:
+                    strong_texts = " ".join([
+                        (getattr(c, "text", "") or "")
+                        for c in (contexts or [])
+                        if getattr(c, "source_type", "") in strong_sources
+                    ]).lower()
+                    kana_like = [
+                        "kana",
+                        "katakana",
+                        "hiragana",
+                        "furigana",
+                        "カナ",
+                        "カタカナ",
+                        "フリガナ",
+                        "ふりがな",
+                        "ひらがな",
+                    ]
+                    if (field_name in {"姓", "名", "統合氏名"}) and any(
+                        k.lower() in strong_texts for k in kana_like
+                    ):
+                        # 非カナ氏名 × カナ系ラベルは不整合
+                        return -80, []
+                except Exception:
+                    pass
+
                 # テーブルラベル（th_label, dt_label）は設計者の明確な意図
                 final_score = max_score  # 上限制限を撤廃、完全なマッチスコアを使用
 
@@ -1360,6 +1387,8 @@ class ElementScorer:
                 "店舗名",
                 "病院名",
                 "施設名",
+                # 追加: 英語圏ラベルで頻出
+                "affiliation",
             ],
             "姓": ["姓", "苗字", "せい", "みょうじ", "名字", "姓名"],
             # 『名』単独は「マンション名」等の複合語に反応しやすいので除外
