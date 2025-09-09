@@ -563,7 +563,8 @@ class FieldMapper:
                 info["source"] = "promote_split"
             except Exception:
                 pass
-        field_mapping[fname] = info
+            # ここで各反復毎に保存（regression: ループ外代入で3番のみ残る問題を修正）
+            field_mapping[fname] = info
 
     async def _salvage_postal_split_by_attr(self, classified_elements, field_mapping, used_elements):
         """zip1/zip2 等の明示的な2分割郵便番号を直接補完（汎用救済）。
@@ -611,6 +612,11 @@ class FieldMapper:
             except Exception:
                 pass
             field_mapping[f"郵便番号{idx}"] = info
+        # 統合『郵便番号』が存在する場合は重複入力を避けるため削除
+        try:
+            field_mapping.pop("郵便番号", None)
+        except Exception:
+            pass
 
     async def _remap_prefecture_to_select_if_available(
         self, classified_elements, field_mapping

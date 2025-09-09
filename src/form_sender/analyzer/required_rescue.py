@@ -139,6 +139,11 @@ class RequiredRescue:
                             field_mapping[key] = info
                             used_elements.add(id(el))
                             used_names_ids.add((ei.get("name", ""), ei.get("id", "")))
+                        # 統合『郵便番号』が存在する場合は重複入力を避けるため削除
+                        try:
+                            field_mapping.pop("郵便番号", None)
+                        except Exception:
+                            pass
         except Exception as e:
             try:
                 et = type(e).__name__
