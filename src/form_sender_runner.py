@@ -176,6 +176,33 @@ def _install_logging_policy_for_ci():
         pass
 
 
+def _should_fallback_on_rpc_error(exc: Exception, fn_name: str, new_param_keys: List[str]) -> bool:
+    """新旧RPCのフォールバック可否を判定。
+
+    - フォールバックは『関数が存在しない/シグネチャ不一致』に限定する。
+    - それ以外（実行時例外、権限、業務ガード等）はフォールバックしない。
+    """
+    try:
+        msg = (str(exc) or '').lower()
+        fn_l = fn_name.lower()
+        # 関数未存在/型不一致
+        patterns_fn = [
+            'does not exist',
+            'no function matches',
+            'undefined function',
+        ]
+        if fn_l in msg and any(p in msg for p in patterns_fn):
+            return True
+        # パラメータ不一致（新規キーがエラーに含まれる）
+        if any(k.lower() in msg for k in (new_param_keys or [])) and any(s in msg for s in [
+            'parameter', 'argument', 'unexpected', 'unknown', 'named', 'mismatch'
+        ]):
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def jst_today() -> date:
     return (datetime.utcnow() + timedelta(hours=9)).date()
 
@@ -638,9 +665,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 cap_params['p_max_daily'] = max_daily
                 try:
                     resp = supabase.rpc('claim_next_batch', cap_params).execute()
-                except Exception:
-                    # 旧シグネチャへフォールバック
-                    resp = supabase.rpc('claim_next_batch', params).execute()
+                except Exception as e_cap:
+                    # フォールバックはシグネチャ不一致/未デプロイに限定
+                    if _should_fallback_on_rpc_error(e_cap, 'claim_next_batch', ['p_max_daily']):
+                        resp = supabase.rpc('claim_next_batch', params).execute()
+                    else:
+                        raise
             else:
                 resp = supabase.rpc('claim_next_batch', params).execute()
             rows = resp.data or []
@@ -709,10 +739,13 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         }
         try:
             supabase.rpc('mark_done', _md_args).execute()
-        except Exception:
-            # 従来版
-            _md_args.pop('p_run_id', None)
-            supabase.rpc('mark_done', _md_args).execute()
+        except Exception as e_md:
+            # フォールバックはシグネチャ不一致のみ（安全弁）。それ以外は中断。
+            if _should_fallback_on_rpc_error(e_md, 'mark_done', ['p_run_id']):
+                _md_args.pop('p_run_id', None)
+                supabase.rpc('mark_done', _md_args).execute()
+            else:
+                raise
         # 失敗完了ログ
         try:
             wid = getattr(worker, 'worker_id', 0)
@@ -747,9 +780,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         }
         try:
             supabase.rpc('mark_done', _md_args).execute()
-        except Exception:
-            _md_args.pop('p_run_id', None)
-            supabase.rpc('mark_done', _md_args).execute()
+        except Exception as e_md2:
+            if _should_fallback_on_rpc_error(e_md2, 'mark_done', ['p_run_id']):
+                _md_args.pop('p_run_id', None)
+                supabase.rpc('mark_done', _md_args).execute()
+            else:
+                raise
         # 失敗完了ログ
         try:
             wid = getattr(worker, 'worker_id', 0)
@@ -873,9 +909,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         }
         try:
             supabase.rpc('mark_done', _md_args).execute()
-        except Exception:
-            _md_args.pop('p_run_id', None)
-            supabase.rpc('mark_done', _md_args).execute()
+        except Exception as e_md3:
+            if _should_fallback_on_rpc_error(e_md3, 'mark_done', ['p_run_id']):
+                _md_args.pop('p_run_id', None)
+                supabase.rpc('mark_done', _md_args).execute()
+            else:
+                raise
         # 成功時は当日成功数キャッシュを無効化（最新値を反映させる）
         if is_success:
             try:
