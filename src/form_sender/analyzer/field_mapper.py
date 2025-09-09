@@ -461,6 +461,8 @@ class FieldMapper:
                 )
                 if not blob:
                     continue
+                # ctx_blob は後段の参照に備えてデフォルト初期化（属性でカナ検出時も未定義にならないように）
+                ctx_blob = ""
                 has_kana = any(
                     t in blob
                     for t in [
