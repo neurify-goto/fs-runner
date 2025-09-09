@@ -39,6 +39,47 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = setup_sanitized_logging(__name__)
 
 
+def _sanitize_field_mapping_for_storage(field_mapping: Dict[str, Any]) -> Dict[str, Any]:
+    """submissions.field_mapping に保存可能な最小構造へサニタイズ。
+
+    - Playwright の Locator など非シリアライズ要素を除去（element 等）
+    - スコア詳細や文脈テキストの巨大構造は保存しない（ログ肥大防止）
+    - 主要属性のみホワイトリストで保存
+    """
+    if not isinstance(field_mapping, dict):
+        return {}
+
+    allowed_keys = {
+        'selector',
+        'input_type',
+        'tag_name',
+        'name',
+        'id',
+        'class',
+        'placeholder',
+        'required',
+        'visible',
+        'enabled',
+        'default_value',
+        'source',  # 由来メタ（promote_split 等）
+    }
+
+    sanitized: Dict[str, Any] = {}
+    for fname, info in field_mapping.items():
+        if not isinstance(fname, str) or not isinstance(info, dict):
+            continue
+        safe: Dict[str, Any] = {}
+        for k in allowed_keys:
+            v = info.get(k)
+            # プリミティブのみ許可（list/dict は保存しない）
+            if isinstance(v, (str, int, float, bool)) or v is None:
+                safe[k] = v
+        # selector が無いものはスキップ（最小限の一貫性）
+        if safe.get('selector'):
+            sanitized[fname] = safe
+    return sanitized
+
+
 class _LifecycleOnlyFilter(logging.Filter):
     """ワークフローの標準ログを最小化するためのフィルタ。
 
@@ -719,7 +760,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             except Exception:
                 pass
 
-        # submissions.field_mapping へ書き込むマッピング結果を決定
+        # submissions.field_mapping へ書き込むマッピング結果を決定（非シリアライズ要素を除去して保存）
         field_mapping_to_store = None
         try:
             if not (isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED'):
@@ -727,11 +768,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 if isinstance(ar, dict):
                     fm = ar.get('field_mapping')
                     if isinstance(fm, dict):
-                        try:
-                            json.dumps(fm, ensure_ascii=False)
-                            field_mapping_to_store = fm
-                        except Exception:
-                            field_mapping_to_store = None
+                        sanitized = _sanitize_field_mapping_for_storage(fm)
+                        # 空でなければ保存
+                        if sanitized:
+                            # 念のため JSON シリアライズ検証
+                            json.dumps(sanitized, ensure_ascii=False)
+                            field_mapping_to_store = sanitized
         except Exception:
             field_mapping_to_store = None
 
