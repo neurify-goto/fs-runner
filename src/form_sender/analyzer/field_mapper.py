@@ -172,6 +172,8 @@ class FieldMapper:
             # 背景: 多くの日本語フォームでは件名/電話は任意だが、入力しても副作用が少なく、
             # 自動送信の成功率向上に寄与するため。
             # 注意: フォーム特化の条件は追加しない（汎用改善のみ）。
+            # オプション: 任意高優先度項目のベース閾値許容を追跡（map_ok でも利用）
+            allow_optional_base = False
             if (not should_map_field) and best_element:
                 if field_name in self.OPTIONAL_HIGH_PRIORITY_FIELDS:
                     # 高優先度任意項目は動的閾値が高すぎて取りこぼすことがあるため、
@@ -182,6 +184,7 @@ class FieldMapper:
                         base_threshold = self.settings.get("min_score_threshold", 70)
                         if best_score >= base_threshold:
                             should_map_field = True
+                            allow_optional_base = True
 
             # マッピング判定ロジック（精度向上版）
             map_ok = False
@@ -217,9 +220,12 @@ class FieldMapper:
                             )
                 else:
                     # 非コア項目でも『必須一致』の場合は採用（偽陰性防止: fmi一般則に整合）。
-                    # それ以外はスコアが動的閾値（品質優先）を満たす場合のみ採用。
+                    # さらに、任意高優先度項目でベース閾値許容を与えた場合は base_threshold 基準で採否。
                     if is_required_match:
                         map_ok = True
+                    elif allow_optional_base and (field_name in self.OPTIONAL_HIGH_PRIORITY_FIELDS):
+                        base_threshold = self.settings.get("min_score_threshold", 70)
+                        map_ok = best_score >= base_threshold
                     else:
                         map_ok = best_score >= dynamic_threshold
 
@@ -580,8 +586,8 @@ class FieldMapper:
         )
         part1, part2 = None, None
         for el in cands:
-            if id(el) in used_elements:
-                continue
+            # 既存マッピングで統合『郵便番号』として利用済みの要素も検査対象に含める
+            # （差し替えで split に昇格させるケースを許容）
             try:
                 ei = await self.element_scorer._get_element_info(el)
             except Exception:
