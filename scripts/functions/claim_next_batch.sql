@@ -5,35 +5,83 @@ create or replace function public.claim_next_batch(
   p_targeting_id bigint,
   p_run_id text,
   p_limit integer,
-  p_shard_id integer default null
+  p_shard_id integer default null,
+  p_max_daily integer default null
 )
 returns table(company_id bigint)
 language plpgsql
 as $$
+declare
+  v_start_utc timestamp with time zone;
+  v_end_utc   timestamp with time zone;
+  v_today_success integer := 0;
+  v_today_assigned integer := 0;
+  v_effective_limit integer := 0;
+  v_date_key integer := 0;
+  v_lock_key bigint := 0;
 begin
+  -- パラメータ境界チェック（過大値の誤設定を抑止）
+  if coalesce(p_max_daily, 0) > 10000 then
+    raise exception 'p_max_daily exceeds maximum allowed value (10000)';
+  end if;
+  -- JST境界のUTC時刻
+  v_start_utc := (p_target_date::timestamp AT TIME ZONE 'Asia/Tokyo');
+  v_end_utc   := ((p_target_date::timestamp + interval '1 day') AT TIME ZONE 'Asia/Tokyo');
+  v_date_key  := (to_char(p_target_date, 'YYYYMMDD'))::integer;
+
+  -- 同一 targeting_id / 日付のクレームを直列化（64bit対応）
+  -- 二引数版は int4 限定のため、(targeting_id, date_key) から64bitキーを生成し単引数版を使用
+  v_lock_key := (('x' || substr(md5(p_targeting_id::text || ':' || v_date_key::text), 1, 16))::bit(64))::bigint;
+  perform pg_advisory_xact_lock(v_lock_key);
+
+  -- 当日成功数を集計し、上限に達していれば0件返却
+  if coalesce(p_max_daily, 0) > 0 then
+    -- 成功済み + 現在割当中(assigned) を予約として考慮
+    select count(*) into v_today_success
+      from public.submissions s
+     where s.targeting_id = p_targeting_id
+       and s.success = true
+       and s.submitted_at >= v_start_utc
+       and s.submitted_at <  v_end_utc;
+
+    select count(*) into v_today_assigned
+      from public.send_queue sq
+     where sq.target_date_jst = p_target_date
+       and sq.targeting_id    = p_targeting_id
+       and sq.status          = 'assigned';
+
+    v_effective_limit := greatest(0, least(p_limit, p_max_daily - v_today_success - v_today_assigned));
+    if v_effective_limit <= 0 then
+      raise notice 'claim_next_batch: capacity exhausted (targeting_id=%, success=% assigned=% / cap=%).', p_targeting_id, v_today_success, v_today_assigned, p_max_daily;
+      return;
+    end if;
+  else
+    v_effective_limit := p_limit;
+  end if;
+
   return query
   with to_claim as (
     select sq.id
     from public.send_queue sq
     left join public.submissions s
       on s.targeting_id = p_targeting_id
-     and s.company_id = sq.company_id
-     and s.submitted_at >= (p_target_date::timestamp AT TIME ZONE 'Asia/Tokyo')
-     and s.submitted_at <  ((p_target_date::timestamp + interval '1 day') AT TIME ZONE 'Asia/Tokyo')
+     and s.company_id   = sq.company_id
+     and s.submitted_at >= v_start_utc
+     and s.submitted_at <  v_end_utc
     where sq.target_date_jst = p_target_date
-      and sq.targeting_id = p_targeting_id
-      and sq.status = 'pending'
+      and sq.targeting_id    = p_targeting_id
+      and sq.status          = 'pending'
       and (p_shard_id is null or sq.shard_id = p_shard_id)
       and s.id is null
     order by sq.priority, sq.id
-    limit p_limit
+    limit v_effective_limit
     for update of sq skip locked
   ), upd as (
     update public.send_queue sq
-    set status = 'assigned', assigned_by = p_run_id, assigned_at = now()
-    from to_claim tc
-    where sq.id = tc.id
-    returning sq.company_id as company_id
+       set status = 'assigned', assigned_by = p_run_id, assigned_at = now()
+      from to_claim tc
+     where sq.id = tc.id
+     returning sq.company_id as company_id
   )
   select upd.company_id from upd;
 end;

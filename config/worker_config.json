@@ -156,10 +156,10 @@
       "default_missing_confidence": 0.8,
       "fast_precheck_enabled": false,
       "early_abort": {
-        "min_level": "moderate",
-        "min_confidence_level": "high",
-        "min_score": 80,
-        "min_matches": 2
+        "min_level": "mild",
+        "min_confidence_level": "medium",
+        "min_score": 70,
+        "min_matches": 1
       }
     }
   },
