@@ -271,6 +271,9 @@ function startFormSenderFromTriggerAt7() {
   console.log('時間トリガー(7:00)によりフォーム送信制御を開始します');
 
   try {
+    // まず既存の7時トリガーをクリーンアップ（非営業日スキップ時も重複防止）
+    const del7 = deleteTriggersByHandler('startFormSenderFromTriggerAt7');
+    if (!del7.success) console.warn('7時トリガー削除で問題発生:', del7.error);
     // 当日が非営業日（週末/祝日）の場合は処理せずに翌営業日の7:00へ再スケジュール
     const jstToday = new Date(new Date().getTime() + CONFIG.JST_OFFSET);
     if (!isBusinessDayJst_(jstToday)) {
@@ -280,9 +283,7 @@ function startFormSenderFromTriggerAt7() {
       return { success: true, skipped: true, reason: 'non-business-day', next_trigger: next };
     }
 
-    // 7:00用の既存トリガーをクリーンアップ
-    const del = deleteTriggersByHandler('startFormSenderFromTriggerAt7');
-    if (!del.success) console.warn('7時トリガー削除で問題発生:', del.error);
+    // （既存トリガー削除は関数冒頭で実施済み）
 
     // アクティブtargetingの処理
     const activeTargetings = getActiveTargetingIdsFromSheet();
@@ -333,6 +334,9 @@ function startFormSenderFromTriggerAt13() {
   console.log('時間トリガー(13:00)によりフォーム送信制御を開始します');
 
   try {
+    // まず既存の13時トリガーをクリーンアップ（非営業日スキップ時も重複防止）
+    const del13 = deleteTriggersByHandler('startFormSenderFromTriggerAt13');
+    if (!del13.success) console.warn('13時トリガー削除で問題発生:', del13.error);
     // 当日が非営業日（週末/祝日）の場合は処理せずに翌営業日の13:00へ再スケジュール
     const jstToday = new Date(new Date().getTime() + CONFIG.JST_OFFSET);
     if (!isBusinessDayJst_(jstToday)) {
@@ -342,9 +346,7 @@ function startFormSenderFromTriggerAt13() {
       return { success: true, skipped: true, reason: 'non-business-day', next_trigger: next };
     }
 
-    // 13:00用の既存トリガーをクリーンアップ
-    const del = deleteTriggersByHandler('startFormSenderFromTriggerAt13');
-    if (!del.success) console.warn('13時トリガー削除で問題発生:', del.error);
+    // （既存トリガー削除は関数冒頭で実施済み）
 
     // アクティブtargetingの処理
     const activeTargetings = getActiveTargetingIdsFromSheet();
