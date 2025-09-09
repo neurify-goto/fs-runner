@@ -107,7 +107,20 @@ def _passes_phone(ei: Dict[str, Any], best_txt: str) -> bool:
 def _passes_postal(ei: Dict[str, Any], best_txt: str) -> bool:
     attrs_blob = _attrs_blob(ei)
     pos_attr = any(
-        t in attrs_blob for t in ["zip", "postal", "postcode", "zipcode", "郵便", "〒"]
+        t in attrs_blob
+        for t in [
+            "zip",
+            "postal",
+            "postcode",
+            "zipcode",
+            "郵便",
+            "〒",
+            # 日本語表記のローマ字（ゆうびん）
+            "yubin",
+            "yuubin",
+            "yubinbango",
+            "yuubinbango",
+        ]
     )
     pos_ctx = any(t in best_txt for t in ["郵便番号", "郵便", "〒", "postal", "zip"])
     neg = any(
@@ -166,6 +179,51 @@ def _passes_message(ei: Dict[str, Any], best_txt: str) -> bool:
     return True
 
 
+def _passes_address(ei: Dict[str, Any], best_txt: str) -> bool:
+    """住所フィールドの安全ガード。
+
+    許可条件（いずれか）:
+    - 属性(name/id/class/placeholder)に住所系トークン（address/住所/addr/street/city/pref 等）
+    - ラベル/周辺テキストに住所系トークン
+
+    不許可条件（いずれか）:
+    - カナ/ふりがな系トークン（フリガナ/カナ/ひらがな/セイ/メイ）
+    - 部署/部門/課 等の部署系トークン（department/dept/division/section/team/部署/部門/課/係）
+    - 認証/確認系（captcha/verification/token/confirm 等）
+    """
+    attrs = _attrs_blob(ei)
+    # 許可トークン
+    pos_tokens = [
+        "住所", "所在地", "address", "addr", "street", "city", "prefecture", "都道府県", "市区町村",
+        "p-region", "p-locality", "p-street-address", "p-extended-address",
+    ]
+    # 不許可トークン（かな/部署/認証系）
+    kana_like = [
+        "フリガナ", "ふりがな", "カナ", "kana", "katakana", "hiragana", "セイ", "メイ", "furi",
+    ]
+    dept_like = [
+        "部署", "部門", "課", "係", "department", "dept", "division", "section", "team",
+    ]
+    auth_like = [
+        # 認証/確認系（CAPTCHA/クイズ/トークン等）
+        "captcha", "verification", "token", "otp", "confirm", "確認", "認証",
+        "quiz", "wpcf7-quiz", "security", "セキュリティ", "画像認証",
+        # 文字入力を要求する一般的ラベル文言
+        "文字を入力", "次の文字", "表示されている文字", "上の文字",
+    ]
+
+    # 許可判定
+    has_pos = any(t in attrs for t in pos_tokens) or any(t in best_txt for t in pos_tokens)
+    # 不許可判定
+    has_kana = any(t in attrs for t in kana_like) or any(t in best_txt for t in kana_like)
+    has_dept = any(t in attrs for t in dept_like) or any(t in best_txt for t in dept_like)
+    has_auth = any(t in attrs for t in auth_like) or any(t in best_txt for t in auth_like)
+
+    if has_kana or has_dept or has_auth:
+        return False
+    return bool(has_pos)
+
+
 def passes_safeguard(
     field_name: str,
     best_score_details: Dict[str, Any],
@@ -192,6 +250,8 @@ def passes_safeguard(
         return _passes_prefecture(ei, best_txt)
     if field_name == "お問い合わせ本文":
         return _passes_message(ei, best_txt)
+    if field_name == "住所":
+        return _passes_address(ei, best_txt)
     if field_name == "件名":
         attrs = _attrs_blob(ei)
         pos = any(t in attrs for t in ["件名", "subject", "題名"]) or any(

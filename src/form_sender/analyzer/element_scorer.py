@@ -122,7 +122,7 @@ class ElementScorer:
         # フィールド名ベースの語彙集合（placeholder等の曖昧表現を拾うための軽量辞書）
         # 汎用性重視: 日本の代表的な表記ゆれ・言い換えを幅広くカバー
         self.japanese_patterns = {
-            "会社名": ["会社", "企業", "法人", "団体", "組織", "社名", "会社名"],
+            "会社名": ["会社", "企業", "法人", "団体", "組織", "社名", "会社名", "所属", "ご所属", "所属先", "ご所属先"],
             "メールアドレス": [
                 "メール",
                 "メールアドレス",
@@ -393,8 +393,8 @@ class ElementScorer:
                     element_info.get("placeholder", "") or "",
                 ])
                 # セイ/メイの強い手掛かり（カタカナ表記）
-                has_sei_hint = any(tok in blob_attr for tok in ["セイ", "姓", "sei", "lastname"])
-                has_mei_hint = any(tok in blob_attr for tok in ["メイ", "名", "mei", "firstname"])
+                has_sei_hint = any(tok in blob_attr for tok in ["セイ", "せい", "姓", "sei", "lastname"])
+                has_mei_hint = any(tok in blob_attr for tok in ["メイ", "めい", "名", "mei", "firstname"])
 
                 if field_name in {"姓カナ", "姓ひらがな"} and has_mei_hint and not has_sei_hint:
                     score_details["total_score"] = -999
@@ -1219,6 +1219,33 @@ class ElementScorer:
                 getattr(context, "source_type", "") in strong_sources
                 for context in contexts
             ):
+                # 追加ガード: 強いラベルが『ふりがな/カナ/ひらがな』系を示すのに
+                # 非カナ氏名フィールド（姓/名/統合氏名）を評価している場合は強制的に負スコア
+                try:
+                    strong_texts = " ".join([
+                        (getattr(c, "text", "") or "")
+                        for c in (contexts or [])
+                        if getattr(c, "source_type", "") in strong_sources
+                    ]).lower()
+                    kana_like = [
+                        "kana",
+                        "katakana",
+                        "hiragana",
+                        "furigana",
+                        "カナ",
+                        "カタカナ",
+                        "フリガナ",
+                        "ふりがな",
+                        "ひらがな",
+                    ]
+                    if (field_name in {"姓", "名", "統合氏名"}) and any(
+                        k.lower() in strong_texts for k in kana_like
+                    ):
+                        # 非カナ氏名 × カナ系ラベルは不整合
+                        return -80, []
+                except Exception:
+                    pass
+
                 # テーブルラベル（th_label, dt_label）は設計者の明確な意図
                 final_score = max_score  # 上限制限を撤廃、完全なマッチスコアを使用
 
@@ -1360,6 +1387,8 @@ class ElementScorer:
                 "店舗名",
                 "病院名",
                 "施設名",
+                # 追加: 英語圏ラベルで頻出
+                "affiliation",
             ],
             "姓": ["姓", "苗字", "せい", "みょうじ", "名字", "姓名"],
             # 『名』単独は「マンション名」等の複合語に反応しやすいので除外
@@ -1396,6 +1425,11 @@ class ElementScorer:
             # FAXは明確に不適合
             if any(k in context_lower for k in ["fax", "ファックス", "ファクス"]):
                 return -80
+        # 追加: 電話系（分割含む）が『氏名/お名前/フリガナ/カナ/ひらがな』文脈に反応しない
+        if field_name in {"電話番号", "電話1", "電話2", "電話3"}:
+            name_like_ctx = ["氏名", "お名前", "名前", "フリガナ", "ふりがな", "カナ", "ひらがな", "セイ", "メイ"]
+            if any(t.lower() in context_lower for t in name_like_ctx):
+                return -80
 
         # 特別ガード: メールアドレスの文脈に『電話』『tel』『お電話』『phone』が含まれる場合は負スコア
         # 特別ガード: 氏名(カナ以外)に『カナ/ふりがな/ひらがな』が含まれる場合は除外（誤割当抑止）
@@ -1409,6 +1443,10 @@ class ElementScorer:
                 for k in ["電話", "お電話", "tel", "phone", "telephone"]
             ):
                 return -60
+        # 追加ガード: 名前系フィールドがメールアドレス文脈に反応しないよう強く否定
+        if field_name in {"姓", "名", "統合氏名"}:
+            if any(k in context_lower for k in ["メール", "mail", "email", "e-mail", "アドレス"]):
+                return -80
 
         # 特別ガード: 会社名の文脈で『管理会社』『竣工』『年月日』などは不適切
         if field_name == "会社名":

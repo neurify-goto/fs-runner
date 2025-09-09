@@ -373,6 +373,30 @@ class RuleBasedAnalyzer:
             except Exception as e:
                 logger.debug(f"propagate assignment values skipped: {e}")
 
+            # 追加の最終同期: フィールド名が一致し、mapping側の value が未設定のものは
+            # 直接 input_assignments の値を反映（例: 統合氏名カナなど評価で重要な項目）
+            try:
+                for fname, assign in (input_assignment or {}).items():
+                    fi = self.field_mapping.get(fname)
+                    if not isinstance(fi, dict):
+                        continue
+                    cur = fi.get("value")
+                    v = str(assign.get("value", "") or "").strip()
+                    # 通常は空値のみ補完するが、統合氏名カナは値がズレやすいため常に同期（非空のみ）
+                    if fname in {"統合氏名カナ"}:
+                        if v and v != (str(cur or "").strip()):
+                            fi["value"] = v
+                            src = fi.get("source") or ""
+                            fi["source"] = (src or "") + ("|value_propagated")
+                    else:
+                        if cur is None or (isinstance(cur, str) and not cur.strip()):
+                            if v:
+                                fi["value"] = v
+                                src = fi.get("source") or ""
+                                fi["source"] = (src or "") + ("|value_propagated")
+            except Exception:
+                pass
+
             is_valid, validation_issues = (
                 await self.validator.validate_final_assignments(
                     input_assignment, self.field_mapping, form_type_info
@@ -447,6 +471,8 @@ class RuleBasedAnalyzer:
                 continue
 
         # selector -> value の逆引き表を作る（空値は除外）。一意セレクタのみ許可。
+        # 例外: 『統合氏名カナ』は name/名 とのセレクタ衝突が実務上発生しやすいため、
+        #       同一セレクタであっても積極的に input_assignments の値を反映する。
         selector_to_value: Dict[str, str] = {}
         for _, assign in (input_assignment or {}).items():
             try:
@@ -466,8 +492,22 @@ class RuleBasedAnalyzer:
                 sel = str(finfo.get("selector", "") or "")
                 cur = finfo.get("value")
                 if sel and (cur is None or (isinstance(cur, str) and not cur.strip())):
+                    propagated = False
                     if sel in selector_to_value:
                         finfo["value"] = selector_to_value[sel]
+                        propagated = True
+                    else:
+                        # 例外フィールド（統合氏名カナ）: セレクタが複数マッピングで共有されていても
+                        # input_assignments 側の値を反映（評価の見やすさ向上、実入力は assignment が真）
+                        if fname in {"統合氏名カナ"}:
+                            try:
+                                v = str((input_assignment or {}).get(fname, {}).get("value", "") or "").strip()
+                                if v:
+                                    finfo["value"] = v
+                                    propagated = True
+                            except Exception:
+                                pass
+                    if propagated:
                         # メタ: どこから埋めたかのヒント（解析用）
                         src = finfo.get("source") or ""
                         finfo["source"] = (src or "") + ("|value_propagated")

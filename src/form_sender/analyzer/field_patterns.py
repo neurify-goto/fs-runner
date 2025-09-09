@@ -55,7 +55,7 @@ class FieldPatterns:
                 ],
                 "classes": ["kana", "katakana", "furigana"],
                 "placeholders": ["フリガナ", "ふりがな", "カタカナ", "セイ メイ", "セイ　メイ"],
-                "types": ["tel", "text"],
+                "types": ["text"],
                 "tags": ["input"],
                 "weight": 18,
                 "strict_patterns": ["フリガナ", "カタカナ", "kana", "furigana"],
@@ -77,7 +77,10 @@ class FieldPatterns:
                     "corporate", "company-name", "corporate_name", "business_name",
                     # 汎用的な表記ゆれ・英語圏CMSの命名
                     "companyname", "organization_name", "org_name", "corp_name", "corporation_name",
-                    "customer-company-name", "customer_company_name", "your-company", "your_company"
+                    "customer-company-name", "customer_company_name", "your-company", "your_company",
+                    # 追加: 所属/所属先・Affiliation 系（ラベル/属性双方で広く使われる）
+                    "affiliation", "affiliations", "affiliation_name", "affiliation-name",
+                    "shozoku", "syosoku", "shozokusaki", "shozoku_saki"
                 ],
                 "ids": [
                     "company", "corp", "company-name", "company_name", "firm", "org", "business",
@@ -91,9 +94,11 @@ class FieldPatterns:
                 "placeholders": [
                     "会社名", "Company Name", "会社名を入力してください", "Company",
                     "企業名", "組織名", "法人名", "会社・団体名", "Corporate Name",
-                    "Business Name", "Organization", "社名", "御社名", "貴社名"
+                    "Business Name", "Organization", "社名", "御社名", "貴社名",
+                    # 追加: 所属/所属先・Affiliation の表記ゆれ
+                    "所属", "ご所属", "所属先", "ご所属先", "Affiliation"
                 ],
-                "types": ["tel", "text"],
+                "types": ["text"],
                 "tags": ["input"],
                 "weight": 25,  # 重要度最高レベル（メール22より高い）
                 "strict_patterns": ["会社", "会社名", "団体名", "company", "corporation", "firm", "enterprise", "business"],
