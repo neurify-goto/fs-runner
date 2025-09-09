@@ -131,10 +131,13 @@ function createQueueForTargetingStep(targetingId, targetDateJst, targetingSql, n
 }
 
 /**
- * ng_companies列の値（企業名・ID混在可）を、RPCが受け付ける「カンマ区切りのID群」に正規化
- * - 数値トークンはそのままIDとして扱う
- * - 数値以外は company_name の完全一致で companies を検索し、id に解決する
- * - 見つからない企業名は無視（警告ログのみ）
- * @param {string} rawNgCompanies シートのng_companies文字列
- * @returns {string} カンマ区切りID文字列（空なら''）
+ * ng_companies 列の入力方針（重要）
+ * - 入力は「企業名（company_name）のカンマ区切り」のみを受け付ける方針です。
+ * - 数値IDの指定や、企業名とIDの混在はサポートしません。
+ * - SQL 側（create_queue_for_targeting / create_queue_for_targeting_step）でも
+ *   company_name の完全一致で除外判定を行っています。
+ * - 全角カンマは許容されますが、可能な限り半角カンマで入力してください。
+ * - 見つからない企業名は除外対象になりません（ログの要約のみ）。
+ *
+ * 例: "株式会社サンプル, サンプル株式会社, Sample Inc."
  */
