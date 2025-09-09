@@ -713,23 +713,20 @@ function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, 
       // 1回のステップ実行
       const started = Date.now();
       try {
-        const res = createQueueForTargetingStep(targetingId, dateJst, targetingSql, ngCompaniesCsv, shards, limit, afterId, stage, idWindow);
+        const windowStart = afterId; // 現在のウィンドウ開始点を固定
+        const res = createQueueForTargetingStep(targetingId, dateJst, targetingSql, ngCompaniesCsv, shards, limit, windowStart, stage, idWindow);
         const elapsed = Date.now() - started;
         const inserted = Number((res && res[0] && res[0].inserted) || 0);
-        const lastId = Number((res && res[0] && res[0].last_id) || afterId);
+        const lastId = Number((res && res[0] && res[0].last_id) || windowStart);
         const hasMore = !!(res && res[0] && res[0].has_more);
-        // 次の afterId の決定: hasMore=false でもウィンドウ端まで到達している可能性があるため、
-        // lastId がウィンドウ終端付近ならウィンドウを前進させる
-        if (!hasMore && lastId <= afterId) {
-          afterId = afterId + idWindow; // 候補無しで詰んだときはウィンドウを強制前進
-        } else {
-          afterId = lastId;
-        }
+        // 次の afterId の決定
+        // hasMore=true: 同一ウィンドウ内で継続（lastIdまで前進）
+        // hasMore=false: 窓境界基準で次のウィンドウへ（欠落防止）
+        afterId = hasMore ? Math.max(lastId, windowStart) : (windowStart + idWindow);
         total += inserted;
         console.log(JSON.stringify({ level: 'info', event: 'queue_chunk_step', targeting_id: targetingId, stage, limit, after_id: afterId, inserted, total, elapsed_ms: elapsed, has_more: hasMore }));
         if (total >= MAX_TOTAL) break; // 上限達成
-        if (!hasMore && inserted === 0) { afterId = afterId + idWindow; continue; } // 候補なし→次ウィンドウへ
-        if (!hasMore) { afterId = afterId + idWindow; continue; } // ウィンドウ端に達した→次ウィンドウへ
+        if (!hasMore) { continue; } // 次ウィンドウへ
         // 余裕があるなら少しlimitを戻す（適応制御）
         if (elapsed < 3000 && limit < 4000) limit = Math.min(4000, Math.floor(limit * 1.25));
       } catch (e) {
