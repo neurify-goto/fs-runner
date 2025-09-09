@@ -1298,6 +1298,35 @@ class UnmappedElementHandler:
                         logger.debug(
                             f"Container required detection error for checkbox group '{group_key}': {e}"
                         )
+                # 追加: 『連絡方法/ご希望の連絡』系の選好チェックボックスは、
+                # 必須でなくても汎用的に1つ選択しておく（迷惑の少ない『メール』優先）。
+                # 汎用改善: サイト特化ではなく、語彙で判定。
+                is_contact_method_group = False
+                if not group_required:
+                    try:
+                        tokens = [
+                            "連絡方法",
+                            "ご希望連絡",
+                            "希望連絡",
+                            "連絡手段",
+                            "contact method",
+                            "preferred contact",
+                        ]
+                        # group_key だけでなくコンテキストも確認
+                        blob_key = (group_key or "").lower()
+                        if any(t in blob_key for t in ["連絡", "contact"]):
+                            is_contact_method_group = True
+                        else:
+                            for cb, _info in items:
+                                contexts = await self.context_text_extractor.extract_context_for_element(cb)
+                                best = (
+                                    self.context_text_extractor.get_best_context_text(contexts) or ""
+                                ).lower()
+                                if any(tok in best for tok in [t.lower() for t in tokens]):
+                                    is_contact_method_group = True
+                                    break
+                    except Exception:
+                        is_contact_method_group = False
                 # 追加: プライバシー/規約同意の文脈検出（name/id/classに現れないケースの補完）
                 is_privacy_group = False
                 if not group_required:
@@ -1368,7 +1397,7 @@ class UnmappedElementHandler:
                     except Exception:
                         is_privacy_group = False
 
-                if not group_required and not is_privacy_group:
+                if not group_required and not is_privacy_group and not is_contact_method_group:
                     continue
 
                 texts: List[str] = []

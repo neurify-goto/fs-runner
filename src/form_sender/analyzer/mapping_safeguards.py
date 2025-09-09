@@ -46,7 +46,7 @@ def _passes_kana_like(field_name: str, ei: Dict[str, Any], best_txt: str) -> boo
     ]
 
     # フィールド種別に応じた指標セット
-    if field_name in {"統合氏名カナ", "姓カナ", "名カナ"}:
+    if field_name in {"統合氏名カナ", "姓カナ", "名カナ", "会社名カナ"}:
         indicators = kana_tokens
     elif field_name in {"姓ひらがな", "名ひらがな"}:
         # ふりがな（カタカナ）のケースも現実には混在するため、
@@ -59,6 +59,28 @@ def _passes_kana_like(field_name: str, ei: Dict[str, Any], best_txt: str) -> boo
         t.lower() in best_txt for t in indicators
     )
     return bool(has_indicator)
+
+
+def _passes_unified_fullname(ei: Dict[str, Any], best_txt: str) -> bool:
+    """統合氏名の安全ガード。
+
+    - 住所/郵便/都道府県 等の住所系トークンを含む場合は不許可（誤割当て抑止）
+    - ラベル/属性に『氏名/お名前/name/担当者』等のポジティブトークンがあれば積極許可
+    """
+    attrs = _attrs_blob(ei)
+    neg_tokens = [
+        # 住所系
+        "住所", "address", "addr", "street", "city", "prefecture", "都道府県", "市区町村",
+        "郵便", "郵便番号", "zip", "postal", "postcode", "zipcode",
+    ]
+    if any(t in attrs for t in neg_tokens) or any(t in best_txt for t in neg_tokens):
+        return False
+    # 『会社名』を含む複合ラベル（例: 会社名または氏名）は統合氏名の採用を控える（会社名優先）
+    if ("会社名" in attrs) or ("会社名" in best_txt):
+        return False
+    pos_tokens = ["氏名", "お名前", "name", "your-name", "担当者", "担当者名"]
+    has_pos = any(t in attrs for t in pos_tokens) or any(t in best_txt for t in pos_tokens)
+    return True if has_pos else True  # ポジティブは任意。ネガティブのみで除外。
 
 
 def _best_context_text(best_context: Optional[List], ctx_extractor) -> str:
@@ -170,6 +192,10 @@ def _passes_message(ei: Dict[str, Any], best_txt: str) -> bool:
         "住所", "address", "addr", "street", "city", "prefecture", "都道府県", "市区町村",
         "p-region", "p-locality", "p-street-address", "p-extended-address",
     ]
+    # 旅行/予約系の専用要望欄（部屋/宿泊/レンタカー 等）は除外
+    travel_like = ["宿泊", "宿泊地", "ホテル", "旅館", "部屋", "客室", "レンタカー", "旅程", "便名", "航空券", "予約"]
+    if any(t in best_txt for t in travel_like) or any(t in attrs for t in travel_like):
+        return False
     if any(t in attrs for t in address_like) or any(t in best_txt for t in address_like):
         # メッセージ系の強い指標が同時にある場合のみ許容
         msg_tokens = ["お問い合わせ", "メッセージ", "本文", "内容", "message", "inquiry", "contact"]
@@ -219,9 +245,42 @@ def _passes_address(ei: Dict[str, Any], best_txt: str) -> bool:
     has_dept = any(t in attrs for t in dept_like) or any(t in best_txt for t in dept_like)
     has_auth = any(t in attrs for t in auth_like) or any(t in best_txt for t in auth_like)
 
+    # 旅行/予約系のコンテキストには住所を割り当てない（宿泊地/部屋/レンタカー等の誤割当て抑止）
+    travel_like = [
+        "宿泊", "宿泊地", "ホテル", "旅館", "部屋", "客室", "レンタカー", "旅行", "出発", "到着", "旅程", "便名", "航空券", "予約"
+    ]
+    if any(t in best_txt for t in travel_like) or any(t in attrs for t in travel_like):
+        return False
+
     if has_kana or has_dept or has_auth:
         return False
     return bool(has_pos)
+
+
+def _passes_company_name(ei: Dict[str, Any], best_txt: str) -> bool:
+    """会社名フィールドの安全ガード。
+
+    - 『カナ/フリガナ/ひらがな』系の指標が強い場合は不許可（ふりがな欄の誤割当て抑止）
+    """
+    attrs = _attrs_blob(ei)
+    kana_like = ["カナ", "フリガナ", "ふりがな", "hiragana", "katakana", "kana", "セイ", "メイ"]
+    if any(t.lower() in attrs for t in [s.lower() for s in kana_like]) or any(
+        t.lower() in best_txt for t in [s.lower() for s in kana_like]
+    ):
+        return False
+    return True
+
+
+def _passes_personal_name(ei: Dict[str, Any], best_txt: str) -> bool:
+    """姓/名（個人名）の安全ガード。
+
+    - ラベル/属性に『会社名』『法人名』『団体名』等が含まれる場合は不許可（複合欄は会社名優先）
+    """
+    attrs = _attrs_blob(ei)
+    org_tokens = ["会社名", "法人名", "団体名", "組織名", "企業名", "会社"]
+    if any(t in attrs for t in org_tokens) or any(t in best_txt for t in org_tokens):
+        return False
+    return True
 
 
 def passes_safeguard(
@@ -252,6 +311,10 @@ def passes_safeguard(
         return _passes_message(ei, best_txt)
     if field_name == "住所":
         return _passes_address(ei, best_txt)
+    if field_name == "会社名":
+        return _passes_company_name(ei, best_txt)
+    if field_name in {"姓", "名"}:
+        return _passes_personal_name(ei, best_txt)
     if field_name == "件名":
         attrs = _attrs_blob(ei)
         pos = any(t in attrs for t in ["件名", "subject", "題名"]) or any(
@@ -275,7 +338,10 @@ def passes_safeguard(
         return False
 
     # カナ/ひらがな系の安全ガード
-    if field_name in {"統合氏名カナ", "姓カナ", "名カナ", "姓ひらがな", "名ひらがな"}:
+    if field_name in {"統合氏名カナ", "姓カナ", "名カナ", "姓ひらがな", "名ひらがな", "会社名カナ"}:
         return _passes_kana_like(field_name, ei, best_txt)
+
+    if field_name == "統合氏名":
+        return _passes_unified_fullname(ei, best_txt)
 
     return True

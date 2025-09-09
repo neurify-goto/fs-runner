@@ -96,7 +96,9 @@ class FieldPatterns:
                     "企業名", "組織名", "法人名", "会社・団体名", "Corporate Name",
                     "Business Name", "Organization", "社名", "御社名", "貴社名",
                     # 追加: 所属/所属先・Affiliation の表記ゆれ
-                    "所属", "ご所属", "所属先", "ご所属先", "Affiliation"
+                    "所属", "ご所属", "所属先", "ご所属先", "Affiliation",
+                    # 追加: 複合ラベル（会社名または氏名 等）
+                    "会社名または氏名", "会社名・氏名", "会社名またはお名前", "企業名または氏名"
                 ],
                 "types": ["text"],
                 "tags": ["input"],
@@ -135,18 +137,30 @@ class FieldPatterns:
             
             # 3. 統合氏名 (unified_fullname) - 統合氏名フィールド専用
         "統合氏名": {
-                "names": ["fullname", "full_name", "name", "氏名", "お名前", "ご氏名", "姓名", 
-                         "your-name", "your_name", "namae", "personal_name", "user_name", "member_name"],
+                "names": [
+                    "fullname", "full_name", "name", "氏名", "お名前", "ご氏名", "姓名",
+                    "your-name", "your_name", "namae", "personal_name", "user_name", "member_name",
+                    # 追加: 日本の実フォームで頻出のラベル表現
+                    "ご担当者名", "担当者名", "担当者"
+                ],
                 "ids": ["fullname", "full-name", "full_name", "name", "氏名", "your-name", 
                        "your_name", "namae", "personal_name", "user_name", "member_name"],
                 "classes": ["fullname", "full-name", "name", "your-name", "personal", 
                            "user", "member", "contact", "personal_name"],
-                "placeholders": ["お名前", "氏名", "Name", "Personal Name", "Full Name", "姓名", 
-                               "フルネーム", "名前を入力してください", "お名前を入力してください"],
+                "placeholders": [
+                    "お名前", "氏名", "Name", "Personal Name", "Full Name", "姓名",
+                    "フルネーム", "名前を入力してください", "お名前を入力してください",
+                    # 追加: 担当者系のプレースホルダ
+                    "ご担当者名", "担当者名"
+                ],
                 "types": ["text"],
                 "tags": ["input"],
                 "weight": 26,  # 会社名(25)より高い優先度で最優先
-                "strict_patterns": ["fullname", "full_name", "氏名", "お名前", "name", "your-name", "your_name", "姓名"],
+                "strict_patterns": [
+                    "fullname", "full_name", "氏名", "お名前", "name", "your-name", "your_name", "姓名",
+                    # 追加: 担当者系（強い一致）
+                    "ご担当者名", "担当者名"
+                ],
                 "exclude_patterns": ["company", "会社", "社名", "corp", "corporation", "firm", "organization", "business", 
                                    "LOGIN_ID", "PASSWORD", "OTP", "TOTP", "MFAOTP", "captcha", "login_id", "password", 
                                    "signin", "auth", "verification", "mfa", "phone", "tel", "電話", "zip", "postal", "郵便", 
@@ -687,8 +701,12 @@ class FieldPatterns:
                 "ids": ["company_kana", "corp_kana", "company-name-kana", "corporation-kana", 
                        "company_name_kana"],
                 "classes": ["company-kana", "corp-kana", "kana", "company_name_kana"],
-                "placeholders": ["会社名カナ", "カブシキガイシャ", "Company Kana", "コーポレーション", 
-                               "法人名（カタカナ）", "会社名（カタカナ）", "組織名カナ"],
+                "placeholders": [
+                    "会社名カナ", "カブシキガイシャ", "Company Kana", "コーポレーション",
+                    "法人名（カタカナ）", "会社名（カタカナ）", "組織名カナ",
+                    # 追加: 会社名または氏名(ふりがな)
+                    "会社名または氏名(ふりがな)", "会社名または氏名（ふりがな）", "会社名または氏名 カナ",
+                ],
                 "types": [],
                 "tags": ["input"],
                 "weight": 12,

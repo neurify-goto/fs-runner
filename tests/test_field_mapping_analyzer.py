@@ -630,6 +630,16 @@ class FieldMappingAnalyzer:
                 form_count, has_hubspot_script
             )
 
+            # Step 3.5: エラー/確認ページからの簡易リカバリ（入力欄が無い場合）
+            try:
+                recovered = await self._recover_from_error_like_page()
+                if recovered:
+                    # リカバリ後のフォーム数を再評価
+                    form_count = await self.page.evaluate("document.querySelectorAll('form').length")
+                    logger.info(f"📋 Form elements after recovery: {form_count}")
+            except Exception as e:
+                logger.debug(f"error-like recovery skipped: {e}")
+
             # Step 4: フォームHTML抽出＋iframe検査
             form_content, target_frame = await self._extract_form_content_with_iframes(
                 form_count
@@ -905,6 +915,105 @@ class FieldMappingAnalyzer:
                         f"📋 Elements found after dynamic waiting: forms={form_count}"
                     )
         return form_count
+
+    async def _recover_from_error_like_page(self) -> bool:
+        """入力欄が見当たらない『エラー/確認/完了』風ページからの簡易リカバリ（汎用）。"""
+        try:
+            inputs_visible = await self.page.evaluate(
+                """
+                () => Array.from(document.querySelectorAll('input, textarea, select')).filter(el => {
+                  const type = (el.getAttribute('type')||'').toLowerCase();
+                  if (['hidden','submit','button','image'].includes(type)) return false;
+                  const rect = el.getBoundingClientRect();
+                  const visible = rect && rect.width > 0 && rect.height > 0;
+                  const style = window.getComputedStyle(el);
+                  return visible && style.visibility !== 'hidden';
+                }).length
+                """
+            )
+        except Exception:
+            inputs_visible = 0
+
+        if int(inputs_visible or 0) > 0:
+            return False
+
+        # 本文中の典型語で判定を補強
+        try:
+            body_text = await self.page.evaluate(
+                "() => (document.body.innerText||'').toLowerCase()"
+            )
+        except Exception:
+            body_text = ""
+        tokens = ["未入力", "エラー", "戻る", "前画面", "確認画面", "error", "back"]
+        if sum(1 for t in tokens if t in (body_text or "")) < 2:
+            return False
+
+        # 戻る/前画面系のUIを試行
+        selectors = [
+            "text=戻る",
+            "text=前画面",
+            "text=前の画面",
+            "text=Back",
+            "a:has-text('戻る')",
+            "a:has-text('前画面')",
+            "button:has-text('戻る')",
+            "input[type=button][value*='戻る']",
+        ]
+        for sel in selectors:
+            try:
+                el = self.page.locator(sel)
+                if await el.count():
+                    await el.first.click(timeout=2000)
+                    try:
+                        await self.page.wait_for_load_state('domcontentloaded', timeout=5000)
+                    except Exception:
+                        pass
+                    logger.info("🔁 Recovered from error-like page via UI", extra={"summary": True})
+                    return True
+            except Exception:
+                continue
+
+        # 最後の手段: history.back()
+        try:
+            await self.page.evaluate("history.back()")
+            try:
+                await self.page.wait_for_load_state('domcontentloaded', timeout=5000)
+            except Exception:
+                pass
+            logger.info("🔁 Recovered from error-like page via history.back()", extra={"summary": True})
+            # まだ入力欄が無い場合は2ステップ戻る/リファラ遷移も試みる
+            try:
+                inputs_visible2 = await self.page.evaluate(
+                    "() => Array.from(document.querySelectorAll('input, textarea, select')).filter(el => (el.getAttribute('type')||'').toLowerCase()!=='hidden').length"
+                )
+            except Exception:
+                inputs_visible2 = 0
+            if int(inputs_visible2 or 0) > 0:
+                return True
+            # 追加の戻る
+            try:
+                await self.page.evaluate("history.go(-1)")
+                await self.page.wait_for_load_state('domcontentloaded', timeout=5000)
+            except Exception:
+                pass
+            try:
+                inputs_visible3 = await self.page.evaluate(
+                    "() => Array.from(document.querySelectorAll('input, textarea, select')).filter(el => (el.getAttribute('type')||'').toLowerCase()!=='hidden').length"
+                )
+            except Exception:
+                inputs_visible3 = 0
+            if int(inputs_visible3 or 0) > 0:
+                return True
+            # リファラへ遷移
+            try:
+                await self.page.evaluate("if (document.referrer) location.href = document.referrer;")
+                await self.page.wait_for_load_state('domcontentloaded', timeout=5000)
+                return True
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return False
 
     async def _extract_form_content_with_iframes(
         self, form_count: int

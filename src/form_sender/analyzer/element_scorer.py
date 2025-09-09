@@ -8,6 +8,7 @@ HTMLフォーム要素の6属性による重み付けスコアリング機能
 import re
 import logging
 from typing import Dict, List, Any, Optional, Tuple
+import unicodedata
 from playwright.async_api import Locator
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,8 @@ class ElementScorer:
             ],
             "姓": ["姓", "苗字", "名字", "せい", "みょうじ"],
             "名": ["名", "名前", "めい"],
+            # 統合氏名（担当者系の言い換えを広く受ける）
+            "統合氏名": ["氏名", "お名前", "姓名", "フルネーム", "担当者", "担当者名", "ご担当者名"],
             "姓ひらがな": ["ひらがな", "せい", "姓"],
             "名ひらがな": ["ひらがな", "めい", "名"],
             # 『携帯』はモバイル番号専用ラベルに引っ張られやすいため除外
@@ -230,6 +233,16 @@ class ElementScorer:
             logger.debug(f"boundary match failed: {e}")
             # 互換フォールバック（case-insensitive の部分一致）
             return (token or "").lower() in (text or "").lower()
+
+    def _normalize(self, s: str) -> str:
+        """比較用の正規化: NFKC + lower（全角/半角差異を吸収）。"""
+        try:
+            return unicodedata.normalize("NFKC", s or "").lower()
+        except Exception:
+            try:
+                return (s or "").lower()
+            except Exception:
+                return ""
 
     async def calculate_element_score(
         self, element: Locator, field_patterns: Dict[str, Any], field_name: str
@@ -894,10 +907,10 @@ class ElementScorer:
 
         pattern_names = field_patterns.get("names", [])
         matches = []
-        element_name_lower = element_name.lower()
+        element_name_lower = self._normalize(element_name)
 
         for pattern_name in pattern_names:
-            pattern_lower = pattern_name.lower()
+            pattern_lower = self._normalize(pattern_name)
             # 短い/曖昧トークンは語境界を要求（<=4 もしくは曖昧トークン）
             if len(pattern_lower) <= 4 or pattern_lower in self.AMBIGUOUS_TOKENS:
                 if self._contains_token_with_boundary(
@@ -928,10 +941,10 @@ class ElementScorer:
 
         pattern_ids = field_patterns.get("ids", [])
         matches = []
-        element_id_lower = element_id.lower()
+        element_id_lower = self._normalize(element_id)
 
         for pattern_id in pattern_ids:
-            pattern_lower = pattern_id.lower()
+            pattern_lower = self._normalize(pattern_id)
             # 短い/曖昧トークンは語境界を要求
             if len(pattern_lower) <= 4 or pattern_lower in self.AMBIGUOUS_TOKENS:
                 if self._contains_token_with_boundary(element_id_lower, pattern_lower):
@@ -964,7 +977,7 @@ class ElementScorer:
         pattern_placeholders = field_patterns.get("placeholders", [])
         matches = []
         total_score = 0
-        placeholder_lower = placeholder.lower()
+        placeholder_lower = self._normalize(placeholder)
 
         # 安全ガード: 『会社名』系の曖昧一致抑止
         # 背景: プレースホルダーが『名』である氏名フィールドが、
@@ -1137,7 +1150,7 @@ class ElementScorer:
 
         pattern_classes = field_patterns.get("classes", [])
         matches = []
-        element_class_lower = element_class.lower()
+        element_class_lower = self._normalize(element_class)
 
         for pattern_class in pattern_classes:
             pattern_lower = pattern_class.lower()
