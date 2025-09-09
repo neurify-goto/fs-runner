@@ -65,6 +65,9 @@ begin
     end if;
     v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
     v_sql := v_sql || ' order by c.id asc limit $5 ),
+      cand_agg as (
+        select count(*)::int as cand_count, coalesce(max(id), $6) as cand_max from candidates
+      ),
       ins as (
         insert into public.send_queue(target_date_jst, targeting_id, company_id, priority, shard_id, status, attempts, created_at)
         select $1::date, $2::bigint, id,
@@ -74,10 +77,14 @@ begin
           from candidates
         on conflict (target_date_jst, targeting_id, company_id) do nothing
         returning company_id
+      ),
+      ins_agg as (
+        select count(*)::int as ins_count, coalesce(max(company_id), $6) as ins_max from ins
       )
-      select (select count(*) from ins)::int as inserted,
-             coalesce((select max(company_id) from ins), $6) as last_id,
-             ( (select count(*) from ins) = $5 OR coalesce((select max(company_id) from ins), $6) >= ($6 + $7) ) as has_more;';
+      select ins_agg.ins_count as inserted,
+             greatest(ins_agg.ins_max, cand_agg.cand_max) as last_id,
+             (cand_agg.cand_count = $5 OR cand_agg.cand_max >= ($6 + $7)) as has_more
+      from ins_agg, cand_agg;';
 
     v_t1 := clock_timestamp();
     execute v_sql into v_inserted, v_last_id, v_has_more using p_target_date, p_targeting_id, v_ng_names, v_shards, p_limit, p_after_id, p_id_window;
@@ -114,6 +121,9 @@ begin
     end if;
     v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
     v_sql := v_sql || ' order by c.id asc limit $5 ),
+      cand_agg as (
+        select count(*)::int as cand_count, coalesce(max(id), $6) as cand_max from candidates
+      ),
       ins as (
         insert into public.send_queue(target_date_jst, targeting_id, company_id, priority, shard_id, status, attempts, created_at)
         select $1::date, $2::bigint, id,
@@ -123,10 +133,14 @@ begin
           from candidates
         on conflict (target_date_jst, targeting_id, company_id) do nothing
         returning company_id
+      ),
+      ins_agg as (
+        select count(*)::int as ins_count, coalesce(max(company_id), $6) as ins_max from ins
       )
-      select (select count(*) from ins)::int as inserted,
-             coalesce((select max(company_id) from ins), $6) as last_id,
-             ( (select count(*) from ins) = $5 OR coalesce((select max(company_id) from ins), $6) >= ($6 + $7) ) as has_more;';
+      select ins_agg.ins_count as inserted,
+             greatest(ins_agg.ins_max, cand_agg.cand_max) as last_id,
+             (cand_agg.cand_count = $5 OR cand_agg.cand_max >= ($6 + $7)) as has_more
+      from ins_agg, cand_agg;';
 
     v_t1 := clock_timestamp();
     execute v_sql into v_inserted, v_last_id, v_has_more using p_target_date, p_targeting_id, v_ng_names, v_shards, p_limit, p_after_id, p_id_window;

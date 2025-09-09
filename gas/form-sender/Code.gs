@@ -71,6 +71,12 @@ const CONFIG = {
   DEFAULT_TARGETING_ID: 1, // デフォルトのターゲティングID
   // 当日キュー作成対象のホワイトリスト（未設定/空配列なら全アクティブ対象）
   QUEUE_TARGETING_IDS: [],
+  // チャンク投入の既定値（運用で調整可能）
+  CHUNK_LIMIT_INITIAL: 2000,
+  CHUNK_LIMIT_MIN: 250,
+  CHUNK_ID_WINDOW_INITIAL: 50000,
+  CHUNK_ID_WINDOW_MIN: 10000,
+  CHUNK_TIME_BUDGET_MS: 240000, // 1ターゲティングあたり最大4分（保険）
   JST_OFFSET: 9 * 60 * 60 * 1000, // JST のオフセット（ミリ秒）
   // 1ワークフロー内で起動するPythonワーカー数（1〜4）
   // GitHub Actions で --num-workers に反映されます
@@ -588,9 +594,12 @@ function buildSendQueueForAllTargetings() {
     // CONFIG.QUEUE_TARGETING_IDS が設定されている場合はそのID群に限定
     let targetList = activeTargetings;
     if (Array.isArray(CONFIG.QUEUE_TARGETING_IDS) && CONFIG.QUEUE_TARGETING_IDS.length > 0) {
-      const allow = new Set(CONFIG.QUEUE_TARGETING_IDS.map(Number));
+      const whitelist = CONFIG.QUEUE_TARGETING_IDS
+        .map(function(x){ return Number(x); })
+        .filter(function(x){ return Number.isFinite(x) && x > 0; });
+      const allow = new Set(whitelist);
       targetList = activeTargetings.filter(t => allow.has(Number(t.targeting_id || t.id || t)));
-      console.log(JSON.stringify({ level: 'info', event: 'queue_build_whitelist_filter', total_active: activeTargetings.length, filtered: targetList.length, ids: CONFIG.QUEUE_TARGETING_IDS }));
+      console.log(JSON.stringify({ level: 'info', event: 'queue_build_whitelist_filter', total_active: activeTargetings.length, filtered: targetList.length, ids: whitelist }));
       if (targetList.length === 0) {
         console.log('ホワイトリストに該当するアクティブtargetingがありません');
         return { success: false, message: 'whitelist対象なし', processed: 0 };
@@ -686,14 +695,20 @@ function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, 
   const MAX_TOTAL = 10000;
   let total = 0;
   const shards = 8;
-  let limit = 2000; // 2,000件から開始し、タイムアウト時は段階的に縮小
-  const minLimit = 250;
-  let idWindow = 50000; // 1回のスキャン範囲（ID連番のウィンドウ）
+  let limit = CONFIG.CHUNK_LIMIT_INITIAL;
+  const minLimit = CONFIG.CHUNK_LIMIT_MIN;
+  let idWindow = CONFIG.CHUNK_ID_WINDOW_INITIAL;
+  const minIdWindow = CONFIG.CHUNK_ID_WINDOW_MIN;
+  const startedAll = Date.now();
   // Stage1, Stage2 の順で実行
   for (let stage = 1; stage <= 2; stage++) {
     let afterId = 0;
     let guard = 0;
     while (total < MAX_TOTAL && guard < 100) { // 安全ガード
+      if (Date.now() - startedAll > CONFIG.CHUNK_TIME_BUDGET_MS) {
+        console.warn(JSON.stringify({ level: 'warning', event: 'queue_chunk_time_budget_exceeded', targeting_id: targetingId, stage, total, limit, idWindow }));
+        return { success: true, inserted_total: total, targeting_id: targetingId, time_budget_exceeded: true };
+      }
       guard++;
       // 1回のステップ実行
       const started = Date.now();
@@ -713,8 +728,8 @@ function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, 
         total += inserted;
         console.log(JSON.stringify({ level: 'info', event: 'queue_chunk_step', targeting_id: targetingId, stage, limit, after_id: afterId, inserted, total, elapsed_ms: elapsed, has_more: hasMore }));
         if (total >= MAX_TOTAL) break; // 上限達成
-        if (!hasMore && inserted === 0) continue; // このウィンドウに候補がなかった→次ウィンドウへ
-        if (!hasMore) continue; // ウィンドウを進めて継続
+        if (!hasMore && inserted === 0) { afterId = afterId + idWindow; continue; } // 候補なし→次ウィンドウへ
+        if (!hasMore) { afterId = afterId + idWindow; continue; } // ウィンドウ端に達した→次ウィンドウへ
         // 余裕があるなら少しlimitを戻す（適応制御）
         if (elapsed < 3000 && limit < 4000) limit = Math.min(4000, Math.floor(limit * 1.25));
       } catch (e) {
@@ -729,8 +744,8 @@ function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, 
             continue;
           }
           // さらに厳しい場合はIDウィンドウも狭める
-          if (idWindow > 10000) {
-            idWindow = Math.max(10000, Math.floor(idWindow / 2));
+          if (idWindow > minIdWindow) {
+            idWindow = Math.max(minIdWindow, Math.floor(idWindow / 2));
             Utilities.sleep(500);
             continue;
           }
