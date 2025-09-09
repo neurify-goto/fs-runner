@@ -18,7 +18,7 @@ class FieldMapper:
     """フィールドのマッピング処理を担当するクラス"""
 
     # 非必須だが高信頼であれば入力価値が高い項目（汎用・安全）
-    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所", "郵便番号"}
+    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所", "郵便番号", "郵便番号1", "郵便番号2"}
 
     def __init__(
         self,
@@ -172,12 +172,19 @@ class FieldMapper:
             # 背景: 多くの日本語フォームでは件名/電話は任意だが、入力しても副作用が少なく、
             # 自動送信の成功率向上に寄与するため。
             # 注意: フォーム特化の条件は追加しない（汎用改善のみ）。
+            # オプション: 任意高優先度項目のベース閾値許容を追跡（map_ok でも利用）
+            allow_optional_base = False
             if (not should_map_field) and best_element:
-                if (
-                    field_name in self.OPTIONAL_HIGH_PRIORITY_FIELDS
-                    and best_score >= dynamic_threshold
-                ):
-                    should_map_field = True
+                if field_name in self.OPTIONAL_HIGH_PRIORITY_FIELDS:
+                    # 高優先度任意項目は動的閾値が高すぎて取りこぼすことがあるため、
+                    # ベース閾値以上かつ文脈が十分であれば採用を許可（汎用安全）
+                    if best_score >= dynamic_threshold:
+                        should_map_field = True
+                    else:
+                        base_threshold = self.settings.get("min_score_threshold", 70)
+                        if best_score >= base_threshold:
+                            should_map_field = True
+                            allow_optional_base = True
 
             # マッピング判定ロジック（精度向上版）
             map_ok = False
@@ -212,9 +219,15 @@ class FieldMapper:
                                 best_score >= required_threshold
                             )
                 else:
-                    # 非コア項目は必須一致だけでは採用しない。
-                    # スコアが動的閾値（品質優先）を満たす場合のみ採用。
-                    map_ok = best_score >= dynamic_threshold
+                    # 非コア項目でも『必須一致』の場合は採用（偽陰性防止: fmi一般則に整合）。
+                    # さらに、任意高優先度項目でベース閾値許容を与えた場合は base_threshold 基準で採否。
+                    if is_required_match:
+                        map_ok = True
+                    elif allow_optional_base and (field_name in self.OPTIONAL_HIGH_PRIORITY_FIELDS):
+                        base_threshold = self.settings.get("min_score_threshold", 70)
+                        map_ok = best_score >= base_threshold
+                    else:
+                        map_ok = best_score >= dynamic_threshold
 
             # フィールド固有の安全ガード（メール）
             if map_ok and field_name == "メールアドレス":
@@ -347,6 +360,10 @@ class FieldMapper:
         )
         # 追加救済: name/id が 'email' の入力を確実に採用（確認欄は除外）
         await self._salvage_strict_email_by_attr(
+            classified_elements, field_mapping, used_elements
+        )
+        # 追加救済: 郵便番号の2分割（zip1/zip2 等）を name/id から直接補完
+        await self._salvage_postal_split_by_attr(
             classified_elements, field_mapping, used_elements
         )
         # 強化救済: ラベル/見出しテキストにメール語が含まれる input[type=text]
@@ -552,7 +569,65 @@ class FieldMapper:
                 info["source"] = "promote_split"
             except Exception:
                 pass
+            # ここで各反復毎に保存（regression: ループ外代入で3番のみ残る問題を修正）
             field_mapping[fname] = info
+
+    async def _salvage_postal_split_by_attr(self, classified_elements, field_mapping, used_elements):
+        """zip1/zip2 等の明示的な2分割郵便番号を直接補完（汎用救済）。
+
+        - 既に『郵便番号1/2』が存在する場合は何もしない。
+        - name/id に zip1/zip2, postal1/postal2, postcode1/postcode2 等が含まれる input を検出。
+        - 安全ガード（passes_safeguard('郵便番号')）に合格した場合のみ採用。
+        """
+        if ("郵便番号1" in field_mapping) or ("郵便番号2" in field_mapping):
+            return
+        cands = (classified_elements.get("tel_inputs") or []) + (
+            classified_elements.get("text_inputs") or []
+        )
+        part1, part2 = None, None
+        for el in cands:
+            # 既存マッピングで統合『郵便番号』として利用済みの要素も検査対象に含める
+            # （差し替えで split に昇格させるケースを許容）
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                ei = {}
+            nm = (ei.get("name", "") or "").lower()
+            ide = (ei.get("id", "") or "").lower()
+            blob = f"{nm} {ide}"
+            if any(k in blob for k in ["zip1", "postal1", "postcode1", "zipcode1", "zip_1", "postal_code_1", "postcode_1", "zipcode_1"]):
+                part1 = (el, ei)
+            if any(k in blob for k in ["zip2", "postal2", "postcode2", "zipcode2", "zip_2", "postal_code_2", "postcode_2", "zipcode_2"]):
+                part2 = (el, ei)
+        if not (part1 and part2):
+            return
+        from .mapping_safeguards import passes_safeguard
+        for idx, (el, ei) in enumerate([part1, part2], start=1):
+            contexts = await self.context_text_extractor.extract_context_for_element(el)
+            # 簡易スコアで安全ガード判定
+            details = {"element_info": ei, "total_score": 85}
+            if not passes_safeguard("郵便番号", details, contexts, self.context_text_extractor, {}, self.settings):
+                return
+        # 採用
+        for idx, (el, ei) in enumerate([part1, part2], start=1):
+            contexts = await self.context_text_extractor.extract_context_for_element(el)
+            details = {"element_info": ei, "total_score": 85}
+            info = await self._create_enhanced_element_info(el, details, contexts)
+            try:
+                info["source"] = "salvage_postal_split"
+            except Exception:
+                pass
+            field_mapping[f"郵便番号{idx}"] = info
+            # 重複割当て防止用に使用済みへ登録
+            try:
+                used_elements.add(id(el))
+            except Exception:
+                pass
+        # 統合『郵便番号』が存在する場合は重複入力を避けるため削除
+        try:
+            field_mapping.pop("郵便番号", None)
+        except Exception:
+            pass
 
     async def _remap_prefecture_to_select_if_available(
         self, classified_elements, field_mapping

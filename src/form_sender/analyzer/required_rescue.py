@@ -97,6 +97,59 @@ class RequiredRescue:
             except Exception:
                 et = "Exception"
             logger.debug(f"Required postal rescue skipped: {et}")
+
+        # 追加救済: 郵便番号の2分割（zip1/zip2 等）が明確に存在する場合は優先的に採用
+        try:
+            if ("郵便番号1" not in field_mapping) and ("郵便番号2" not in field_mapping):
+                tel_and_text = (classified_elements.get("tel_inputs") or []) + (
+                    classified_elements.get("text_inputs") or []
+                )
+                part1, part2 = None, None
+                for el in tel_and_text:
+                    if id(el) in used_elements:
+                        continue
+                    ei = await self.element_scorer._get_element_info(el)
+                    nm = (ei.get("name", "") or "").lower()
+                    ide = (ei.get("id", "") or "").lower()
+                    blob = f"{nm} {ide}"
+                    if any(k in blob for k in ["zip1", "postal1", "postcode1", "zipcode1", "zip_1", "postal_code_1", "postcode_1", "zipcode_1"]):
+                        part1 = (el, ei)
+                    if any(k in blob for k in ["zip2", "postal2", "postcode2", "zipcode2", "zip_2", "postal_code_2", "postcode_2", "zipcode_2"]):
+                        part2 = (el, ei)
+                if part1 and part2:
+                    from .mapping_safeguards import passes_safeguard as _passes
+                    for idx, (el, ei) in enumerate([part1, part2], start=1):
+                        contexts = await self.context_text_extractor.extract_context_for_element(el)
+                        details = {"element_info": ei, "total_score": 85}
+                        if not _passes("郵便番号", details, contexts, self.context_text_extractor, {}, self.settings):
+                            part1 = part2 = None
+                            break
+                    if part1 and part2:
+                        for idx, (el, ei) in enumerate([part1, part2], start=1):
+                            contexts = await self.context_text_extractor.extract_context_for_element(el)
+                            details = {"element_info": ei, "total_score": 85}
+                            info = await self._create_enhanced_element_info(el, details, contexts)
+                            try:
+                                info["source"] = "required_rescue_postal_split"
+                            except Exception:
+                                pass
+                            key = f"郵便番号{idx}"
+                            # 値は assigner 側の split_assignments で適切に割当てられるため、
+                            # ここでは field_mapping に登録のみ行う
+                            field_mapping[key] = info
+                            used_elements.add(id(el))
+                            used_names_ids.add((ei.get("name", ""), ei.get("id", "")))
+                        # 統合『郵便番号』が存在する場合は重複入力を避けるため削除
+                        try:
+                            field_mapping.pop("郵便番号", None)
+                        except Exception:
+                            pass
+        except Exception as e:
+            try:
+                et = type(e).__name__
+            except Exception:
+                et = "Exception"
+            logger.debug(f"Required postal split rescue skipped: {et}")
         # 先行救済: name/id='email' の必須入力を確実に登録（確認欄は除外）
         try:
             if "メールアドレス" not in field_mapping:
