@@ -16,6 +16,10 @@ declare
   v_end_utc   timestamp with time zone;
   v_today_success integer := 0;
 begin
+  -- パラメータ境界チェック（過大値の誤設定を抑止）
+  if coalesce(p_max_daily, 0) > 10000 then
+    raise exception 'p_max_daily exceeds maximum allowed value (10000)';
+  end if;
   -- JST境界のUTC時刻
   v_start_utc := (p_target_date::timestamp AT TIME ZONE 'Asia/Tokyo');
   v_end_utc   := ((p_target_date::timestamp + interval '1 day') AT TIME ZONE 'Asia/Tokyo');
@@ -29,6 +33,7 @@ begin
        and s.submitted_at >= v_start_utc
        and s.submitted_at <  v_end_utc;
     if v_today_success >= p_max_daily then
+      raise notice 'claim_next_batch: daily cap reached (targeting_id=%, today=%/%).', p_targeting_id, v_today_success, p_max_daily;
       return;
     end if;
   end if;

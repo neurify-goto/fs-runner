@@ -258,11 +258,16 @@ def _extract_max_daily_sends(client_data: Dict[str, Any]) -> Optional[int]:
             return None
         if isinstance(mds, str):
             s = mds.strip()
-            if not s.isdigit():
+            try:
+                mds = int(s)
+            except (ValueError, TypeError):
                 return None
-            mds = int(s)
-        mds = int(mds)
-        return mds if mds > 0 else None
+        else:
+            try:
+                mds = int(mds)
+            except (ValueError, TypeError):
+                return None
+        return int(mds) if int(mds) > 0 else None
     except Exception:
         return None
 
