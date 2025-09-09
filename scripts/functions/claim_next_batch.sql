@@ -18,6 +18,7 @@ declare
   v_today_assigned integer := 0;
   v_effective_limit integer := 0;
   v_date_key integer := 0;
+  v_lock_key bigint := 0;
 begin
   -- パラメータ境界チェック（過大値の誤設定を抑止）
   if coalesce(p_max_daily, 0) > 10000 then
@@ -28,8 +29,10 @@ begin
   v_end_utc   := ((p_target_date::timestamp + interval '1 day') AT TIME ZONE 'Asia/Tokyo');
   v_date_key  := (to_char(p_target_date, 'YYYYMMDD'))::integer;
 
-  -- 同一 targeting_id / 日付のクレームを直列化し、上限の厳密順守を担保
-  perform pg_advisory_xact_lock(p_targeting_id, v_date_key);
+  -- 同一 targeting_id / 日付のクレームを直列化（64bit対応）
+  -- 二引数版は int4 限定のため、(targeting_id, date_key) から64bitキーを生成し単引数版を使用
+  v_lock_key := (('x' || substr(md5(p_targeting_id::text || ':' || v_date_key::text), 1, 16))::bit(64))::bigint;
+  perform pg_advisory_xact_lock(v_lock_key);
 
   -- 当日成功数を集計し、上限に達していれば0件返却
   if coalesce(p_max_daily, 0) > 0 then
