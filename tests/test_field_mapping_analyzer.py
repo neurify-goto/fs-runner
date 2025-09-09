@@ -220,9 +220,9 @@ class FieldMappingAnalyzer:
         """Playwright初期化（安定化＋メモリ最適化）"""
         try:
             self.playwright = await async_playwright().start()
-            # 環境変数でGUI/ヘッドレスを切り替え可能に（デフォルト: ヘッドレス）
-            headless_env = os.getenv("PLAYWRIGHT_HEADLESS", "1").lower()
-            headless = not (headless_env in ["0", "false", "no"])
+            # このテストは常にヘッドレスで実行する（運用ポリシー）
+            # 以前は環境変数で切替可能だったが、誤ってGUI実行されるのを防ぐため固定化
+            headless = True
 
             # ブラウザエンジン選択（デフォルト: chromium）。問題発生時に切替可能。
             engine = os.getenv("PLAYWRIGHT_ENGINE", "chromium").lower()
@@ -355,8 +355,7 @@ class FieldMappingAnalyzer:
                 }
             )
 
-            mode = "headless" if headless else "headed"
-            logger.info(f"✅ Browser initialized with memory optimization ({mode})")
+            logger.info("✅ Browser initialized with memory optimization (headless)")
 
         except Exception as e:
             logger.error(f"❌ Browser initialization failed: {e}")
