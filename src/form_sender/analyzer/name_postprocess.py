@@ -69,6 +69,10 @@ def fix_name_mapping_mismatch(field_mapping: Dict[str, Any]) -> None:
             ]
         ).lower()
 
+    def ctx(key: str) -> str:
+        info = (field_mapping.get(key, {}) or {})
+        return str(info.get("best_context_text", "")).lower()
+
     def swap(a: str, b: str) -> None:
         if (a in field_mapping) and (b in field_mapping):
             field_mapping[a], field_mapping[b] = (field_mapping[b], field_mapping[a])
@@ -78,8 +82,22 @@ def fix_name_mapping_mismatch(field_mapping: Dict[str, Any]) -> None:
             return False
         return ("first" in sei_blob and "last" in mei_blob) or ("mei" in sei_blob and "sei" in mei_blob)
 
+    # 1) 属性由来の明確な入れ違い
     if mismatch(blob("姓"), blob("名")):
         swap("姓", "名")
+
+    # 2) ラベル/見出しテキスト由来の入れ違い（Wix 等の混在表記 '姓 / First Name' 対策）
+    try:
+        sei_ctx = ctx("姓")
+        mei_ctx = ctx("名")
+        # 『姓側に first name 』『名側に last name』の痕跡がある場合は入れ違いとみなす
+        if (sei_ctx and "first" in sei_ctx) and (mei_ctx and "last" in mei_ctx):
+            swap("姓", "名")
+        # 日本語の並列表記（例: '名 / Last Name', '姓 / First Name'）にも限定的に対応
+        elif ("名" in sei_ctx and "last" in sei_ctx) and ("姓" in mei_ctx and "first" in mei_ctx):
+            swap("姓", "名")
+    except Exception:
+        pass
     if mismatch(blob("姓カナ"), blob("名カナ")) and ("kana" in blob("姓カナ") and "kana" in blob("名カナ")):
         swap("姓カナ", "名カナ")
 
@@ -174,4 +192,3 @@ async def normalize_kana_hiragana_fields(
                         continue
     except Exception:
         pass
-

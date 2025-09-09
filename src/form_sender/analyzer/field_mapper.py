@@ -216,9 +216,12 @@ class FieldMapper:
                                 best_score >= required_threshold
                             )
                 else:
-                    # 非コア項目は必須一致だけでは採用しない。
-                    # スコアが動的閾値（品質優先）を満たす場合のみ採用。
-                    map_ok = best_score >= dynamic_threshold
+                    # 非コア項目でも『必須一致』の場合は採用（偽陰性防止: fmi一般則に整合）。
+                    # それ以外はスコアが動的閾値（品質優先）を満たす場合のみ採用。
+                    if is_required_match:
+                        map_ok = True
+                    else:
+                        map_ok = best_score >= dynamic_threshold
 
             # フィールド固有の安全ガード（メール）
             if map_ok and field_name == "メールアドレス":

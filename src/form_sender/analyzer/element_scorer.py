@@ -2003,6 +2003,8 @@ class ElementScorer:
                 aria_ids = await element.get_attribute("aria-labelledby")
             except Exception:
                 aria_ids = None
+            # 安全側: 未設定時に未初期化参照を避ける
+            aria_found = False
             if aria_ids:
                 try:
                     ids = [s.strip() for s in str(aria_ids).split() if s.strip()]
