@@ -18,7 +18,7 @@ class FieldMapper:
     """フィールドのマッピング処理を担当するクラス"""
 
     # 非必須だが高信頼であれば入力価値が高い項目（汎用・安全）
-    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所"}
+    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所", "郵便番号"}
 
     def __init__(
         self,
@@ -260,6 +260,20 @@ class FieldMapper:
                         map_ok = False
                 except Exception:
                     map_ok = False
+            # 分割郵便番号（郵便番号1/2）にも同等の安全ガードを適用
+            if map_ok and field_name in {"郵便番号1", "郵便番号2"}:
+                try:
+                    if not passes_safeguard(
+                        "郵便番号",
+                        best_score_details,
+                        best_context,
+                        self.context_text_extractor,
+                        field_patterns,
+                        self.settings,
+                    ):
+                        map_ok = False
+                except Exception:
+                    map_ok = False
 
             # 都道府県の安全ガード（共通ユーティリティ）
             if map_ok and field_name == "都道府県":
@@ -346,6 +360,13 @@ class FieldMapper:
         await self._fallback_map_address_field(
             classified_elements, field_mapping, used_elements
         )
+        # 追加救済: よくある住所分割 name（city/adrs/room）の強化マッピング
+        try:
+            await self._force_map_common_address_fields(
+                classified_elements, field_mapping, used_elements
+            )
+        except Exception as e:
+            logger.debug(f"force map common address skipped: {e}")
         # 最終救済: 旧式テーブル行ラベルからメール欄を強制採用
         await self._force_map_email_from_table_label(
             classified_elements, field_mapping, used_elements
@@ -1219,6 +1240,7 @@ class FieldMapper:
         addr_attr_tokens = [
             "address",
             "addr",
+            "adrs",
             "street",
             "building",
             "pref",
@@ -1314,14 +1336,30 @@ class FieldMapper:
             return
         # スコア降順で安定ソート
         candidates.sort(key=lambda t: t[1], reverse=True)
-        # 住所の誤検出リスクを下げるため、しきい値をやや高めに設定
-        threshold = max(70, int(self.settings.get("email_fallback_min_score", 60)) + 5)
+        # 住所の誤検出リスクを下げるため、しきい値を基本65とするが、
+        # 属性/文脈の双方ヒット時は閾値をやや緩和（汎用安全の範囲内）
+        base = int(self.settings.get("email_fallback_min_score", 60)) + 5  # 既存設定と整合
+        threshold_base = max(60, base)  # 下限60
 
         mapped_count = 0
         supplement_idx = 1
         for el, score, details, contexts, attr_hit, ctx_hit in candidates:
+            # 属性/文脈のヒット状況に応じて動的なしきい値を決定
+            threshold = threshold_base - 5 if (attr_hit and ctx_hit) else threshold_base
+            # 強い属性一致（name/id が city/adrs/room 等）の場合はさらに緩和
+            try:
+                ei_local = details.get("element_info", {}) or {}
+                nm = (ei_local.get("name", "") or "").lower()
+                ide = (ei_local.get("id", "") or "").lower()
+                strong_attr = nm in {"city", "adrs", "room"} or ide in {"city", "adrs", "room"}
+            except Exception:
+                strong_attr = False
+            if strong_attr:
+                threshold = max(50, threshold - 10)
             if score < threshold:
-                break
+                # 動的しきい値は候補ごとに異なるため、
+                # 現在の候補が不採用でも後続候補を検査し続ける
+                continue
             # 既に他で利用済みの要素はスキップ
             if id(el) in used_elements:
                 continue
@@ -1409,6 +1447,53 @@ class FieldMapper:
                         used_elements.add(id(el))
                         logger.info("Salvaged 'メールアドレス' by strict name/id match = email")
                         return
+
+    async def _force_map_common_address_fields(self, classified_elements, field_mapping, used_elements):
+        """一般的な name 属性（city/adrs/room）に対して、しきい値に依存せず安全に住所系としてマッピング。
+        - 既に『住所』『住所_補助*』が存在する場合は追加しない
+        - 最高2フィールド（優先: city, 次点: adrs）
+        - 住所テキスト欄以外は対象外
+        """
+        if any(k in field_mapping for k in ("住所", "住所_補助1")):
+            return
+        text_inputs = classified_elements.get("text_inputs", []) or []
+        targets = []
+        for el in text_inputs:
+            try:
+                if id(el) in used_elements:
+                    continue
+                ei = await self.element_scorer._get_element_info(el)
+                nm = (ei.get("name", "") or "").lower()
+                ide = (ei.get("id", "") or "").lower()
+                if nm in {"city", "adrs"} or ide in {"city", "adrs"}:
+                    targets.append((nm or ide, el))
+            except Exception:
+                continue
+        if not targets:
+            return
+        # 優先順位: city -> adrs
+        order = {"city": 0, "adrs": 1}
+        targets.sort(key=lambda t: order.get(t[0], 99))
+        mapped = 0
+        for idx, (_, el) in enumerate(targets):
+            fname = "住所" if (idx == 0 and "住所" not in field_mapping) else f"住所_補助{idx}"
+            try:
+                patterns = self.field_patterns.get_pattern("住所") or {}
+                score, details = await self.element_scorer.calculate_element_score(el, patterns, "住所")
+            except Exception:
+                score, details = 90, {"element_info": await self.element_scorer._get_element_info(el), "total_score": 90}
+            info = await self._create_enhanced_element_info(el, details, [])
+            try:
+                info["source"] = "forced_common_address"
+            except Exception:
+                pass
+            tmp = self._generate_temp_field_value(fname)
+            if self.duplicate_prevention.register_field_assignment(fname, tmp, score, info):
+                field_mapping[fname] = info
+                used_elements.add(id(el))
+                mapped += 1
+            if mapped >= 2:
+                break
 
     async def _salvage_email_by_label_context(
         self, classified_elements, field_mapping, used_elements

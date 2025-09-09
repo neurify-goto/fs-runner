@@ -157,6 +157,27 @@ class InputValueAssigner:
                         }
         except Exception as e:
             logger.debug(f"phone split assignment fallback skipped: {e}")
+        # 分割電話の自動値を電話番号1/2/3にも同期（評価用JSONの明確化）
+        try:
+            for idx in (1, 2, 3):
+                auto_key = f"auto_phone_part_{idx}"
+                target_key = f"電話番号{idx}"
+                if auto_key in input_assignments:
+                    aval = str(input_assignments[auto_key].get("value", "") or "").strip()
+                    if not aval:
+                        continue
+                    if target_key in input_assignments:
+                        input_assignments[target_key]["value"] = aval
+                    elif target_key in field_mapping:
+                        fi = field_mapping.get(target_key, {})
+                        input_assignments[target_key] = {
+                            "selector": fi.get("selector", input_assignments[auto_key].get("selector", "")),
+                            "input_type": fi.get("input_type", "text"),
+                            "value": aval,
+                            "required": bool(fi.get("required", False)),
+                        }
+        except Exception:
+            pass
         # フォールバック: 単一フィールドの郵便番号にも7桁を投入
         try:
             if "郵便番号1" in input_assignments:
@@ -251,6 +272,7 @@ class InputValueAssigner:
             "名カナ",
             "電話番号",
             "会社名",
+            "郵便番号",
         ]
         # 分割電話（電話番号1/2/3）は統合電話と同等に扱う（フォーム側が分割要求の場合）
         if field_name in core_fields or field_name in {"電話番号1", "電話番号2", "電話番号3"}:
@@ -510,14 +532,21 @@ class InputValueAssigner:
 
             # If still empty after specific mapping, use fallback
             if not value:
-                # For any unmappable field (when all are required or specific field is required), use full-width space
-                if self.required_analysis.get(
-                    "treat_all_as_required", False
-                ) or field_info.get("required", False):
-                    value = "　"  # 全角スペース
+                # 住所補助は必須時のみ全角スペースで救済し、任意時は空文字を維持
+                if str(field_name).startswith("住所_補助"):
+                    if self.required_analysis.get("treat_all_as_required", False) or field_info.get("required", False):
+                        value = "　"  # 全角スペース（送信ブロック回避）
+                    else:
+                        value = ""
                 else:
-                    # For non-required fields, use empty string
-                    value = ""
+                    # For any unmappable field (when all are required or specific field is required), use full-width space
+                    if self.required_analysis.get(
+                        "treat_all_as_required", False
+                    ) or field_info.get("required", False):
+                        value = "　"  # 全角スペース
+                    else:
+                        # For non-required fields, use empty string
+                        value = ""
 
         # 住所/住所_補助* の文脈に応じた割当
         if field_name.startswith("住所"):
@@ -592,9 +621,9 @@ class InputValueAssigner:
                 "号室",
                 "詳細",
                 # 属性名・英語表記による分割住所ヒント（addr/address2/line2 等）
+                "adrs",
                 "addr2",
                 "addr_2",
-                "addr",
                 "address2",
                 "address_2",
                 "address-line2",
