@@ -661,28 +661,58 @@ class IsolatedFormWorker:
                 has_prohibition = bool(sp.get('has_prohibition') or sp.get('prohibition_detected'))
                 if has_prohibition:
                     matches = sp.get('matches') or []
-                    level = sp.get('prohibition_level') or sp.get('detection_method') or 'detected'
-                    logger.warning(f"Worker {self.worker_id}: Sales prohibition detected (record_id={record_id}, matches={len(matches)}, level={level})")
-                    return {
-                        "error": True,
-                        "record_id": record_id,
-                        "status": "failed",
-                        "error_type": "PROHIBITION_DETECTED",
-                        "error_message": "Sales prohibition detected",
-                        "additional_data": {
-                            "classify_context": {
-                                "stage": "pre_submission_check",
-                                "primary_error_type": "PROHIBITION_DETECTED",
-                                "is_bot_detected": False,
+                    level = (sp.get('prohibition_level') or sp.get('detection_method') or 'detected')
+                    level_l = str(level).lower()
+                    conf_level = str(sp.get('confidence_level') or '').lower()
+                    try:
+                        conf_score = float(sp.get('confidence_score') or 0.0)
+                    except Exception:
+                        conf_score = 0.0
+                    # サマリの件数優先（なければ matches 長）
+                    try:
+                        matches_count = int(sp.get('summary', {}).get('total_matches'))
+                    except Exception:
+                        matches_count = len(matches)
+
+                    # 早期中断の閾値: 誤検出を抑えつつ偽陰性ゼロ運用
+                    should_abort = False
+                    if level_l in {"moderate", "strict"}:
+                        should_abort = True
+                    elif conf_level in {"high"} or conf_score >= 80.0:
+                        should_abort = True
+                    elif matches_count >= 2:
+                        should_abort = True
+
+                    if should_abort:
+                        logger.warning(
+                            f"Worker {self.worker_id}: Sales prohibition detected (record_id={record_id}, matches={matches_count}, level={level}, conf={conf_level}/{conf_score:.1f})"
+                        )
+                        return {
+                            "error": True,
+                            "record_id": record_id,
+                            "status": "failed",
+                            "error_type": "PROHIBITION_DETECTED",
+                            "error_message": "Sales prohibition detected",
+                            "additional_data": {
+                                "classify_context": {
+                                    "stage": "pre_submission_check",
+                                    "primary_error_type": "PROHIBITION_DETECTED",
+                                    "is_bot_detected": False,
+                                },
+                                "prohibition_summary": {
+                                    "detected": True,
+                                    "level": level,
+                                    "matches_count": matches_count,
+                                    "confidence_level": conf_level or None,
+                                    "confidence_score": conf_score if conf_score > 0 else None,
+                                    "detection_source": "RuleBasedAnalyzer",
+                                },
                             },
-                            "prohibition_summary": {
-                                "detected": True,
-                                "level": level,
-                                "matches_count": len(matches),
-                                "detection_source": "RuleBasedAnalyzer",
-                            },
-                        },
-                    }
+                        }
+                    else:
+                        logger.info(
+                            f"Worker {self.worker_id}: sales prohibition signals detected but below early-abort threshold (record_id={record_id}, level={level}, conf={conf_level}/{conf_score:.1f}, matches={matches_count})"
+                        )
             except Exception as _e:
                 logger.debug(f"Worker {self.worker_id}: sales prohibition early-check skipped: {_e}")
 

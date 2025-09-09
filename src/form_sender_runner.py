@@ -453,7 +453,7 @@ def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dic
         stage_name = judgment.get('stage_name') if isinstance(judgment.get('stage_name'), str) else None
         confidence = judgment.get('confidence') if isinstance(judgment.get('confidence'), (int, float)) else None
 
-        # 営業禁止検出に関する付加情報（件数/レベル/検出元）
+        # 営業禁止検出に関する付加情報（件数/レベル/検出元/信頼度）
         try:
             prohibition_phrases_count = None
             # SuccessJudge 経由（details）
@@ -473,18 +473,37 @@ def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dic
             # 追加メタ（任意）
             prohibition_detection_level = None
             prohibition_detection_source = None
+            prohibition_confidence_level = None
+            prohibition_confidence_score = None
             ps = add_data.get('prohibition_summary') if isinstance(add_data.get('prohibition_summary'), dict) else None
             if ps:
                 if isinstance(ps.get('level'), str):
                     prohibition_detection_level = ps.get('level')
                 if isinstance(ps.get('detection_source'), str):
                     prohibition_detection_source = ps.get('detection_source')
+                if isinstance(ps.get('confidence_level'), str):
+                    prohibition_confidence_level = ps.get('confidence_level')
+                try:
+                    if isinstance(ps.get('confidence_score'), (int, float)):
+                        prohibition_confidence_score = float(ps.get('confidence_score'))
+                except Exception:
+                    prohibition_confidence_score = None
             if not prohibition_detection_source and isinstance(details.get('detection_method'), str):
                 prohibition_detection_source = details.get('detection_method')
+            # SuccessJudge 側の信頼度がある場合は優先採用
+            if prohibition_confidence_level is None and isinstance(details.get('confidence_level'), str):
+                prohibition_confidence_level = details.get('confidence_level')
+            try:
+                if prohibition_confidence_score is None and isinstance(details.get('confidence_score'), (int, float)):
+                    prohibition_confidence_score = float(details.get('confidence_score'))
+            except Exception:
+                prohibition_confidence_score = None
         except Exception:
             prohibition_phrases_count = None
             prohibition_detection_level = None
             prohibition_detection_source = None
+            prohibition_confidence_level = None
+            prohibition_confidence_score = None
 
         evidence.update({
             'detected_success_words': success_words[:5] if success_words else [],
@@ -500,6 +519,8 @@ def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dic
             'prohibition_phrases_count': prohibition_phrases_count,
             'prohibition_detection_level': prohibition_detection_level,
             'prohibition_detection_source': prohibition_detection_source,
+            'prohibition_confidence_level': prohibition_confidence_level,
+            'prohibition_confidence_score': prohibition_confidence_score,
         })
         return evidence
     except Exception:

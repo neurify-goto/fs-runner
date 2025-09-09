@@ -7,6 +7,7 @@ Form Analyzerから移植した高度な営業禁止文言検出機能。
 
 import logging
 import re
+import unicodedata
 from functools import lru_cache
 from typing import List, Tuple
 
@@ -164,6 +165,22 @@ class ProhibitionDetector:
             f"業務.*?(?:{CONTACT_KEYWORDS}).*?(?:{POLITE_DECLINE}|{DECLINE_KEYWORDS})",
             f"(?:取材|営業等?).*?(?:電話|連絡|お問い合わせ).*?(?:{DECLINE_KEYWORDS}|{POLITE_DECLINE})",
             f"(?:営業|勧誘|セールス).*?(?:等|など).*?(?:{DECLINE_KEYWORDS}|{POLITE_DECLINE})",
+        ])
+
+        # 英語サイト向けの直接禁止/丁寧否定パターンを追加（偽陰性低減）
+        patterns.extend([
+            # 直接的禁止
+            r"\bno\s+(sales|solicitations?|cold\s*calls?|telemarketing|vendor\s+solicitations?)\b",
+            r"\bno\s+vendor(s)?\s*(contact|calls|emails)\b",
+            r"\bno\s+cold\s*calls?\b",
+            # 受け付けない/許可しない
+            r"\b(do\s*not|don't|we\s*do\s*not|we\s*don't|not)\s+(accept|take|allow|permit)\s+(sales|solicitations?|vendor\s+(contacts?|inquiries?)|cold\s*calls?|telemarketing)\b",
+            r"\b(sales|solicitations?|telemarketing|cold\s*calls?|vendor\s+inquiries?)\s+(are|is)\s+(not\s+accepted|prohibited|forbidden)\b",
+            r"\bunsolicited\s+(sales|offers|proposals|marketing)\s+(are|is)\s+(not\s+accepted|prohibited|forbidden)\b",
+            r"\bplease\s+do\s+not\s+contact\s+us\s+for\s+(sales|marketing|business\s+proposals?)\b",
+            r"\bdo\s+not\s+use\s+this\s+form\s+for\s+(sales|solicitations?)\b",
+            # 緩やかな拒否
+            r"\bwe\s+are\s+not\s+(accepting|taking)\s+(sales|solicitations?|vendor\s+inquiries?)\b",
         ])
 
         # パフォーマンス最適化：LRUキャッシュでコンパイル済みパターンをキャッシュ
@@ -333,16 +350,22 @@ class ProhibitionDetector:
         
         # 検出されたテキストの品質分析
         for text in detected_texts:
-            # 否定文の存在チェック
-            negative_patterns = ['ません', 'できません', 'しておりません', 'お断り', 'ご遠慮', 'お控え']
+            # 否定文の存在チェック（英語も含めて強化）
+            negative_patterns = [
+                # 日本語
+                'ません', 'できません', 'しておりません', 'お断り', 'ご遠慮', 'お控え',
+                # 英語
+                "do not", "don't", 'no ', 'not accept', 'not be accepted',
+                'not allowed', 'not permitted', 'no cold call', 'no solicitation', 'no sales'
+            ]
             if any(pattern in text for pattern in negative_patterns):
                 base_score += 10.0
                 if "negative_structure" not in multiplier_factors:
                     multiplier_factors.append("negative_structure")
             
             # 複数キーワードの組み合わせチェック
-            sales_terms = ['営業', 'セールス', '勧誘', '販売']
-            contact_terms = ['問い合わせ', '連絡', '電話', 'メール']
+            sales_terms = ['営業', 'セールス', '勧誘', '販売', 'sales', 'solicitation', 'telemarketing']
+            contact_terms = ['問い合わせ', '連絡', '電話', 'メール', 'contact', 'call', 'phone', 'email']
             
             sales_count = sum(1 for term in sales_terms if term in text)
             contact_count = sum(1 for term in contact_terms if term in text)
@@ -412,7 +435,10 @@ class ProhibitionDetector:
                 # 注意・警告関連
                 '[class*="notice"]', '[id*="notice"]',
                 '[class*="warning"]', '[id*="warning"]',
-                '[class*="alert"]', '[id*="alert"]'
+                '[class*="alert"]', '[id*="alert"]',
+
+                # 見出し・リスト（利用注意や禁止事項が記載されがち）
+                'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'
             ]
             
             # 対象要素からテキストを収集
@@ -555,6 +581,13 @@ class ProhibitionDetector:
                 comment.extract()
             # テキストを抽出
             text_content = soup.get_text(separator=' ', strip=True)
+            # 文字正規化（全角記号/英数字 → 半角、互換統合）し、英語表現の揺れを低減
+            try:
+                text_content = unicodedata.normalize('NFKC', text_content)
+            except Exception:
+                pass
+            # 英語パターン検出の頑健化（日本語への影響は軽微）
+            text_content = text_content.lower()
             # 空白を正規化
             return re.sub(r'\s+', ' ', text_content)
         except Exception as e:
