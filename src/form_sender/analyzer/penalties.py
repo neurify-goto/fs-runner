@@ -10,6 +10,9 @@ import logging
 from typing import Dict, Tuple, Any
 
 from playwright.async_api import Locator
+import re
+
+_OPACITY_RE = re.compile(r"opacity\s*:\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
 
@@ -32,19 +35,35 @@ async def calculate_penalties(
         penalty += score_weights.get("visibility_penalty", -200) // 2
         penalties.append("element_not_enabled")
 
-    # style="display:none" 等
+    # style="display:none" 等（不可視・非操作スタイルの強ペナルティ）
     try:
         style = element_info.get("style")
         if style is None:
             style = await element.get_attribute("style") or ""
+        style_nospace = style.replace(" ", "").lower()
+
+        def _opacity_is_zero(s: str) -> bool:
+            # opacity: <number> を厳密に数値抽出して 0 のみ True
+            try:
+                m = _OPACITY_RE.search(s or "")
+                return bool(m and float(m.group(1)) == 0.0)
+            except Exception:
+                return False
+
         if (
-            "display:none" in style
-            or "display: none" in style
-            or "visibility:hidden" in style
-            or "visibility: hidden" in style
+            "display:none" in style_nospace
+            or "visibility:hidden" in style_nospace
+            or "pointer-events:none" in style_nospace
+            or _opacity_is_zero(style)
         ):
             penalty += score_weights.get("visibility_penalty", -200)
-            penalties.append("style_hidden")
+            # 具体的な理由を記録
+            if "pointer-events:none" in style_nospace:
+                penalties.append("pointer_events_none")
+            if _opacity_is_zero(style):
+                penalties.append("opacity_zero")
+            if ("display:none" in style_nospace) or ("visibility:hidden" in style_nospace):
+                penalties.append("style_hidden")
     except Exception:
         pass
 
@@ -78,15 +97,18 @@ async def calculate_penalties(
     except Exception:
         pass
 
-    # position:absolute + 極小サイズのハニーポット
+    # position:absolute のハニーポット（極小サイズ/画面外/クリック不能系）
     try:
         style = element_info.get("style")
         if style is None:
             style = await element.get_attribute("style") or ""
-        if "position: absolute" in style and (
-            "height: 1px" in style
-            or "width: 1px" in style
-            or "overflow: hidden" in style
+        style_nospace = style.replace(" ", "").lower()
+        if "position:absolute" in style_nospace and (
+            "height:1px" in style_nospace
+            or "width:1px" in style_nospace
+            or "overflow:hidden" in style_nospace
+            or "left:-9999px" in style_nospace
+            or "top:-9999px" in style_nospace
         ):
             penalty += score_weights.get("visibility_penalty", -200)
             penalties.append("honeypot_style_detected")
@@ -97,4 +119,3 @@ async def calculate_penalties(
         logger.debug(f"Penalties applied: {penalties} (total: {penalty})")
 
     return penalty, penalties
-

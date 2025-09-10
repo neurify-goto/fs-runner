@@ -122,6 +122,7 @@ class ConfigManager:
             )
             return self._get_default_choice_priority_config()
 
+
     def _get_default_choice_priority_config(self) -> Dict[str, Any]:
         """デフォルトの選択肢優先度設定"""
         return {
@@ -226,6 +227,8 @@ def get_privacy_consent_config() -> Dict[str, Any]:
 def get_choice_priority_config() -> Dict[str, Any]:
     """選択肢優先度（checkbox/radio用）設定を取得する便利関数"""
     return config_manager.get_choice_priority_config()
+
+# auto_fill_defaults は現行ロジックで未使用のため削除
 
 def get_prefectures() -> Dict[str, Any]:
     """都道府県名リストを取得する便利関数"""

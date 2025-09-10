@@ -34,6 +34,26 @@ class InputValueAssigner:
             split_groups, client_data
         )
 
+        # 予定されている『その他/other』ラジオのセレクタ一覧（auto_handledの選択予定から抽出）
+        planned_other_radio_selectors = []
+        try:
+            for _k, _v in (auto_handled or {}).items():
+                try:
+                    if not isinstance(_v, dict):
+                        continue
+                    if str(_v.get("input_type", "")) != "radio":
+                        continue
+                    sel = _v.get("selector", "")
+                    if not sel:
+                        continue
+                    txt = str(_v.get("selected_option_text", "") or "").lower()
+                    if any(t in txt for t in ["その他", "other"]):
+                        planned_other_radio_selectors.append(sel)
+                except Exception:
+                    continue
+        except Exception:
+            planned_other_radio_selectors = []
+
         for field_name, field_info in field_mapping.items():
             if not self._should_input_field(field_name, field_info):
                 continue
@@ -93,6 +113,44 @@ class InputValueAssigner:
             if field_info.get("auto_action") == "copy_from":
                 src = field_info.get("copy_from_field", "")
                 value = input_assignments.get(src, {}).get("value", "")
+
+            # P2: auto_required_text_* は UnmappedElementHandler からの auto_handled 経路に乗るため、
+            #     ここで『ラジオの “その他” 選択に紐づく追加入力』と推定できる場合のみ、
+            #     値を空文字に抑止してダミー全角スペース等の投入を避ける。
+            # 判定要件（全て満たす）:
+            #   - フィールド名が auto_required_text_*
+            #   - 同一 form 内に checked な input[type=radio] があり、その表示ラベルが『その他/other』を含む
+            #   - そのラジオと当該入力欄の垂直距離が一定以内（近接, 例: 320px）
+            try:
+                if str(field_name).startswith("auto_required_text_") and field_info.get("selector"):
+                    el = field_info.get("element")
+                    if el is not None:
+                        is_other_linked = await el.evaluate(
+                            """
+                            (inputEl, selectors) => {
+                              try {
+                                const form = inputEl.closest('form') || document.body;
+                                const rectIn = inputEl.getBoundingClientRect();
+                                const pickEl = (sel) => {
+                                  try { return form.querySelector(sel) || document.querySelector(sel); } catch { return null; }
+                                };
+                                for (const sel of (selectors || [])) {
+                                  const r = pickEl(sel);
+                                  if (!r) continue;
+                                  const rectR = r.getBoundingClientRect();
+                                  const dy = Math.abs((rectR.top + rectR.bottom)/2 - (rectIn.top + rectIn.bottom)/2);
+                                  if (dy <= 320) return true;
+                                }
+                                return false;
+                              } catch { return false; }
+                            }
+                            """,
+                            planned_other_radio_selectors,
+                        )
+                        if is_other_linked:
+                            value = ""
+            except Exception:
+                pass
 
             input_assignments[field_name] = {
                 "selector": field_info["selector"],
@@ -357,6 +415,15 @@ class InputValueAssigner:
             return vv
 
         blob = _ctx_blob()
+
+        # P1対応: 『その他の理由』等の自由記述欄に自動値は入れない（テキスト入力リスク回避）
+        try:
+            if str(field_name).startswith("auto_required_text_"):
+                reason_tokens = ["その他の理由", "その他", "理由", "詳細", "備考", "remarks", "remark", "reason", "specify"]
+                if any(t in blob for t in reason_tokens):
+                    return ""  # 値を設定しない
+        except Exception:
+            pass
 
         if field_name == "郵便番号":
             pv = self.field_combination_manager.get_field_value_for_type(

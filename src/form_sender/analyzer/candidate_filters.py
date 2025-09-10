@@ -3,6 +3,7 @@ from __future__ import annotations
 """候補要素フィルタ（FieldMapper._score_element_in_detail での早期除外を分離）。"""
 
 from typing import Any, Dict
+import re
 from playwright.async_api import Locator
 from config.manager import get_prefectures
 
@@ -20,11 +21,48 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
             str(element_info.get("id") or ""),
             str(element_info.get("class") or ""),
         ]).lower()
-        trap_tokens = ["honeypot", "honey", "trap", "botfield", "no-print", "noprint"]
+        # 罠/ダミー系の典型トークン（属性に含まれていれば早期除外）
+        trap_tokens = [
+            "honeypot",
+            "honey",
+            "trap",
+            "botfield",
+            "no-print",
+            "noprint",
+            # よくあるダミーフィールド表現
+            "dummy",
+        ]
         if any(t in name_id_cls for t in trap_tokens):
             return False
         if not bool(element_info.get("visible", True)):
             return False
+
+        # スタイル属性に基づく不可視/非操作要素の早期除外
+        # 代表例: pointer-events:none / opacity:0 （数値0のみ厳密判定）/ display:none / visibility:hidden / 画面外配置
+        try:
+            raw_style = (element_info.get("style") or "")
+            style = raw_style.replace(" ", "").lower()
+        except Exception:
+            raw_style = style = ""
+        # opacity は 0.5 などの部分一致を避け、数値を抽出して 0 のときだけマークする
+        _OPACITY_RE = re.compile(r"opacity\s*:\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
+        def _opacity_is_zero(s: str) -> bool:
+            try:
+                m = _OPACITY_RE.search(s or "")
+                return bool(m and float(m.group(1)) == 0.0)
+            except Exception:
+                return False
+        if style:
+            hidden_signals = (
+                "display:none" in style
+                or "visibility:hidden" in style
+                or "pointer-events:none" in style
+                or _opacity_is_zero(raw_style)
+                or "z-index:-1" in style
+                or ("position:absolute" in style and ("left:-9999px" in style or "top:-9999px" in style))
+            )
+            if hidden_signals:
+                return False
 
         # 都道府県: select の場合は option に都道府県名が一定数含まれることを要求
         if field_name == "都道府県":

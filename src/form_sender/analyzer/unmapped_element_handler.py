@@ -976,9 +976,7 @@ class UnmappedElementHandler:
                     continue
                 selector = await self._generate_playwright_selector(el)
                 field_name = f"auto_required_text_{idx}"
-                # （不要なスタブ関数を削除：後段の割当/assigner で処理されるためここでは未使用）
-                # ここでは、電話番号2/3のケースは後段の split_phone 処理が入らない環境でも
-                # 空白ではなく空文字にしてバリデーション衝突を避ける（全角空白より安全）
+                # 既定の自動値（全角空白）。
                 auto_value = "　"
                 try:
                     nic = (
@@ -1600,6 +1598,7 @@ class UnmappedElementHandler:
                 logger.debug(f"Error grouping radio: {e}")
 
         pri1 = ["営業", "提案", "メール"]
+        # 既定の優先語（従来どおり）
         pri2 = ["その他", "other", "該当なし"]
 
         # クライアント性別の正規化（male/female/other）
@@ -1709,13 +1708,15 @@ class UnmappedElementHandler:
                 except Exception:
                     pass
 
-            # フォールバック: 既存優先度ロジック
+            # フォールバック: 既存優先度ロジック（『その他』を除外して選択）
             if idx is None:
                 idx = (
                     self._choose_gender_index(texts)
                     if is_gender_field
                     else self._choose_priority_index(texts, pri1, pri2)
                 )
+
+            # 『その他』回避フォールバックは撤廃（従来の選択ロジックへ復帰）
 
             radio, element_info = radio_list[idx]
             selector = await self._generate_playwright_selector(radio)
