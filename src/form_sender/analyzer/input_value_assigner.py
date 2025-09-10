@@ -34,6 +34,26 @@ class InputValueAssigner:
             split_groups, client_data
         )
 
+        # 予定されている『その他/other』ラジオのセレクタ一覧（auto_handledの選択予定から抽出）
+        planned_other_radio_selectors = []
+        try:
+            for _k, _v in (auto_handled or {}).items():
+                try:
+                    if not isinstance(_v, dict):
+                        continue
+                    if str(_v.get("input_type", "")) != "radio":
+                        continue
+                    sel = _v.get("selector", "")
+                    if not sel:
+                        continue
+                    txt = str(_v.get("selected_option_text", "") or "").lower()
+                    if any(t in txt for t in ["その他", "other"]):
+                        planned_other_radio_selectors.append(sel)
+                except Exception:
+                    continue
+        except Exception:
+            planned_other_radio_selectors = []
+
         for field_name, field_info in field_mapping.items():
             if not self._should_input_field(field_name, field_info):
                 continue
@@ -107,48 +127,25 @@ class InputValueAssigner:
                     if el is not None:
                         is_other_linked = await el.evaluate(
                             """
-                            (inputEl) => {
-                              const norm = (s) => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
-                              const form = inputEl.closest('form') || document.body;
-                              const rectIn = inputEl.getBoundingClientRect();
-                              const radios = Array.from(form.querySelectorAll('input[type="radio"]:checked'));
-                              const OTHER = ['その他','other'];
-                              const getLabelText = (r) => {
-                                const id = r.getAttribute('id');
-                                if (id) {
-                                  const lbl = form.querySelector(`label[for="${id}"]`);
-                                  if (lbl) return norm(lbl.innerText||lbl.textContent||'');
-                                }
-                                // 祖先<label>
-                                let p = r; let d=0;
-                                while (p && d<3) {
-                                  if ((p.tagName||'').toLowerCase()==='label') return norm(p.innerText||p.textContent||'');
-                                  p = p.parentElement; d++;
-                                }
-                                // 近傍兄弟
-                                const pick = (dir='next') => {
-                                  let sib = dir==='next'? r.nextSibling : r.previousSibling; let hops=0;
-                                  while (sib && hops<3) {
-                                    const t = sib.nodeType===3 ? sib.textContent : (sib.innerText||sib.textContent||'');
-                                    const nt = norm(t);
-                                    if (nt) return nt;
-                                    sib = dir==='next'? sib.nextSibling : sib.previousSibling; hops++;
-                                  }
-                                  return '';
+                            (inputEl, selectors) => {
+                              try {
+                                const form = inputEl.closest('form') || document.body;
+                                const rectIn = inputEl.getBoundingClientRect();
+                                const pickEl = (sel) => {
+                                  try { return form.querySelector(sel) || document.querySelector(sel); } catch { return null; }
                                 };
-                                return pick('next') || pick('prev');
-                              };
-                              for (const r of radios) {
-                                const label = getLabelText(r);
-                                if (!label) continue;
-                                if (!OTHER.some(o => label.includes(o))) continue;
-                                const rectR = r.getBoundingClientRect();
-                                const dy = Math.abs((rectR.top + rectR.bottom)/2 - (rectIn.top + rectIn.bottom)/2);
-                                if (dy <= 320) return true;
-                              }
-                              return false;
+                                for (const sel of (selectors || [])) {
+                                  const r = pickEl(sel);
+                                  if (!r) continue;
+                                  const rectR = r.getBoundingClientRect();
+                                  const dy = Math.abs((rectR.top + rectR.bottom)/2 - (rectIn.top + rectIn.bottom)/2);
+                                  if (dy <= 320) return true;
+                                }
+                                return false;
+                              } catch { return false; }
                             }
-                            """
+                            """,
+                            planned_other_radio_selectors,
                         )
                         if is_other_linked:
                             value = ""
