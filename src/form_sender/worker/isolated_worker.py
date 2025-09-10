@@ -366,20 +366,28 @@ class IsolatedFormWorker:
         max_processing_time = 30  # 最大処理時間（秒）
         # 全体ウォッチドッグ（1社あたりのハードタイムアウト）
         # まれにブラウザ/ページ操作が戻らずハングするケースを強制ブレークする
+        # 優先順: 1) form_sender_multi_process.task_timeout（秒）→ 2) pre_processing_max（ms）→ 3) 180秒
+        hard_timeout = None
         try:
             from config.manager import get_worker_config
             _cfg = get_worker_config()
-            # form_sender_multi_process.task_timeout を最優先（秒）
-            hard_timeout = int(_cfg.get('form_sender_multi_process', {}).get('task_timeout', 180))
+            t = _cfg.get('form_sender_multi_process', {}).get('task_timeout', None)
+            if t is not None:
+                hard_timeout = int(t)
         except Exception:
-            hard_timeout = 180
+            hard_timeout = None
+        # フォールバック: pre_processing_max(ms) → 秒換算
         if not hard_timeout or hard_timeout <= 0:
-            # フォールバック: pre_processing_max(ms) → 秒換算
             try:
-                _ms = int((self.config or {}).get('timeout_settings', {}).get('pre_processing_max', 180000))
-                hard_timeout = max(30, int(_ms / 1000))
+                _ms_val = (self.config or {}).get('timeout_settings', {}).get('pre_processing_max', None)
+                if _ms_val is not None:
+                    _ms = int(_ms_val)
+                    hard_timeout = max(30, int(_ms / 1000))
             except Exception:
-                hard_timeout = 180
+                pass
+        # 最終フォールバック
+        if not hard_timeout or hard_timeout <= 0:
+            hard_timeout = 180
 
         while retry_count <= max_retries:
             try:
