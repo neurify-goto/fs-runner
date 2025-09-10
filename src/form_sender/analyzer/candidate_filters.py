@@ -3,6 +3,7 @@ from __future__ import annotations
 """候補要素フィルタ（FieldMapper._score_element_in_detail での早期除外を分離）。"""
 
 from typing import Any, Dict
+import re
 from playwright.async_api import Locator
 from config.manager import get_prefectures
 
@@ -44,16 +45,11 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
         except Exception:
             raw_style = style = ""
         # opacity は 0.5 などの部分一致を避け、数値を抽出して 0 のときだけマークする
+        _OPACITY_RE = re.compile(r"opacity\s*:\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
         def _opacity_is_zero(s: str) -> bool:
-            import re
             try:
-                m = re.search(r"opacity\s*:\s*([0-9]*\.?[0-9]+)", s, re.IGNORECASE)
-                if not m:
-                    return False
-                try:
-                    return float(m.group(1)) == 0.0
-                except ValueError:
-                    return False
+                m = _OPACITY_RE.search(s or "")
+                return bool(m and float(m.group(1)) == 0.0)
             except Exception:
                 return False
         if style:

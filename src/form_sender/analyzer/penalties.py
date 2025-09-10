@@ -12,6 +12,8 @@ from typing import Dict, Tuple, Any
 from playwright.async_api import Locator
 import re
 
+_OPACITY_RE = re.compile(r"opacity\s*:\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,15 +43,10 @@ async def calculate_penalties(
         style_nospace = style.replace(" ", "").lower()
 
         def _opacity_is_zero(s: str) -> bool:
-            # opacity: <number>[!important]?; を厳密に数値抽出して 0 のみ True
+            # opacity: <number> を厳密に数値抽出して 0 のみ True
             try:
-                m = re.search(r"opacity\s*:\s*([0-9]*\.?[0-9]+)", s, re.IGNORECASE)
-                if not m:
-                    return False
-                try:
-                    return float(m.group(1)) == 0.0
-                except ValueError:
-                    return False
+                m = _OPACITY_RE.search(s or "")
+                return bool(m and float(m.group(1)) == 0.0)
             except Exception:
                 return False
 
