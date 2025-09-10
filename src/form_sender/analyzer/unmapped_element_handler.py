@@ -976,10 +976,19 @@ class UnmappedElementHandler:
                     continue
                 selector = await self._generate_playwright_selector(el)
                 field_name = f"auto_required_text_{idx}"
-                # （不要なスタブ関数を削除：後段の割当/assigner で処理されるためここでは未使用）
-                # ここでは、電話番号2/3のケースは後段の split_phone 処理が入らない環境でも
-                # 空白ではなく空文字にしてバリデーション衝突を避ける（全角空白より安全）
+                # 既定: 全角空白（送信ブロック回避）。ただし一部の一般的必須欄は意味のある汎用値を補う。
                 auto_value = "　"
+                # 生年月日/誕生日/DOB 等の必須欄には汎用日付値を入力（形式は YYYY-MM-DD）。
+                try:
+                    blob_ctx = (blob + " " + ctx_text).lower()
+                    dob_tokens = [
+                        "生年月日", "誕生日", "birthday", "date of birth", "dob",
+                        "生れ", "生まれ"
+                    ]
+                    if any(t in blob_ctx for t in [s.lower() for s in dob_tokens]):
+                        auto_value = "1990-01-01"
+                except Exception:
+                    pass
                 try:
                     nic = (
                         info.get("name", "")

@@ -393,6 +393,10 @@ class FieldMapper:
         await self._fallback_map_email_field(
             classified_elements, field_mapping, used_elements
         )
+        # 会社名の取りこぼし救済（属性 name に 'company' 系がある一般的ケース）
+        await self._fallback_map_company_field(
+            classified_elements, field_mapping, used_elements
+        )
         # 追加救済: name/id が 'email' の入力を確実に採用（確認欄は除外）
         await self._salvage_strict_email_by_attr(
             classified_elements, field_mapping, used_elements
@@ -1159,6 +1163,77 @@ class FieldMapper:
                 "再度",
             ]
         )
+
+    async def _fallback_map_company_field(
+        self, classified_elements, field_mapping, used_elements
+    ):
+        """会社名の取りこぼし救済。
+
+        一般的なCMS/フォーム（例: Contact Form 7: name="your-company"）で、
+        スコア閾値や文脈衝突により一次マッピングから漏れたケースを安全に補完する。
+        条件:
+        - 既に『会社名』がマッピング済みなら何もしない
+        - 候補は input[type=text] 系のみ
+        - name/id/class に company/organization/corp/org 等の強い指標を含む
+        - セーフガード（かな/フリガナ等の否定）を通過
+        - 簡易スコアがベース閾値以上
+        """
+        target_field = "会社名"
+        if target_field in field_mapping:
+            return
+        text_inputs = classified_elements.get("text_inputs", []) or []
+        if not text_inputs:
+            return
+        tokens = [
+            "your-company", "your_company", "company", "company_name",
+            "organization", "org", "corporation", "corp", "business", "firm",
+            "company-name", "corporate_name", "business_name",
+        ]
+        best = (None, 0, None, [])  # (el, score, details, contexts)
+        for el in text_inputs:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                ei = {}
+            name_id_cls = " ".join([
+                str(ei.get("name") or ""),
+                str(ei.get("id") or ""),
+                str(ei.get("class") or ""),
+            ]).lower()
+            if not any(t in name_id_cls for t in tokens):
+                continue
+            # コンテキスト取得 + セーフガード
+            contexts = await self.context_text_extractor.extract_context_for_element(el)
+            score, details = await self.element_scorer.calculate_element_score(
+                el, self.field_patterns.get_pattern(target_field), target_field
+            )
+            # 会社名のセーフガード（かな/フリガナ/ひらがな系の否定）
+            from .mapping_safeguards import passes_safeguard
+            if not passes_safeguard(
+                target_field, details, contexts, self.context_text_extractor, {}, self.settings
+            ):
+                continue
+            base_threshold = int(self.settings.get("min_score_threshold", 70))
+            if score > best[1] and score >= base_threshold:
+                best = (el, score, details, contexts)
+        el, score, details, contexts = best
+        if not el:
+            return
+        info = await self._create_enhanced_element_info(el, details, contexts)
+        try:
+            info["source"] = "fallback"
+        except Exception:
+            pass
+        tmp = self._generate_temp_field_value(target_field)
+        if self.duplicate_prevention.register_field_assignment(
+            target_field, tmp, score, info
+        ):
+            field_mapping[target_field] = info
+            logger.info(
+                f"Fallback mapped '{target_field}' via attribute tokens (score {score})"
+            )
 
         candidates = []
         # 優先: email_inputs、その後 text_inputs/other_inputs（type="mail" 等の独自型を含む）

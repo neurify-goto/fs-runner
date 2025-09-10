@@ -112,6 +112,10 @@ class ClientDataMapper:
                 return f"{base_address}　{address_5}"
             return base_address
 
+        # 21. 生年月日（テスト用の汎用値）
+        elif field_name == '生年月日':
+            return '1990-01-01'
+
         # フォールバック処理
         return ClientDataMapper._get_fallback_value(field_name, client_info, targeting_info)
 

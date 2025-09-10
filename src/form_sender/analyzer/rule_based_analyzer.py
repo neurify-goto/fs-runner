@@ -16,6 +16,7 @@ from .form_structure_analyzer import FormStructureAnalyzer, FormStructure
 from .context_text_extractor import ContextTextExtractor
 from .split_field_detector import SplitFieldDetector
 from .sales_prohibition_detector import SalesProhibitionDetector
+from config.manager import get_worker_config
 from .form_pre_processor import FormPreProcessor
 from .element_classifier import ElementClassifier
 from .field_mapper import FieldMapper
@@ -108,9 +109,10 @@ class RuleBasedAnalyzer:
                 "姓": 72,
                 "名": 72,
                 # 汎用で安全な下限値の追加（誤検出抑止の微調整）
-                "会社名": 78,
+                "会社名": 70,
                 "メールアドレス": 60,
                 "都道府県": 75,
+                "生年月日": 60,
             },
             "analysis_timeout": 30,
             "enable_fallback": True,
@@ -124,6 +126,7 @@ class RuleBasedAnalyzer:
                 "お問い合わせ本文",
                 "統合氏名",
                 "統合氏名カナ",
+                "会社名",
             ],
             "quality_threshold_boost": 15,
             "max_quality_threshold": 90,
@@ -172,15 +175,69 @@ class RuleBasedAnalyzer:
                 logger.warning(f"Early prohibition detection failed; falling back to late detection: {e}")
                 early_prohibition = None
 
+            # 設定に基づき「早期中断」するかを判定（誤検出でマッピングが止まらないよう安全側に調整）
+            def _should_early_abort(sp: dict) -> bool:
+                try:
+                    det_cfg = (
+                        get_worker_config()
+                        .get("detectors", {})
+                        .get("prohibition", {})
+                        .get("early_abort", {})
+                    )
+                except Exception:
+                    det_cfg = {}
+
+                min_level = str(det_cfg.get("min_level", "strict")).lower()
+                min_conf_level = str(det_cfg.get("min_confidence_level", "high")).lower()
+                min_score = float(det_cfg.get("min_score", 85))
+                min_matches = int(det_cfg.get("min_matches", 2))
+
+                level_order = {"none": 0, "weak": 1, "mild": 2, "moderate": 3, "strict": 4}
+                conf_order = {"none": 0, "very_low": 1, "low": 2, "medium": 3, "high": 4}
+
+                sp_level = str(sp.get("prohibition_level", "none")).lower()
+                sp_conf = str(sp.get("confidence_level", "none")).lower()
+
+                try:
+                    sp_score = float(sp.get("confidence_score", 0.0))
+                except Exception:
+                    sp_score = 0.0
+
+                # マッチ件数は 'matches' または 'summary.total_matches' から取得
+                matches_count = 0
+                try:
+                    if isinstance(sp.get("matches"), list):
+                        matches_count = len(sp.get("matches") or [])
+                    elif isinstance(sp.get("summary"), dict):
+                        matches_count = int(sp["summary"].get("total_matches") or 0)
+                except Exception:
+                    matches_count = 0
+
+                # has_prohibition が偽なら中断しない
+                has_flag = bool(sp.get("has_prohibition") or sp.get("prohibition_detected"))
+                if not has_flag:
+                    return False
+
+                # しきい値比較（いずれか欠ける場合は保守的に継続）
+                if level_order.get(sp_level, 0) < level_order.get(min_level, 4):
+                    return False
+                if conf_order.get(sp_conf, 0) < conf_order.get(min_conf_level, 4):
+                    return False
+                if sp_score < min_score:
+                    return False
+                if matches_count < min_matches:
+                    return False
+                return True
+
             has_early_detection = (
                 early_prohibition is not None
                 and isinstance(early_prohibition, dict)
                 and (
-                    bool(early_prohibition.get('has_prohibition'))
-                    or bool(early_prohibition.get('prohibition_detected'))
+                    bool(early_prohibition.get("has_prohibition"))
+                    or bool(early_prohibition.get("prohibition_detected"))
                 )
             )
-            if has_early_detection:
+            if has_early_detection and _should_early_abort(early_prohibition):
                 analysis_time = time.time() - analysis_start
                 # 解析を省略し、検出結果のみ返す（ワーカー側で送信回避）
                 return {
@@ -201,6 +258,8 @@ class RuleBasedAnalyzer:
                     "sales_prohibition": early_prohibition,
                     "debug_info": {},
                 }
+            # 早期検出はあっても中断条件を満たさない場合、
+            # 以降のマッピング処理を継続し、結果に 'sales_prohibition' を含める
 
             self.form_structure = (
                 await self.form_structure_analyzer.analyze_form_structure()

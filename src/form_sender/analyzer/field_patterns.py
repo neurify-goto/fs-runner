@@ -69,6 +69,30 @@ class FieldPatterns:
                 ]
             },
 
+            # 0x. 生年月日 (date of birth) - 任意（必須時のみ確実に入力されるよう定義）
+            "生年月日": {
+                "names": [
+                    "birth", "birthday", "date_of_birth", "date-of-birth", "dob",
+                    "生年月日", "誕生日", "生れ", "生まれ"
+                ],
+                "ids": [
+                    "birth", "birthday", "date_of_birth", "date-of-birth", "dob"
+                ],
+                "classes": [
+                    "birth", "birthday", "dob", "date-of-birth"
+                ],
+                "placeholders": [
+                    "生年月日", "YYYY-MM-DD", "YYYY/MM/DD", "1990-01-01", "1990/01/01", "誕生日"
+                ],
+                "types": ["date", "text", "tel"],
+                "tags": ["input"],
+                "weight": 6,
+                "strict_patterns": ["生年月日", "birthday", "date of birth", "dob"],
+                "exclude_patterns": [
+                    "captcha", "token", "otp", "confirm", "確認", "email", "mail", "phone", "tel"
+                ],
+            },
+
             # 1. 会社名 (company_name) - GAS/スプレッドシート必須
             "会社名": {
                 "names": [
