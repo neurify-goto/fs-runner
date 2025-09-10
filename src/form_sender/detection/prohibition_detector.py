@@ -9,8 +9,11 @@ import logging
 import re
 import time
 import unicodedata
+import hashlib
+import threading
+from collections import OrderedDict
 from functools import lru_cache
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Dict, Any
 
 from bs4 import BeautifulSoup, Comment
 try:
@@ -22,6 +25,79 @@ except Exception:  # pragma: no cover
 from config.manager import get_worker_config
 
 logger = logging.getLogger(__name__)
+
+
+# --- Lightweight result cache (HTML-hash keyed, shared across instances) ---
+# 目的: Analyzer と SuccessJudge 間で同一HTMLの重複解析を避ける
+# キー: 正規化前の HTML の SHA1（十分に高速・衝突耐性は実用上問題なし）
+# 値: (detected: bool, phrases: List[str], level: str, score: float)
+_RESULT_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_CACHE_LOCK = threading.Lock()
+
+
+def _get_cache_limits() -> Tuple[int, int]:
+    """worker_config からキャッシュ制限を取得（max_entries, ttl_sec）。"""
+    try:
+        det = get_worker_config().get('detectors', {}).get('prohibition', {})
+        c = det.get('cache', {}) if isinstance(det.get('cache', {}), dict) else {}
+        max_entries = int(c.get('max_entries', 256))
+        ttl_sec = int(c.get('ttl_seconds', 120))
+        # 下限安全弁
+        return max(32, max_entries), max(10, ttl_sec)
+    except Exception:
+        return 256, 120
+
+
+def _make_cache_key(html: str) -> str:
+    try:
+        h = hashlib.sha1(html.encode('utf-8', errors='ignore')).hexdigest()
+        return h
+    except Exception:
+        return str(len(html) if html is not None else 0)
+
+
+def _cache_get(key: str) -> Optional[Tuple[bool, List[str], str, float]]:
+    max_entries, ttl_sec = _get_cache_limits()
+    now = time.time()
+    with _CACHE_LOCK:
+        ent = _RESULT_CACHE.get(key)
+        if not ent:
+            return None
+        ts = ent.get('ts', 0)
+        if now - ts > ttl_sec:
+            # 期限切れ
+            try:
+                _RESULT_CACHE.pop(key, None)
+            except Exception:
+                pass
+            return None
+        # LRU 更新
+        try:
+            _RESULT_CACHE.move_to_end(key)
+        except Exception:
+            pass
+        val = ent.get('val')
+        # バリデーション
+        if not isinstance(val, (tuple, list)) or len(val) != 4:
+            return None
+        return val  # type: ignore[return-value]
+
+
+def _cache_set(key: str, value: Tuple[bool, List[str], str, float]) -> None:
+    max_entries, _ = _get_cache_limits()
+    with _CACHE_LOCK:
+        try:
+            _RESULT_CACHE[key] = {'val': value, 'ts': time.time()}
+            _RESULT_CACHE.move_to_end(key)
+            # 上限超過時は古いものから削除
+            while len(_RESULT_CACHE) > max_entries:
+                try:
+                    _RESULT_CACHE.popitem(last=False)
+                except Exception:
+                    break
+        except Exception:
+            # キャッシュ失敗は無視して続行
+            pass
 
 
 class ProhibitionDetector:
@@ -241,33 +317,8 @@ class ProhibitionDetector:
         Returns:
             Tuple[bool, List[str]]: (検出有無, 検出された文言のリスト)
         """
-        if not html_content:
-            return False, []
-
-        try:
-            _t0 = time.perf_counter()
-            # Phase 1: 重要HTML要素での限定検索（高速・高精度）
-            detected_result = self._detect_context_texts_targeted_with_confidence(html_content)
-            
-            # Phase 2: 限定検索で見つからない場合のフォールバック（全体検索）
-            if not detected_result['texts']:
-                logger.debug("限定検索で検出なし、全体検索にフォールバック")
-                detected_result = self._detect_context_texts_fallback_with_confidence(html_content)
-            else:
-                logger.debug(f"限定検索で検出完了: {len(detected_result['texts'])}件")
-                
-            detected_texts = detected_result['texts']
-            confidence_level = detected_result['confidence']
-            confidence_score = detected_result['score']
-            
-            if detected_texts:
-                logger.info(f"営業禁止文言を検出: {len(detected_texts)}件 (信頼度: {confidence_level}, スコア: {confidence_score:.1f}%)")
-                for i, text in enumerate(detected_texts[:3]):  # 最初の3件をログ出力
-                    logger.info(f"検出文言{i+1}: {text[:100]}...")
-            return len(detected_texts) > 0, detected_texts
-        except Exception as e:
-            logger.error(f"HTML解析エラー: {e}")
-            return False, []
+        detected, texts, _level, _score = self.detect_with_confidence(html_content)
+        return detected, texts
     
     def detect_with_confidence(self, html_content: str) -> Tuple[bool, List[str], str, float]:
         """営業禁止文言の検出（信頼度付き）
@@ -283,6 +334,19 @@ class ProhibitionDetector:
 
         try:
             _t0 = time.perf_counter()
+            # キャッシュ参照
+            try:
+                key = _make_cache_key(html_content)
+                cached = _cache_get(key)
+            except Exception:
+                cached = None
+            if cached is not None:
+                detected_texts_cached = cached[1]
+                _elapsed = (time.perf_counter() - _t0) * 1000.0
+                logger.debug(
+                    f"prohibition_detect_with_confidence: cache_hit texts={len(detected_texts_cached)}, conf={cached[2]}/{cached[3]:.1f}, elapsed_ms={_elapsed:.1f}"
+                )
+                return cached
             # オプション: 高速プリチェック（設定で有効化。偽陰性防止のためデフォルト無効）
             try:
                 det_cfg = get_worker_config().get('detectors', {}).get('prohibition', {})
@@ -310,9 +374,17 @@ class ProhibitionDetector:
                 logger.info(f"営業禁止文言を検出: {len(detected_texts)}件 (信頼度: {confidence_level}, スコア: {confidence_score:.1f}%)")
                 for i, text in enumerate(detected_texts[:3]):  # 最初の3件をログ出力
                     logger.info(f"検出文言{i+1}: {text[:100]}...")
+            result_tuple = (len(detected_texts) > 0, detected_texts, confidence_level, confidence_score)
+            # キャッシュ格納（失敗しても続行）
+            try:
+                _cache_set(key, result_tuple)
+            except Exception:
+                pass
             _elapsed = (time.perf_counter() - _t0) * 1000.0
-            logger.debug(f"prohibition_detect_with_confidence: texts={len(detected_texts)}, conf={confidence_level}/{confidence_score:.1f}, elapsed_ms={_elapsed:.1f}")
-            return len(detected_texts) > 0, detected_texts, confidence_level, confidence_score
+            logger.debug(
+                f"prohibition_detect_with_confidence: texts={len(detected_texts)}, conf={confidence_level}/{confidence_score:.1f}, elapsed_ms={_elapsed:.1f}"
+            )
+            return result_tuple
         except FeatureNotFound as e:
             logger.error(f"HTML解析エラー(FeatureNotFound): {e}", exc_info=True)
             return False, [], "error", 0.0
