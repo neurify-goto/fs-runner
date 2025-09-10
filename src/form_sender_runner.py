@@ -710,10 +710,20 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
 
     # 2) fetch company
     try:
-        comp = supabase.table('companies').select('id, form_url').eq('id', company_id).limit(1).execute()
+        # ブラックリスト回避: companies.black が NULL のもののみ処理対象
+        comp = (
+            supabase.table('companies')
+            .select('id, form_url, black')
+            .eq('id', company_id)
+            .limit(1)
+            .execute()
+        )
         if not comp.data:
             raise RuntimeError('company not found')
         company = comp.data[0]
+        # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
+        if company.get('black') is not None:
+            raise RuntimeError('company blacklisted')
     except Exception as e:
         logger.error(f"fetch company error ({company_id}): {e}")
         # mark failed quickly（代表コードで詳細分類を付与）

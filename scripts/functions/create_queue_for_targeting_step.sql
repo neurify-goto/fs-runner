@@ -77,6 +77,7 @@ begin
              on s_hist.targeting_id = $2 and s_hist.company_id = c.id
           where c.id > $6 and c.id <= ($6 + $7)
             and c.form_url is not null
+            and c.black is null
             and coalesce(c.prohibition_detected, false) = false
             and c.duplication is null
             and s_hist.id is null';
@@ -137,6 +138,7 @@ begin
            join hist h on h.company_id = c.id
          where c.id > $6 and c.id <= ($6 + $7)
             and c.form_url is not null
+            and c.black is null
             and coalesce(c.prohibition_detected, false) = false
             and c.duplication is null
             and s_today.id is null
