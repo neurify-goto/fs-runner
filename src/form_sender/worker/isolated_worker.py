@@ -364,17 +364,131 @@ class IsolatedFormWorker:
         retry_count = 0
         start_time = time.time()
         max_processing_time = 30  # 最大処理時間（秒）
+        # 全体ウォッチドッグ（1社あたりのハードタイムアウト）
+        # まれにブラウザ/ページ操作が戻らずハングするケースを強制ブレークする
+        # 優先順: 1) form_sender_multi_process.task_timeout（秒）→ 2) pre_processing_max（ms）→ 3) 180秒
+        hard_timeout = None
+        try:
+            from config.manager import get_worker_config
+            _cfg = get_worker_config()
+            t = _cfg.get('form_sender_multi_process', {}).get('task_timeout', None)
+            if t is not None:
+                # 文字列/数値いずれでも安全に解釈し、正値のみ採用
+                st = str(t).strip()
+                hard_timeout_candidate = int(st)
+                if hard_timeout_candidate > 0:
+                    hard_timeout = hard_timeout_candidate
+        except (ValueError, TypeError, KeyError) as e:
+            logger.debug(f"task_timeout config unavailable: {e}")
+            hard_timeout = None
+        # フォールバック: pre_processing_max(ms) → 秒換算
+        if not hard_timeout or hard_timeout <= 0:
+            try:
+                _ms_val = (self.config or {}).get('timeout_settings', {}).get('pre_processing_max', None)
+                if _ms_val is not None:
+                    _ms = int(str(_ms_val).strip())
+                    if _ms > 0:
+                        hard_timeout = max(30, int(_ms / 1000))
+            except (ValueError, TypeError, KeyError) as e:
+                logger.debug(f"pre_processing_max config unavailable: {e}")
+        # 最終フォールバック
+        if not hard_timeout or hard_timeout <= 0:
+            hard_timeout = 180
 
         while retry_count <= max_retries:
             try:
-                result = await self._execute_single_company_core_isolated(company, client_data, targeting_id)
+                # 内部ステップの asyncio.TimeoutError はそのまま伝播させると
+                # 外側の wait_for と区別が付かないため、内側発生分は一旦センチネルに包んで再送出する。
+                class _InnerStepTimeoutError(Exception):
+                    pass
 
+                async def _core_with_capture():
+                    try:
+                        return await self._execute_single_company_core_isolated(company, client_data, targeting_id)
+                    except asyncio.TimeoutError as ie:
+                        # 内部ステップのタイムアウト → 自動復旧判定のため通常エラー経路へ流す
+                        raise _InnerStepTimeoutError(str(ie)) from ie
+
+                # 全体ウォッチドッグ。ここでの asyncio.TimeoutError はハードタイムアウトのみ。
+                result = await asyncio.wait_for(_core_with_capture(), timeout=hard_timeout)
+                
                 # 成功時は復旧カウントリセット
                 if result.get("status") == "success":
                     self.recovery_manager.reset_recovery_count()
 
                 return result
 
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Worker {self.worker_id}: Company {record_id} processing timed out after {hard_timeout}s"
+                )
+                # ページ/ブラウザのクリーンアップ（状態不整合の可能性が高い）
+                try:
+                    if self.page:
+                        await self.page.close()
+                except Exception:
+                    pass
+                try:
+                    await self.browser_manager.close()
+                except Exception:
+                    pass
+                # 次のタスクに備えてブラウザを再起動（失敗しても続行）
+                try:
+                    await asyncio.sleep(0.5)
+                    await self.browser_manager.launch()
+                except Exception:
+                    logger.warning(
+                        f"Worker {self.worker_id}: Browser relaunch failed after timeout"
+                    )
+                return {
+                    "record_id": record_id,
+                    "status": "failed",
+                    "error_type": "TIMEOUT",
+                    "error_message": f"Hard timeout: processing exceeded {hard_timeout}s",
+                    "instruction_valid_updated": ErrorClassifier.should_update_instruction_valid("TIMEOUT"),
+                }
+            except _InnerStepTimeoutError as e_inner:
+                # 内部ステップのタイムアウトは従来どおり分類＋自動復旧の経路へ
+                error_message = f"Inner step timeout: {str(e_inner)}"
+                logger.error(f"Worker {self.worker_id}: Company {record_id} processing error: {error_message}")
+
+                error_context = {
+                    "error_location": "company_processing",
+                    "error_message": error_message,
+                    "page_url": form_url,
+                    "is_timeout": True,
+                    "is_bot_detected": False,
+                }
+                error_type = ErrorClassifier.classify_error_type(error_context)
+                result = {
+                    "record_id": record_id,
+                    "status": "failed",
+                    "error_type": error_type,
+                    "error_message": error_message,
+                    "instruction_valid_updated": ErrorClassifier.should_update_instruction_valid(error_type),
+                }
+                # 復旧可能かチェック
+                if ErrorClassifier.is_recoverable_error(error_type, error_message):
+                    if self.recovery_manager.can_attempt_recovery():
+                        elapsed_time = time.time() - start_time
+                        if elapsed_time > max_processing_time:
+                            logger.warning(
+                                f"Worker {self.worker_id}: Processing time limit exceeded for record_id {record_id}: {elapsed_time:.1f}s"
+                            )
+                            result["error_type"] = "TIMEOUT"
+                            return result
+                        logger.info(f"Worker {self.worker_id}: Attempting auto-recovery for record_id {record_id}")
+                        self.recovery_manager.mark_recovery_attempt()
+                        recovery_success = await self._attempt_recovery_isolated(error_type, error_message)
+                        if recovery_success:
+                            retry_count += 1
+                            logger.info(
+                                f"Worker {self.worker_id}: Recovery successful for record_id {record_id}, retrying... (attempt {retry_count}/{max_retries})"
+                            )
+                            continue
+                        else:
+                            logger.warning(f"Worker {self.worker_id}: Recovery failed for record_id {record_id}")
+                return result
             except Exception as e:
                 error_message = str(e)
                 logger.error(f"Worker {self.worker_id}: Company {record_id} processing error: {error_message}")
