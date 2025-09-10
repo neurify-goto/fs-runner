@@ -414,7 +414,10 @@ class RuleBasedAnalyzer:
                             if (fe.tag_name or '').lower() != 'input':
                                 continue
                             t = (fe.element_type or '').lower()
-                            if t == 'hidden' or t == 'submit' or t == 'button' or t == 'image':
+                            # 実際にアドレスを入力する要素のみを対象（チェックボックス/ラジオ等は除外）
+                            # 許可: email/text（空文字はtext相当）
+                            allowed_types = {"email", "text", ""}
+                            if t not in allowed_types:
                                 continue
                             if t == 'email':
                                 return True
@@ -422,7 +425,8 @@ class RuleBasedAnalyzer:
                                 fe.name or '', fe.id or '', fe.class_name or '', fe.placeholder or '',
                                 fe.label_text or '', fe.associated_text or ''
                             ]).lower()
-                            if any(tok in blob for tok in ["email", "e-mail", "mail", "メール"]):
+                            # text相当の場合は email系トークンの存在を必須にする
+                            if t in {"text", ""} and any(tok in blob for tok in ["email", "e-mail", "mail", "メール"]):
                                 return True
                         except Exception:
                             continue
