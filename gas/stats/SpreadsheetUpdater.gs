@@ -41,7 +41,11 @@ const CELL_MAPPING = {
   withFormUrl: 'A6', // フォームURLあり
   withFormUrlValue: 'B6',
   withFormUrlChange1Hour: 'C6', // 1時間変化
-  withFormUrlChange24Hour: 'D6' // 24時間変化
+  withFormUrlChange24Hour: 'D6', // 24時間変化
+  validForm: 'A7', // 有効フォーム（form_found=true AND prohibition_detected/duplication/black が NULL）
+  validFormValue: 'B7',
+  validFormChange1Hour: 'C7',
+  validFormChange24Hour: 'D7'
 };
 
 /**
@@ -76,13 +80,15 @@ function updateSpreadsheet(stats, changes1Hour = null, changes24Hour = null) {
       [CELL_MAPPING.withCompanyUrl, '企業URLあり'],
       [CELL_MAPPING.formNotExplored, 'フォーム未探索'],
       [CELL_MAPPING.withFormUrl, 'フォームURLあり'],
+      [CELL_MAPPING.validForm, '有効フォーム'],
 
       // 数値データの設定（B列）
       [CELL_MAPPING.lastUpdateValue, jstTime],
       [CELL_MAPPING.totalCountValue, stats.totalCount || 0],
       [CELL_MAPPING.withCompanyUrlValue, stats.withCompanyUrl || 0],
       [CELL_MAPPING.formNotExploredValue, stats.formNotExplored || 0],
-      [CELL_MAPPING.withFormUrlValue, stats.withFormUrl || 0]
+      [CELL_MAPPING.withFormUrlValue, stats.withFormUrl || 0],
+      [CELL_MAPPING.validFormValue, stats.validForm || 0]
     ];
     
     // 1時間変化データの追加（C列）
@@ -92,7 +98,8 @@ function updateSpreadsheet(stats, changes1Hour = null, changes24Hour = null) {
         [CELL_MAPPING.totalCountChange1Hour, changes1Hour.totalCount || '-'],
         [CELL_MAPPING.withCompanyUrlChange1Hour, changes1Hour.withCompanyUrl || '-'],
         [CELL_MAPPING.formNotExploredChange1Hour, changes1Hour.formNotExplored || '-'],
-        [CELL_MAPPING.withFormUrlChange1Hour, changes1Hour.withFormUrl || '-']
+        [CELL_MAPPING.withFormUrlChange1Hour, changes1Hour.withFormUrl || '-'],
+        [CELL_MAPPING.validFormChange1Hour, changes1Hour.validForm || '-']
       );
     }
     
@@ -103,7 +110,8 @@ function updateSpreadsheet(stats, changes1Hour = null, changes24Hour = null) {
         [CELL_MAPPING.totalCountChange24Hour, changes24Hour.totalCount || '-'],
         [CELL_MAPPING.withCompanyUrlChange24Hour, changes24Hour.withCompanyUrl || '-'],
         [CELL_MAPPING.formNotExploredChange24Hour, changes24Hour.formNotExplored || '-'],
-        [CELL_MAPPING.withFormUrlChange24Hour, changes24Hour.withFormUrl || '-']
+        [CELL_MAPPING.withFormUrlChange24Hour, changes24Hour.withFormUrl || '-'],
+        [CELL_MAPPING.validFormChange24Hour, changes24Hour.validForm || '-']
       );
     }
     
@@ -176,14 +184,15 @@ function testSpreadsheetConnection() {
  * @returns {Object} 更新結果
  */
 function testSpreadsheetUpdate() {
-  console.log('=== スプレッドシート更新テスト（4項目対応） ===');
+  console.log('=== スプレッドシート更新テスト（5項目対応） ===');
   
   // テスト用ダミーデータ
   const testStats = {
     totalCount: 10000,
     withCompanyUrl: 8500,
     formNotExplored: 2000,
-    withFormUrl: 6500
+    withFormUrl: 6500,
+    validForm: 6200
   };
   
   // テスト用1時間変化データ
@@ -191,7 +200,8 @@ function testSpreadsheetUpdate() {
     totalCount: '5',
     withCompanyUrl: '3',
     formNotExplored: '-2',
-    withFormUrl: '3'
+    withFormUrl: '3',
+    validForm: '2'
   };
   
   // テスト用24時間変化データ
@@ -199,7 +209,8 @@ function testSpreadsheetUpdate() {
     totalCount: '100',
     withCompanyUrl: '80',
     formNotExplored: '-20',
-    withFormUrl: '65'
+    withFormUrl: '65',
+    validForm: '60'
   };
   
   const result = updateSpreadsheet(testStats, testChanges1Hour, testChanges24Hour);
@@ -235,14 +246,15 @@ function setupSpreadsheet() {
     // 既存のデータをクリア
     sheet.clear();
     
-    // ヘッダー行の設定（4列対応）
+    // ヘッダー行の設定（5項目行 × 4列）
     const headers = [
       ['項目', '数値', '1h変化', '24h変化'],
       ['最終更新', '', '', ''],
       ['全企業数', '', '', ''],
       ['企業URLあり', '', '', ''],
       ['フォーム未探索', '', '', ''],
-      ['フォームURLあり', '', '', '']
+      ['フォームURLあり', '', '', ''],
+      ['有効フォーム', '', '', '']
     ];
     
     // ヘッダーデータを一括設定（値のみ）
@@ -305,7 +317,7 @@ function setupStatsLogSheet() {
     
     // ヘッダー行の作成
     const headers = [
-      '時刻', '全企業数', '企業URLあり', 'フォーム未探索', 'フォームURLあり'
+      '時刻', '全企業数', '企業URLあり', 'フォーム未探索', 'フォームURLあり', '有効フォーム'
     ];
     
     // 1441行のデータ配列を準備（ヘッダー + 1440分）
@@ -315,7 +327,7 @@ function setupStatsLogSheet() {
     for (let hour = 0; hour < 24; hour++) {
       for (let minute = 0; minute < 60; minute++) {
         const timeStr = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
-        allData.push([timeStr, '', '', '', '']); // 時刻 + 4項目の空データ
+        allData.push([timeStr, '', '', '', '', '']); // 時刻 + 5項目の空データ
       }
     }
     
@@ -365,8 +377,8 @@ function get1HourAgoData(time) {
     
     const rowIndex = getTimeRowIndex(oneHourAgoTime);
     
-    // 該当行のデータを取得（B列からE列：統計データ部分）
-    const dataRange = logSheet.getRange(rowIndex, 2, 1, 4);
+    // 該当行のデータを取得（B列からF列：統計データ部分）
+    const dataRange = logSheet.getRange(rowIndex, 2, 1, 5);
     const values = dataRange.getValues()[0];
     
     // データが空の場合（初回実行時など）
@@ -383,7 +395,8 @@ function get1HourAgoData(time) {
       totalCount: values[0] || 0,
       withCompanyUrl: values[1] || 0,
       formNotExplored: values[2] || 0,
-      withFormUrl: values[3] || 0
+      withFormUrl: values[3] || 0,
+      validForm: values[4] || 0
     };
     
     console.log(`1時間前データ取得成功: ${oneHourAgoTime}`, data1HourAgo);
@@ -418,8 +431,8 @@ function get24HourAgoData(time) {
     
     const rowIndex = getTimeRowIndex(time);
     
-    // 該当行のデータを取得（B列からE列：統計データ部分）
-    const dataRange = logSheet.getRange(rowIndex, 2, 1, 4);
+    // 該当行のデータを取得（B列からF列：統計データ部分）
+    const dataRange = logSheet.getRange(rowIndex, 2, 1, 5);
     const values = dataRange.getValues()[0];
     
     // データが空の場合（初回実行時など）
@@ -436,7 +449,8 @@ function get24HourAgoData(time) {
       totalCount: values[0] || 0,
       withCompanyUrl: values[1] || 0,
       formNotExplored: values[2] || 0,
-      withFormUrl: values[3] || 0
+      withFormUrl: values[3] || 0,
+      validForm: values[4] || 0
     };
     
     console.log(`24時間前データ取得成功: ${time}`, data24HourAgo);
@@ -476,11 +490,12 @@ function updateStatsLog(time, stats) {
       stats.totalCount || 0,
       stats.withCompanyUrl || 0,
       stats.formNotExplored || 0,
-      stats.withFormUrl || 0
+      stats.withFormUrl || 0,
+      stats.validForm || 0
     ];
     
-    // 該当行のデータ部分を更新（B列からE列）
-    const dataRange = logSheet.getRange(rowIndex, 2, 1, 4);
+    // 該当行のデータ部分を更新（B列からF列）
+    const dataRange = logSheet.getRange(rowIndex, 2, 1, 5);
     dataRange.setValues([statsValues]);
     
     console.log(`統計ログ更新完了: ${time} (行${rowIndex})`);
@@ -515,7 +530,8 @@ function calculate1HourChanges(currentStats, data1HourAgo) {
       totalCount: '-',
       withCompanyUrl: '-',
       formNotExplored: '-',
-      withFormUrl: '-'
+      withFormUrl: '-',
+      validForm: '-'
     };
   }
   
@@ -526,7 +542,8 @@ function calculate1HourChanges(currentStats, data1HourAgo) {
     totalCount: (currentStats.totalCount || 0) - (oldData.totalCount || 0),
     withCompanyUrl: (currentStats.withCompanyUrl || 0) - (oldData.withCompanyUrl || 0),
     formNotExplored: (currentStats.formNotExplored || 0) - (oldData.formNotExplored || 0),
-    withFormUrl: (currentStats.withFormUrl || 0) - (oldData.withFormUrl || 0)
+    withFormUrl: (currentStats.withFormUrl || 0) - (oldData.withFormUrl || 0),
+    validForm: (currentStats.validForm || 0) - (oldData.validForm || 0)
   };
   
   // 表示形式に変換（純粋な整数で出力）
@@ -551,7 +568,8 @@ function calculateChanges(currentStats, data24HourAgo) {
       totalCount: '-',
       withCompanyUrl: '-',
       formNotExplored: '-',
-      withFormUrl: '-'
+      withFormUrl: '-',
+      validForm: '-'
     };
   }
   
@@ -562,7 +580,8 @@ function calculateChanges(currentStats, data24HourAgo) {
     totalCount: (currentStats.totalCount || 0) - (oldData.totalCount || 0),
     withCompanyUrl: (currentStats.withCompanyUrl || 0) - (oldData.withCompanyUrl || 0),
     formNotExplored: (currentStats.formNotExplored || 0) - (oldData.formNotExplored || 0),
-    withFormUrl: (currentStats.withFormUrl || 0) - (oldData.withFormUrl || 0)
+    withFormUrl: (currentStats.withFormUrl || 0) - (oldData.withFormUrl || 0),
+    validForm: (currentStats.validForm || 0) - (oldData.validForm || 0)
   };
   
   // 表示形式に変換（純粋な整数で出力）
@@ -611,7 +630,8 @@ function testStatsLogFunctions() {
       totalCount: 1000,
       withCompanyUrl: 800,
       formNotExplored: 200,
-      withFormUrl: 600
+      withFormUrl: 600,
+      validForm: 580
     };
     results.updateLog = updateStatsLog(testTime, testStats);
     

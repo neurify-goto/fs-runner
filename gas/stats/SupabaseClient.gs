@@ -82,14 +82,17 @@ function getCompaniesStats() {
       throw new Error('RPC関数から統計データが返されませんでした');
     }
     
-    // RPC結果を「必要4項目のみ」に整形
+    // RPC結果を「必要5項目」に整形
     // 廃止項目（フォーム未解析/解析済/有効指示書JSONあり）は参照しない
     const rpcResult = data[0]; // RPC関数は1行の結果を返す
     const stats = {
       totalCount: parseInt(rpcResult.total_count) || 0,
       withCompanyUrl: parseInt(rpcResult.with_company_url_count) || 0,
       formNotExplored: parseInt(rpcResult.form_not_explored_count) || 0,
-      withFormUrl: parseInt(rpcResult.with_form_url_count) || 0
+      // フォームURLあり（定義変更）: form_found = true を採用
+      withFormUrl: parseInt(rpcResult.with_form_url_count) || 0,
+      // 新規: 有効フォーム（form_found=true かつ prohibition_detected/duplication/black が NULL）
+      validForm: parseInt(rpcResult.valid_form_count) || 0
     };
     
     console.log(`統計情報取得完了（RPC版）: 処理時間 ${processingTime}ms`);

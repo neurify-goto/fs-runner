@@ -4,15 +4,16 @@
 
 -- 1. 全統計を一括取得するメイン関数
 -- 現在のgetCompaniesStats()の7つのクエリを1つに統合
-CREATE OR REPLACE FUNCTION get_companies_stats_all()
+-- 返却型を変更したため、事前に既存関数を削除してから再作成
+DROP FUNCTION IF EXISTS public.get_companies_stats_all();
+
+CREATE OR REPLACE FUNCTION public.get_companies_stats_all()
 RETURNS TABLE (
     total_count bigint,
     with_company_url_count bigint,
     form_not_explored_count bigint,
     with_form_url_count bigint,
-    form_not_analyzed_count bigint,
-    form_analyzed_count bigint,
-    valid_instruction_count bigint
+    valid_form_count bigint
 ) AS $$
 BEGIN
     RETURN QUERY
@@ -26,26 +27,19 @@ BEGIN
         -- 3. フォーム未探索（企業URLあり かつ form_foundがnull かつ duplication is null）
         COUNT(CASE WHEN c.company_url IS NOT NULL AND c.form_found IS NULL AND c.duplication IS NULL THEN 1 END)::bigint AS form_not_explored_count,
         
-        -- 4. フォームURLあり（duplication is null）
-        COUNT(CASE WHEN c.form_url IS NOT NULL AND c.duplication IS NULL THEN 1 END)::bigint AS with_form_url_count,
-        
-        -- 5. フォーム未解析（フォームURLありかつinstruction_jsonがnullかつprohibition_detectedがtrueでない）
-        COUNT(CASE WHEN c.form_url IS NOT NULL 
-                  AND c.instruction_json IS NULL 
-                  AND (c.prohibition_detected IS NULL OR c.prohibition_detected != true) 
-              THEN 1 END)::bigint AS form_not_analyzed_count,
-        
-        -- 6. フォーム解析済（instruction_jsonあり）
-        COUNT(CASE WHEN c.instruction_json IS NOT NULL THEN 1 END)::bigint AS form_analyzed_count,
-        
-        -- 7. 有効指示書JSONあり（instruction_jsonありかつ（instruction_validがnullまたはtrue））
-        COUNT(CASE WHEN c.instruction_json IS NOT NULL 
-                  AND (c.instruction_valid IS NULL OR c.instruction_valid = true)
-              THEN 1 END)::bigint AS valid_instruction_count
+        -- 4. フォームURLあり → 定義変更: シンプルに form_found = true
+        COUNT(CASE WHEN c.form_found = true THEN 1 END)::bigint AS with_form_url_count,
+
+        -- 5. 有効フォーム: form_found = true AND prohibition_detected IS NULL AND duplication IS NULL AND black IS NULL
+        COUNT(CASE WHEN c.form_found = true
+                  AND c.prohibition_detected IS NULL
+                  AND c.duplication IS NULL
+                  AND c.black IS NULL
+              THEN 1 END)::bigint AS valid_form_count
                   
     FROM companies c;
 END;
-$$ LANGUAGE plpgsql;
+ $$ LANGUAGE plpgsql;
 
 -- パフォーマンス最適化のためのコメント
 -- 既存の部分インデックスを活用して効率的にクエリを実行
@@ -56,7 +50,7 @@ $$ LANGUAGE plpgsql;
 -- - idx_companies_prohibition_detected: prohibition_detected 条件用
 
 -- 関数の権限設定（セキュリティ: 適切な権限のみ付与）
-GRANT EXECUTE ON FUNCTION get_companies_stats_all() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.get_companies_stats_all() TO authenticated, service_role;
 
 -- 実行例とテスト用クエリ
 /*
@@ -78,19 +72,9 @@ SELECT COUNT(*) AS form_not_explored_count FROM companies
 WHERE company_url IS NOT NULL AND form_found IS NULL;
 
 -- 4. フォームURLあり
-SELECT COUNT(*) AS with_form_url_count FROM companies WHERE form_url IS NOT NULL;
+SELECT COUNT(*) AS with_form_url_count FROM companies WHERE form_found = true;
 
--- 5. フォーム未解析
-SELECT COUNT(*) AS form_not_analyzed_count FROM companies 
-WHERE form_url IS NOT NULL 
-AND instruction_json IS NULL 
-AND (prohibition_detected IS NULL OR prohibition_detected != true);
-
--- 6. フォーム解析済
-SELECT COUNT(*) AS form_analyzed_count FROM companies WHERE instruction_json IS NOT NULL;
-
--- 7. 有効指示書JSONあり
-SELECT COUNT(*) AS valid_instruction_count FROM companies 
-WHERE instruction_json IS NOT NULL 
-AND (instruction_valid IS NULL OR instruction_valid = true);
+-- 5. 有効フォーム（form_found=true かつ prohibition_detected/duplication/black が NULL）
+SELECT COUNT(*) AS valid_form_count FROM companies 
+WHERE form_found = true AND prohibition_detected IS NULL AND duplication IS NULL AND black IS NULL;
 */
