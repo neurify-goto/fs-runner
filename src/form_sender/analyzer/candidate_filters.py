@@ -37,17 +37,31 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
             return False
 
         # スタイル属性に基づく不可視/非操作要素の早期除外
-        # 代表例: pointer-events:none / opacity:0 / display:none / visibility:hidden / 画面外配置
+        # 代表例: pointer-events:none / opacity:0 （数値0のみ厳密判定）/ display:none / visibility:hidden / 画面外配置
         try:
-            style = (element_info.get("style") or "").replace(" ", "").lower()
+            raw_style = (element_info.get("style") or "")
+            style = raw_style.replace(" ", "").lower()
         except Exception:
-            style = ""
+            raw_style = style = ""
+        # opacity は 0.5 などの部分一致を避け、数値を抽出して 0 のときだけマークする
+        def _opacity_is_zero(s: str) -> bool:
+            import re
+            try:
+                m = re.search(r"opacity\s*:\s*([0-9]*\.?[0-9]+)", s, re.IGNORECASE)
+                if not m:
+                    return False
+                try:
+                    return float(m.group(1)) == 0.0
+                except ValueError:
+                    return False
+            except Exception:
+                return False
         if style:
             hidden_signals = (
                 "display:none" in style
                 or "visibility:hidden" in style
                 or "pointer-events:none" in style
-                or "opacity:0" in style
+                or _opacity_is_zero(raw_style)
                 or "z-index:-1" in style
                 or ("position:absolute" in style and ("left:-9999px" in style or "top:-9999px" in style))
             )

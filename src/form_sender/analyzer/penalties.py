@@ -10,6 +10,7 @@ import logging
 from typing import Dict, Tuple, Any
 
 from playwright.async_api import Locator
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +39,31 @@ async def calculate_penalties(
         if style is None:
             style = await element.get_attribute("style") or ""
         style_nospace = style.replace(" ", "").lower()
+
+        def _opacity_is_zero(s: str) -> bool:
+            # opacity: <number>[!important]?; を厳密に数値抽出して 0 のみ True
+            try:
+                m = re.search(r"opacity\s*:\s*([0-9]*\.?[0-9]+)", s, re.IGNORECASE)
+                if not m:
+                    return False
+                try:
+                    return float(m.group(1)) == 0.0
+                except ValueError:
+                    return False
+            except Exception:
+                return False
+
         if (
             "display:none" in style_nospace
             or "visibility:hidden" in style_nospace
             or "pointer-events:none" in style_nospace
-            or "opacity:0" in style_nospace
+            or _opacity_is_zero(style)
         ):
             penalty += score_weights.get("visibility_penalty", -200)
             # 具体的な理由を記録
             if "pointer-events:none" in style_nospace:
                 penalties.append("pointer_events_none")
-            if "opacity:0" in style_nospace:
+            if _opacity_is_zero(style):
                 penalties.append("opacity_zero")
             if ("display:none" in style_nospace) or ("visibility:hidden" in style_nospace):
                 penalties.append("style_hidden")
