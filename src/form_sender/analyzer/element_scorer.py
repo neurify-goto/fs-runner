@@ -105,6 +105,9 @@ class ElementScorer:
         "お問い合わせ本文",
     }
 
+    # 正規化キャッシュの最大件数（性能/メモリのバランス）
+    NORM_CACHE_MAX_SIZE = 4096
+
     def __init__(
         self,
         context_extractor=None,
@@ -247,7 +250,7 @@ class ElementScorer:
                 return v
             v = unicodedata.normalize("NFKC", key).lower()
             # 簡易サイズ制御（過剰成長抑制）
-            if len(self._norm_cache) > 4096:
+            if len(self._norm_cache) > self.NORM_CACHE_MAX_SIZE:
                 self._norm_cache.clear()
             self._norm_cache[key] = v
             return v
@@ -255,7 +258,7 @@ class ElementScorer:
             try:
                 key = s or ""
                 v = (key).lower()
-                if len(self._norm_cache) > 4096:
+                if len(self._norm_cache) > self.NORM_CACHE_MAX_SIZE:
                     self._norm_cache.clear()
                 self._norm_cache[key] = v
                 return v
