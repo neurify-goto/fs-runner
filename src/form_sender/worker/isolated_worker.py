@@ -154,27 +154,19 @@ class IsolatedFormWorker:
 
         has_flag = bool(sp.get('has_prohibition') or sp.get('prohibition_detected'))
 
-        # 旧検出（フォールバック）互換: 信頼度情報が未設定（level=none/score=0/level=none等）の場合は
-        # レベル or マッチ数で中断（従来の緩和ロジック）
+        # recommended gating:
+        # 必ず level と matches はしきい値を満たす必要がある。
+        # 信頼度が取得できている場合のみ、confidence 関連もしきい値を適用。
         has_conf_info = (conf_lvl_idx > 0) or (conf_score and conf_score > 0)
-        if has_conf_info:
-            # 新ロジック: すべての条件を満たす AND 判定
-            should_abort = (
-                has_flag
-                and level_idx >= lvl_min_idx
-                and conf_lvl_idx >= conf_min_idx
-                and conf_score >= score_min
-                and matches_count >= matches_min
+        should_abort = (
+            has_flag
+            and level_idx >= lvl_min_idx
+            and matches_count >= matches_min
+            and (
+                (not has_conf_info)
+                or (conf_lvl_idx >= conf_min_idx and conf_score >= score_min)
             )
-        else:
-            # フォールバック: レベル or マッチ数（ANDではなく OR）
-            should_abort = (
-                has_flag
-                and (
-                    level_idx >= lvl_min_idx
-                    or matches_count >= matches_min
-                )
-            )
+        )
 
         summary = {
             'level': level,

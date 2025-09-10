@@ -89,7 +89,17 @@ class FieldPatterns:
                 "weight": 6,
                 "strict_patterns": ["生年月日", "birthday", "date of birth", "dob"],
                 "exclude_patterns": [
-                    "captcha", "token", "otp", "confirm", "確認", "email", "mail", "phone", "tel"
+                    # 認証/セキュリティ系
+                    "captcha", "image_auth", "image-auth", "security",
+                    "token", "csrf", "otp", "totp", "mfa",
+                    "verify", "verification", "確認コード", "認証コード",
+                    # 認証・ログイン/パスワード
+                    "auth", "authentication", "login", "signin", "sign-in", "login_id",
+                    "password", "pass", "pwd", "pswd", "reset",
+                    # 連絡・メール・電話系
+                    "email", "e-mail", "mail", "phone", "tel",
+                    # そのほか一般的に DOB と無関係な確認系
+                    "confirm", "確認"
                 ],
             },
 

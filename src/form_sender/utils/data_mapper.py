@@ -3,6 +3,12 @@
 """
 import logging
 from typing import Dict, Any, Optional, List
+from datetime import datetime
+import random
+try:
+    from config.manager import get_worker_config
+except Exception:  # pragma: no cover
+    get_worker_config = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +120,24 @@ class ClientDataMapper:
 
         # 21. 生年月日（テスト用の汎用値）
         elif field_name == '生年月日':
-            return '1990-01-01'
+            # ランダムな実在風範囲（デフォルト: 25〜65歳）を設定から取得
+            min_age, max_age = 25, 65
+            try:
+                if get_worker_config:
+                    cfg = get_worker_config() or {}
+                    dob_cfg = (cfg.get('fallback_values') or {}).get('dob') or {}
+                    min_age = int(dob_cfg.get('min_age', min_age))
+                    max_age = int(dob_cfg.get('max_age', max_age))
+                    if min_age < 18:
+                        min_age = 18
+                    if max_age < min_age:
+                        max_age = min_age
+            except Exception:
+                pass
+            year = datetime.now().year - random.randint(min_age, max_age)
+            month = random.randint(1, 12)
+            day = random.randint(1, 28)  # 28日までで単純化（妥当性重視）
+            return f"{year:04d}-{month:02d}-{day:02d}"
 
         # フォールバック処理
         return ClientDataMapper._get_fallback_value(field_name, client_info, targeting_info)

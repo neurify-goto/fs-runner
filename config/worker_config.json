@@ -163,6 +163,12 @@
       }
     }
   },
+  "fallback_values": {
+    "dob": {
+      "min_age": 25,
+      "max_age": 65
+    }
+  },
   "storage": {
     "sanitize_max_depth": 6
   },
