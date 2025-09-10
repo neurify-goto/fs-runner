@@ -514,24 +514,41 @@ class InputValueAssigner:
                     except Exception:
                         return ""
 
-                # 衝突回避: city/detail の両方ヒット時は『詳細』を優先（市区町村欄に番地が入るのを防ぐ）
+                # 衝突回避: city/detail 両ヒット時はヒット強度で判定（同点なら city 優先）
                 _has_city = any(h.lower() in blob for h in city_hints)
                 _has_detail = any(h.lower() in blob for h in detail_hints)
-                if _has_city and _has_detail:
-                    a4 = _nz((client or {}).get("address_4"))
-                    a5 = _nz((client or {}).get("address_5"))
-                    composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
-                    return composed if composed else value
-                if _has_city:
-                    a2 = _nz((client or {}).get("address_2"))
-                    a3 = _nz((client or {}).get("address_3"))
-                    composed = (a2 + a3).strip()
-                    return composed if composed else value
-                if _has_detail:
-                    a4 = _nz((client or {}).get("address_4"))
-                    a5 = _nz((client or {}).get("address_5"))
-                    composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
-                    return composed if composed else value
+                if _has_city or _has_detail:
+                    def _hits(tokens):
+                        bl = blob
+                        return sum(bl.count(t.lower()) for t in tokens)
+                    if _has_city and _has_detail:
+                        c_hits = _hits([t.lower() for t in city_hints])
+                        d_hits = _hits([t.lower() for t in detail_hints])
+                        prefer_city = c_hits >= d_hits  # 同点は city
+                        if prefer_city:
+                            a2 = _nz((client or {}).get("address_2"))
+                            a3 = _nz((client or {}).get("address_3"))
+                            composed = (a2 + a3).strip()
+                            if composed:
+                                return composed
+                        # detail 優先
+                        a4 = _nz((client or {}).get("address_4"))
+                        a5 = _nz((client or {}).get("address_5"))
+                        composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
+                        if composed:
+                            return composed
+                    elif _has_city:
+                        a2 = _nz((client or {}).get("address_2"))
+                        a3 = _nz((client or {}).get("address_3"))
+                        composed = (a2 + a3).strip()
+                        if composed:
+                            return composed
+                    else:  # _has_detail only
+                        a4 = _nz((client or {}).get("address_4"))
+                        a5 = _nz((client or {}).get("address_5"))
+                        composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
+                        if composed:
+                            return composed
             except Exception:
                 pass
 
@@ -748,31 +765,41 @@ class InputValueAssigner:
                 v = client.get("address_1", "")
                 if v:
                     return v
-            # 衝突回避: city/detail の両方ヒット時は『詳細』を優先（市区町村欄に番地が入るのを防ぐ）
+            # 衝突回避: city/detail 両ヒット時はヒット強度で判定（同点なら city 優先）
             _has_city = any(t in blob for t in city_tokens)
-            _has_detail = field_name.startswith("住所_補助") or any(
+            _has_detail_flag = field_name.startswith("住所_補助") or any(
                 t in blob for t in detail_tokens
             )
-            if _has_city and _has_detail:
-                v = join_nonempty(
-                    [client.get("address_4", ""), client.get("address_5", "")], "　"
-                )
-                if v:
-                    return v
-            # 市区町村ヒント
-            if _has_city:
-                v = join_nonempty(
-                    [client.get("address_2", ""), client.get("address_3", "")]
-                )
-                if v:
-                    return v
-            # 番地・建物ヒント（『丁目』含む詳細）
-            if _has_detail:
-                v = join_nonempty(
-                    [client.get("address_4", ""), client.get("address_5", "")], "　"
-                )
-                if v:
-                    return v
+            if _has_city or _has_detail_flag:
+                def _hits(tokens):
+                    return sum(blob.count(t) for t in tokens)
+                if _has_city and _has_detail_flag:
+                    c_hits = _hits(city_tokens)
+                    d_hits = _hits(detail_tokens)
+                    prefer_city = c_hits >= d_hits  # 同点は city
+                    if prefer_city:
+                        v = join_nonempty(
+                            [client.get("address_2", ""), client.get("address_3", "")]
+                        )
+                        if v:
+                            return v
+                    v = join_nonempty(
+                        [client.get("address_4", ""), client.get("address_5", "")], "　"
+                    )
+                    if v:
+                        return v
+                elif _has_city:
+                    v = join_nonempty(
+                        [client.get("address_2", ""), client.get("address_3", "")]
+                    )
+                    if v:
+                        return v
+                else:
+                    v = join_nonempty(
+                        [client.get("address_4", ""), client.get("address_5", "")], "　"
+                    )
+                    if v:
+                        return v
             # デフォルトは住所全体
             full_addr = self.field_combination_manager.generate_combined_value(
                 "address", client_data
