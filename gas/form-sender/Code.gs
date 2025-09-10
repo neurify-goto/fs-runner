@@ -70,7 +70,7 @@ const CONFIG = {
   GITHUB_API_BASE: 'https://api.github.com',
   DEFAULT_TARGETING_ID: 1, // デフォルトのターゲティングID
   // 当日キュー作成対象のホワイトリスト（未設定/空配列なら全アクティブ対象）
-  QUEUE_TARGETING_IDS: [],
+  QUEUE_TARGETING_IDS: [1],
   // チャンク投入の既定値（運用で調整可能）
   CHUNK_LIMIT_INITIAL: 2000,
   CHUNK_LIMIT_MIN: 250,
@@ -285,6 +285,19 @@ function startFormSenderFromTriggerAt7() {
       return { success: true, skipped: true, reason: 'non-business-day', next_trigger: next };
     }
 
+    // ワークフローをトリガーする前に、既存のform-senderワークフローを一掃
+    try {
+      const stopRes = stopAllRunningFormSenderTasks();
+      if (stopRes && stopRes.success) {
+        const stopped = Number(stopRes.stopped_count || 0);
+        console.log(`既存form-senderワークフローを停止: ${stopped}件`);
+      } else {
+        console.warn('既存form-senderワークフロー停止に失敗:', stopRes && stopRes.error);
+      }
+    } catch (e) {
+      console.warn('既存form-senderワークフロー停止中に例外:', e);
+    }
+
     // （既存トリガー削除は関数冒頭で実施済み）
 
     // アクティブtargetingの処理
@@ -347,6 +360,19 @@ function startFormSenderFromTriggerAt13() {
       const nextJst = getNextWeekdayExecutionTimeAt(13);
       const next = createSpecificTimeTriggerFor('startFormSenderFromTriggerAt13', nextJst);
       return { success: true, skipped: true, reason: 'non-business-day', next_trigger: next };
+    }
+
+    // ワークフローをトリガーする前に、既存のform-senderワークフローを一掃
+    try {
+      const stopRes = stopAllRunningFormSenderTasks();
+      if (stopRes && stopRes.success) {
+        const stopped = Number(stopRes.stopped_count || 0);
+        console.log(`既存form-senderワークフローを停止: ${stopped}件`);
+      } else {
+        console.warn('既存form-senderワークフロー停止に失敗:', stopRes && stopRes.error);
+      }
+    } catch (e) {
+      console.warn('既存form-senderワークフロー停止中に例外:', e);
     }
 
     // （既存トリガー削除は関数冒頭で実施済み）
