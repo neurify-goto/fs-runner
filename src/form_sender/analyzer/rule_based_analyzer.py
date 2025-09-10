@@ -305,6 +305,14 @@ class RuleBasedAnalyzer:
             except Exception as e:
                 logger.debug(f"name mapping mismatch fix skipped: {e}")
 
+            # プレースホルダに基づく姓/名の整合性補正（汎用）
+            try:
+                from .name_postprocess import align_name_by_placeholder
+
+                align_name_by_placeholder(self.field_mapping)
+            except Exception as e:
+                logger.debug(f"align_name_by_placeholder skipped: {e}")
+
             # 汎用ポストプロセス: カナ/ひらがなの整合性を正規化
             try:
                 await self._normalize_kana_hiragana_fields()
