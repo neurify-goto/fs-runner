@@ -6,7 +6,7 @@ from .element_scorer import ElementScorer
 from .context_text_extractor import ContextTextExtractor
 from .field_combination_manager import FieldCombinationManager
 from .form_structure_analyzer import FormStructure
-from config.manager import get_prefectures, get_auto_fill_defaults
+from config.manager import get_prefectures
 from ..utils.privacy_consent_handler import PrivacyConsentHandler
 
 logger = logging.getLogger(__name__)
