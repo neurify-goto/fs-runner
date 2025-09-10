@@ -109,7 +109,8 @@ function startFormSenderFromTrigger() {
     }
     
     // 当日が非営業日（週末/祝日）の場合は処理をスキップし、次回のみ設定
-    const jstToday = new Date(new Date().getTime() + CONFIG.JST_OFFSET);
+    // GAS は JST タイムゾーンで動作する前提のため、手動オフセットは不要
+    const jstToday = new Date();
     if (!isBusinessDayJst_(jstToday)) {
       console.log('本日は週末または祝日のため、処理をスキップします（通常トリガー）');
       const nextTriggerResult = createNextDayTrigger();
@@ -275,7 +276,8 @@ function startFormSenderFromTriggerAt7() {
     const del7 = deleteTriggersByHandler('startFormSenderFromTriggerAt7');
     if (!del7.success) console.warn('7時トリガー削除で問題発生:', del7.error);
     // 当日が非営業日（週末/祝日）の場合は処理せずに翌営業日の7:00へ再スケジュール
-    const jstToday = new Date(new Date().getTime() + CONFIG.JST_OFFSET);
+    // GAS は JST タイムゾーンで動作する前提のため、手動オフセットは不要
+    const jstToday = new Date();
     if (!isBusinessDayJst_(jstToday)) {
       console.log('本日は週末または祝日のため、処理をスキップします（7:00）');
       const nextJst = getNextWeekdayExecutionTimeAt(7);
@@ -338,7 +340,8 @@ function startFormSenderFromTriggerAt13() {
     const del13 = deleteTriggersByHandler('startFormSenderFromTriggerAt13');
     if (!del13.success) console.warn('13時トリガー削除で問題発生:', del13.error);
     // 当日が非営業日（週末/祝日）の場合は処理せずに翌営業日の13:00へ再スケジュール
-    const jstToday = new Date(new Date().getTime() + CONFIG.JST_OFFSET);
+    // GAS は JST タイムゾーンで動作する前提のため、手動オフセットは不要
+    const jstToday = new Date();
     if (!isBusinessDayJst_(jstToday)) {
       console.log('本日は週末または祝日のため、処理をスキップします（13:00）');
       const nextJst = getNextWeekdayExecutionTimeAt(13);
@@ -1524,8 +1527,8 @@ function createSpecificTimeTriggerFor(handlerFunction, executeDateTime) {
  * @returns {Date} 次回実行日時
  */
 function getNextExecutionTime() {
-  const now = new Date();
-  const jstNow = new Date(now.getTime() + CONFIG.JST_OFFSET);
+  // GAS は JST タイムゾーンで動作するため、手動オフセットは不要
+  const jstNow = new Date();
 
   // 翌日 同時刻（分は00固定）
   let candidate = new Date(jstNow.getTime() + CONFIG.MILLISECONDS_PER_DAY);
@@ -1572,8 +1575,6 @@ function getNextExecutionTime() {
     pushedDays += 1;
   }
 
-  const nextExecutionUTC = new Date(candidate.getTime() - CONFIG.JST_OFFSET);
-
   const dayNames = ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日'];
   const currentDayName = dayNames[jstNow.getDay()];
   const nextDayName = dayNames[candidate.getDay()];
@@ -1585,7 +1586,8 @@ function getNextExecutionTime() {
   console.log(`次回実行時刻計算（祝日/週末回避+上限付き）: 現在=${currentDayName} ${jstNow.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}, 次回=${nextDayName} ${candidate.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}`);
   console.log(`回避理由: ${reason}`);
 
-  return nextExecutionUTC;
+  // そのまま JST の Date を返す（.at() に直接渡す）
+  return candidate;
 }
 
 /**
@@ -1703,8 +1705,8 @@ function deleteTriggersByHandler(handlerFunction) {
  * @returns {Date} UTC基準Date (Apps Scriptの.at()に渡す用)
  */
 function getNextWeekdayExecutionTimeAt(hour) {
-  const now = new Date();
-  const jstNow = new Date(now.getTime() + CONFIG.JST_OFFSET);
+  // GAS は JST タイムゾーンで動作するため、手動オフセットは不要
+  const jstNow = new Date();
 
   // 翌日・指定時刻(JST)から開始
   let jstTarget = new Date(jstNow);
@@ -1752,9 +1754,8 @@ function getNextWeekdayExecutionTimeAt(hour) {
     console.log(`次の営業日(${hour}:00)まで ${pushedDays} 日スキップ（週末/祝日回避、上限=${CONFIG.MAX_SKIP_DAYS}）`);
   }
 
-  // UTCへ戻す
-  const utc = new Date(jstTarget.getTime() - CONFIG.JST_OFFSET);
-  return utc;
+  // JST の Date をそのまま返す（.at() に直接渡す）
+  return jstTarget;
 }
 
 /**
