@@ -999,6 +999,7 @@ class ElementScorer:
         matches = []
         total_score = 0
         placeholder_lower = self._normalize(placeholder)
+        matched_placeholder_lower = ""
 
         # 安全ガード: 『会社名』系の曖昧一致抑止
         # 背景: プレースホルダーが『名』である氏名フィールドが、
@@ -1075,6 +1076,7 @@ class ElementScorer:
                 if self._contains_token_with_boundary(placeholder_lower, pattern_lower):
                     matches.append(f"placeholder:{pattern_placeholder}")
                     total_score += self.SCORE_WEIGHTS["placeholder"]
+                    matched_placeholder_lower = pattern_lower
                     logger.debug(
                         f"Placeholder token-boundary match: {pattern_placeholder} in {placeholder}"
                     )
@@ -1083,10 +1085,86 @@ class ElementScorer:
                 if pattern_lower in placeholder_lower:
                     matches.append(f"placeholder:{pattern_placeholder}")
                     total_score += self.SCORE_WEIGHTS["placeholder"]
+                    matched_placeholder_lower = pattern_lower
                     logger.debug(
                         f"Placeholder match found: {pattern_placeholder} in {placeholder}"
                     )
                     break
+
+        # 追加: 『姓/名（およびカナ/ひらがな）』のプレースホルダ強化ブースト（汎用・安全）
+        # 目的: name="...first/last" の英語圏命名に引っ張られた逆転誤りを、
+        #       日本語placeholderの明示（『姓』『名』『セイ』『メイ』『せい』『めい』等）で正す。
+        try:
+            if matched_placeholder_lower:
+                boost = 0
+                if field_name == "姓":
+                    if any(k in matched_placeholder_lower for k in [
+                        "姓", "last name", "family name", "苗字", "ファミリーネーム"
+                    ]):
+                        boost = 50
+                elif field_name == "名":
+                    # 『名』は曖昧だが、上のマッチは語境界済みか長語のみ
+                    if any(k in matched_placeholder_lower for k in [
+                        "名", "first name", "given name", "ファーストネーム", "下の名前", "お名前（名）"
+                    ]):
+                        boost = 50
+                elif field_name == "姓カナ":
+                    if any(k in matched_placeholder_lower for k in [
+                        "セイ", "lastname kana", "kana last", "姓（カタカナ）"
+                    ]):
+                        boost = 40
+                elif field_name == "名カナ":
+                    if any(k in matched_placeholder_lower for k in [
+                        "メイ", "firstname kana", "kana first", "名（カタカナ）"
+                    ]):
+                        boost = 40
+                elif field_name == "姓ひらがな":
+                    if any(k in matched_placeholder_lower for k in [
+                        "せい", "ひらがな", "ふりがな", "姓（ひらがな）"
+                    ]):
+                        boost = 40
+                elif field_name == "名ひらがな":
+                    if any(k in matched_placeholder_lower for k in [
+                        "めい", "ひらがな", "ふりがな", "名（ひらがな）"
+                    ]):
+                        boost = 40
+
+                if boost:
+                    total_score += boost
+                    matches.append(f"placeholder_boost:+{boost}")
+        except Exception:
+            pass
+
+        # 追加: 『逆語』抑止（汎用・安全）
+        # 例: 姓フィールド候補の placeholder に『名』が含まれている場合は強く減点。
+        #     名フィールド候補の placeholder に『姓』が含まれている場合も同様。
+        try:
+            # 語境界を考慮（CJK対応）
+            def _has_tok(tok: str) -> bool:
+                try:
+                    return self._contains_token_with_boundary(placeholder_lower, tok)
+                except Exception:
+                    return tok in placeholder_lower
+
+            neg = 0
+            if field_name == "姓" and _has_tok("名"):
+                neg = 80
+            elif field_name == "名" and _has_tok("姓"):
+                neg = 80
+            elif field_name == "姓カナ" and _has_tok("メイ"):
+                neg = 70
+            elif field_name == "名カナ" and _has_tok("セイ"):
+                neg = 70
+            elif field_name == "姓ひらがな" and _has_tok("めい"):
+                neg = 60
+            elif field_name == "名ひらがな" and _has_tok("せい"):
+                neg = 60
+
+            if neg:
+                total_score -= neg
+                matches.append(f"placeholder_conflict:-{neg}")
+        except Exception:
+            pass
 
         # 追加: プレースホルダーの構造からの汎用高信頼判定
         # - メール: *@*.* の形（例: "xxxx@example.com"）

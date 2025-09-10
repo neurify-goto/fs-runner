@@ -102,6 +102,51 @@ def fix_name_mapping_mismatch(field_mapping: Dict[str, Any]) -> None:
         swap("姓カナ", "名カナ")
 
 
+def align_name_by_placeholder(field_mapping: Dict[str, Any]) -> None:
+    """プレースホルダに基づき『姓/名』および『セイ/メイ』『せい/めい』の入れ違いを是正。
+
+    汎用ルール:
+    - 両方のフィールドが存在し、かつ両者の placeholder が互いに逆の語（例: 姓側が『名』・名側が『姓』）を
+      含む場合はスワップする。
+    - カナ/ひらがなについても『セイ/メイ』『せい/めい』の入れ違いを検出してスワップする。
+    - placeholder が取得できない/空文字の場合は何もしない。
+    """
+
+    def _pl(key: str) -> str:
+        try:
+            return str((field_mapping.get(key, {}) or {}).get("placeholder", "") or "")
+        except Exception:
+            return ""
+
+    def _swap(a: str, b: str) -> None:
+        if (a in field_mapping) and (b in field_mapping):
+            field_mapping[a], field_mapping[b] = (field_mapping[b], field_mapping[a])
+
+    sei_pl, mei_pl = _pl("姓"), _pl("名")
+    if sei_pl and mei_pl:
+        lc_sei = sei_pl.lower()
+        lc_mei = mei_pl.lower()
+        # 英日双方の代表的語彙で判定（境界は単語レベルでの曖昧一致を許容）
+        sei_has_mei = ("名" in sei_pl) or ("first name" in lc_sei) or ("given name" in lc_sei)
+        mei_has_sei = ("姓" in mei_pl) or ("last name" in lc_mei) or ("family name" in lc_mei)
+        if sei_has_mei and mei_has_sei:
+            _swap("姓", "名")
+
+    sei_kana_pl, mei_kana_pl = _pl("姓カナ"), _pl("名カナ")
+    if sei_kana_pl and mei_kana_pl:
+        sei_has_mei = ("メイ" in sei_kana_pl) or ("名" in sei_kana_pl)
+        mei_has_sei = ("セイ" in mei_kana_pl) or ("姓" in mei_kana_pl)
+        if sei_has_mei and mei_has_sei:
+            _swap("姓カナ", "名カナ")
+
+    sei_hira_pl, mei_hira_pl = _pl("姓ひらがな"), _pl("名ひらがな")
+    if sei_hira_pl and mei_hira_pl:
+        sei_has_mei = ("めい" in sei_hira_pl) or ("名" in sei_hira_pl)
+        mei_has_sei = ("せい" in mei_hira_pl) or ("姓" in mei_hira_pl)
+        if sei_has_mei and mei_has_sei:
+            _swap("姓ひらがな", "名ひらがな")
+
+
 async def normalize_kana_hiragana_fields(
     field_mapping: Dict[str, Any],
     form_structure: Any,

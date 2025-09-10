@@ -755,6 +755,16 @@ class UnmappedElementHandler:
                         raw = int(m.group(1))
                         return 1 if raw == 0 else raw
 
+                # 拡張: 配列/名付けインデックス first/center/last を [1]/[2]/[3] に対応
+                # 例: tel[first]/tel[center]/tel[last]
+                if any(k in blob for k in ("[first]", "[center]", "[last]")):
+                    if "[first]" in blob:
+                        return 1
+                    if "[center]" in blob:
+                        return 2
+                    if "[last]" in blob:
+                        return 3
+
                 # フォールバック: 末尾の一桁数字
                 tail = re.search(r"(\d)(?!.*\d)$", blob)
                 if tail:
