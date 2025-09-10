@@ -36,6 +36,7 @@ create table public.companies (
   analyzer_queued_at timestamp with time zone null,
   fetch_detail_queued boolean null,
   duplication boolean null,
+  black boolean null,
   constraint companies_pkey primary key (id)
 ) TABLESPACE pg_default;
 
@@ -141,6 +142,7 @@ create index IF not exists ix_companies_form_allowed on public.companies using b
 where
   (
     (form_url is not null)
+    and (black is null)
     and (COALESCE(prohibition_detected, false) = false)
   );
 
