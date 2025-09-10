@@ -1,0 +1,74 @@
+name: Claude Code Headless SDK Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  headless-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Sanity check via official Claude Code Action
+        id: action-hello
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          direct_prompt: |
+            hello (from anthropics/claude-code-action)
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code@^1
+          claude -v
+
+      - name: Prepare OAuth credentials for CLI (best-effort)
+        # Note: The official action above authenticates using the same token.
+        # This step writes a simple credentials file so the CLI can reuse it in headless mode.
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.claude"
+          # Minimal credentials file recognized by Claude Code for OAuth-based flows.
+          cat > "$HOME/.claude/.credentials.json" << 'JSON'
+          {
+            "accessToken": "${CLAUDE_CODE_OAUTH_TOKEN}",
+            "expiresAt": 4070908800
+          }
+          JSON
+          # Mask token just in case (GitHub also masks all secrets automatically)
+          echo "::add-mask::${CLAUDE_CODE_OAUTH_TOKEN}"
+          ls -la "$HOME/.claude" || true
+
+      - name: Run Claude Code in headless mode (CLI)
+        env:
+          # Provide the same OAuth token so the CLI can pick it up if supported.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Prompting Claude Code headlessly with: 'hello'"
+          # Use non-interactive output for CI parseability
+          claude -p "hello" --output-format json | tee claude_headless_output.json
+          echo "\n--- Result (truncated) ---"
+          jq -r '.result // .message // .type' claude_headless_output.json | head -n 50 || true
+          # Publish to job summary for convenience
+          {
+            echo "# Claude Code Headless Result"
+            echo
+            echo '\`\`\`json'
+            sed -e 's/\r$//' claude_headless_output.json | head -n 200
+            echo '\`\`\`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
