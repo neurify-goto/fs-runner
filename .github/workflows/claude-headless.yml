@@ -8,20 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Sanity check via official Claude Code Action
-        id: action-hello
-        uses: anthropics/claude-code-action@beta
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          direct_prompt: |
-            hello (from anthropics/claude-code-action)
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -71,4 +62,3 @@ jobs:
             sed -e 's/\r$//' claude_headless_output.json | head -n 200
             echo '\`\`\`'
           } >> "$GITHUB_STEP_SUMMARY"
-
