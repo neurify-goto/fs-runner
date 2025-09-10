@@ -268,9 +268,9 @@ def _passes_company_name(ei: Dict[str, Any], best_txt: str) -> bool:
         t.lower() in best_txt for t in [s.lower() for s in kana_like]
     ):
         return False
-    # 追加: 個人名を強く示すラベル/文脈がある要素は会社名として不採用
+    # 追加: 個人名を強く示す“明確な語”のみで判定（単漢字『名』『姓』は除外）
     personal_name_tokens = [
-        "お名前", "氏名", "姓名", "名前", "姓", "名", "first name", "given name",
+        "お名前", "氏名", "姓名", "full name", "first name", "given name", "last name", "family name",
     ]
     if any(t.lower() in best_txt for t in [s.lower() for s in personal_name_tokens]):
         return False

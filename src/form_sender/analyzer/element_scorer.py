@@ -1622,15 +1622,17 @@ class ElementScorer:
         # ポジティブマッチング（従来通り）
         keywords = definitive_mappings.get(field_name, [])
         positive_hit = any(keyword in context_lower for keyword in keywords)
-        # 会社名に限り、個人名コンテキスト（お名前/氏名/姓/名）が混在する場合は優先的に否定
-        if field_name == "会社名":
-            personal_ctx = ["お名前", "氏名", "姓名", "名前", "姓", "名", "first name", "given name"]
-            if any(t in context_lower for t in [s.lower() for s in personal_ctx]):
-                return -75
         if positive_hit:
             # 現フィールド種別の明確なラベルが含まれる場合は、
             # 後続のネガティブ検証をスキップして安定した高スコアを返す。
             return 90  # 高スコア（ネガティブと競合させない）
+        # 会社名に限り、個人名コンテキスト（お名前/氏名/姓名 等）が混在する場合は否定
+        if field_name == "会社名":
+            personal_ctx = [
+                "お名前", "氏名", "姓名", "full name", "first name", "given name", "last name", "family name"
+            ]
+            if any(t in context_lower for t in [s.lower() for s in personal_ctx]):
+                return -75
 
         # ネガティブセマンティック検証（汎用改善）
         # 明らかに異なるフィールドタイプの場合はマイナススコア

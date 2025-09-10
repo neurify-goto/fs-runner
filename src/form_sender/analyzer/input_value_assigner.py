@@ -514,16 +514,16 @@ class InputValueAssigner:
                     except Exception:
                         return ""
 
-                # 先に詳細欄（番地・建物など）を優先し、次に市区町村を判定
-                if any(h.lower() in blob for h in detail_hints):
-                    a4 = _nz((client or {}).get("address_4"))
-                    a5 = _nz((client or {}).get("address_5"))
-                    composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
-                    return composed if composed else value
+                # 市区町村ヒントを優先し、次に詳細欄（番地・建物など）を判定
                 if any(h.lower() in blob for h in city_hints):
                     a2 = _nz((client or {}).get("address_2"))
                     a3 = _nz((client or {}).get("address_3"))
                     composed = (a2 + a3).strip()
+                    return composed if composed else value
+                if any(h.lower() in blob for h in detail_hints):
+                    a4 = _nz((client or {}).get("address_4"))
+                    a5 = _nz((client or {}).get("address_5"))
+                    composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
                     return composed if composed else value
             except Exception:
                 pass
@@ -741,19 +741,19 @@ class InputValueAssigner:
                 v = client.get("address_1", "")
                 if v:
                     return v
-            # 先に番地・建物等の詳細ヒント（『丁目』含む）を優先
+            # 市区町村を優先
+            if any(t in blob for t in city_tokens):
+                v = join_nonempty(
+                    [client.get("address_2", ""), client.get("address_3", "")]
+                )
+                if v:
+                    return v
+            # 次に番地・建物等の詳細ヒント（『丁目』含む）
             if field_name.startswith("住所_補助") or any(
                 t in blob for t in detail_tokens
             ):
                 v = join_nonempty(
                     [client.get("address_4", ""), client.get("address_5", "")], "　"
-                )
-                if v:
-                    return v
-            # 次に市区町村ヒント
-            if any(t in blob for t in city_tokens):
-                v = join_nonempty(
-                    [client.get("address_2", ""), client.get("address_3", "")]
                 )
                 if v:
                     return v
