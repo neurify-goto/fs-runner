@@ -364,10 +364,30 @@ class IsolatedFormWorker:
         retry_count = 0
         start_time = time.time()
         max_processing_time = 30  # 最大処理時間（秒）
+        # 全体ウォッチドッグ（1社あたりのハードタイムアウト）
+        # まれにブラウザ/ページ操作が戻らずハングするケースを強制ブレークする
+        try:
+            from config.manager import get_worker_config
+            _cfg = get_worker_config()
+            # form_sender_multi_process.task_timeout を最優先（秒）
+            hard_timeout = int(_cfg.get('form_sender_multi_process', {}).get('task_timeout', 180))
+        except Exception:
+            hard_timeout = 180
+        if not hard_timeout or hard_timeout <= 0:
+            # フォールバック: pre_processing_max(ms) → 秒換算
+            try:
+                _ms = int((self.config or {}).get('timeout_settings', {}).get('pre_processing_max', 180000))
+                hard_timeout = max(30, int(_ms / 1000))
+            except Exception:
+                hard_timeout = 180
 
         while retry_count <= max_retries:
             try:
-                result = await self._execute_single_company_core_isolated(company, client_data, targeting_id)
+                # 全体を asyncio.wait_for で監視し、ハングを回避
+                result = await asyncio.wait_for(
+                    self._execute_single_company_core_isolated(company, client_data, targeting_id),
+                    timeout=hard_timeout,
+                )
 
                 # 成功時は復旧カウントリセット
                 if result.get("status") == "success":
@@ -375,6 +395,35 @@ class IsolatedFormWorker:
 
                 return result
 
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Worker {self.worker_id}: Company {record_id} processing timed out after {hard_timeout}s"
+                )
+                # ページ/ブラウザのクリーンアップ（状態不整合の可能性が高い）
+                try:
+                    if self.page:
+                        await self.page.close()
+                except Exception:
+                    pass
+                try:
+                    await self.browser_manager.close()
+                except Exception:
+                    pass
+                # 次のタスクに備えてブラウザを再起動（失敗しても続行）
+                try:
+                    await asyncio.sleep(0.5)
+                    await self.browser_manager.launch()
+                except Exception:
+                    logger.warning(
+                        f"Worker {self.worker_id}: Browser relaunch failed after timeout"
+                    )
+                return {
+                    "record_id": record_id,
+                    "status": "failed",
+                    "error_type": "TIMEOUT",
+                    "error_message": f"Hard timeout: processing exceeded {hard_timeout}s",
+                    "instruction_valid_updated": ErrorClassifier.should_update_instruction_valid("TIMEOUT"),
+                }
             except Exception as e:
                 error_message = str(e)
                 logger.error(f"Worker {self.worker_id}: Company {record_id} processing error: {error_message}")
