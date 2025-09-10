@@ -297,20 +297,6 @@ class RequiredRescue:
                         )
                     )
                     field_name = self._infer_logical_field_name_for_required(ei, contexts)
-
-                    # P1: 『その他』選択に付随する自由記述欄（その他の理由 等）は救済しない
-                    #   - ラジオで『その他』を選ばず別選択肢を選ぶ方針のため、
-                    #     ここでテキスト入力を強制登録すると二重入力や誤入力のリスクが高い。
-                    try:
-                        if field_name.startswith("auto_required_text_"):
-                            nic_all = (f"{(ei.get('name') or '')} {(ei.get('id') or '')} {(ei.get('class') or '')} {(ei.get('placeholder') or '')}").lower()
-                            ctx_all = " ".join([(getattr(c, 'text', '') or '') for c in (contexts or [])]).lower()
-                            other_like = ["その他", "その他の理由", "other", "reason", "remarks", "備考", "詳細"]
-                            if any(t.lower() in nic_all for t in other_like) or any(t.lower() in ctx_all for t in other_like):
-                                # この必須入力はスキップ
-                                continue
-                    except Exception:
-                        pass
                     # 追加補正A: 『住所』と推定されたが、属性/ラベルがフリガナ/カナ系を示唆する場合は『統合氏名カナ』に補正
                     try:
                         if field_name == "住所":

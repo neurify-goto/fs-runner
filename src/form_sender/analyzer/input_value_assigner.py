@@ -94,39 +94,7 @@ class InputValueAssigner:
                 src = field_info.get("copy_from_field", "")
                 value = input_assignments.get(src, {}).get("value", "")
 
-            # P2: auto_required_text_* は本関数の前段（_generate_enhanced_input_value）を経由しない。
-            #     ここで文脈を見て『その他/理由/備考/詳細/remarks/specify』系なら空文字へ上書きし、
-            #     UnmappedElementHandler 側の既定値（全角スペース等）を無効化する。
-            try:
-                if str(field_name).startswith("auto_required_text_"):
-                    blob = " ".join(
-                        [
-                            str(field_info.get("name", "") or ""),
-                            str(field_info.get("id", "") or ""),
-                            str(field_info.get("class", "") or ""),
-                            str(field_info.get("placeholder", "") or ""),
-                            str(field_info.get("best_context_text", "") or ""),
-                        ]
-                    ).lower()
-                    # context 配列側も確認
-                    try:
-                        ctx_blob = " ".join(
-                            [
-                                (c.get("text", "") if isinstance(c, dict) else "")
-                                for c in (field_info.get("context") or [])
-                            ]
-                        ).lower()
-                    except Exception:
-                        ctx_blob = ""
-                    reason_tokens = [
-                        "その他の理由", "その他", "理由", "詳細", "備考", "remarks", "remark", "reason", "specify",
-                    ]
-                    if any(t in blob for t in reason_tokens) or any(
-                        t in ctx_blob for t in reason_tokens
-                    ):
-                        value = ""
-            except Exception:
-                pass
+            # 『その他』付属テキストへの特別処置は撤廃（従来どおりの値で処理）
 
             input_assignments[field_name] = {
                 "selector": field_info["selector"],

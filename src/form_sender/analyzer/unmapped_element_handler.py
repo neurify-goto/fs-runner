@@ -976,16 +976,8 @@ class UnmappedElementHandler:
                     continue
                 selector = await self._generate_playwright_selector(el)
                 field_name = f"auto_required_text_{idx}"
-                # 既定の自動値（全角空白）。『その他の理由』系は自動入力しない（P1: テキスト入力リスク回避）
+                # 既定の自動値（全角空白）。
                 auto_value = "　"
-                try:
-                    merged_text = (blob + " " + ctx_text).lower()
-                    reason_tokens = ["その他の理由", "その他", "理由", "詳細", "備考", "remarks", "remark", "reason", "specify"]
-                    if any(tok in merged_text for tok in reason_tokens):
-                        # 追加の自動必須入力はスキップ
-                        continue
-                except Exception:
-                    pass
                 try:
                     nic = (
                         info.get("name", "")
