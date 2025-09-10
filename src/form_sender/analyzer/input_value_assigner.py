@@ -94,7 +94,66 @@ class InputValueAssigner:
                 src = field_info.get("copy_from_field", "")
                 value = input_assignments.get(src, {}).get("value", "")
 
-            # 『その他』付属テキストへの特別処置は撤廃（従来どおりの値で処理）
+            # P2: auto_required_text_* は UnmappedElementHandler からの auto_handled 経路に乗るため、
+            #     ここで『ラジオの “その他” 選択に紐づく追加入力』と推定できる場合のみ、
+            #     値を空文字に抑止してダミー全角スペース等の投入を避ける。
+            # 判定要件（全て満たす）:
+            #   - フィールド名が auto_required_text_*
+            #   - 同一 form 内に checked な input[type=radio] があり、その表示ラベルが『その他/other』を含む
+            #   - そのラジオと当該入力欄の垂直距離が一定以内（近接, 例: 320px）
+            try:
+                if str(field_name).startswith("auto_required_text_") and field_info.get("selector"):
+                    el = field_info.get("element")
+                    if el is not None:
+                        is_other_linked = await el.evaluate(
+                            """
+                            (inputEl) => {
+                              const norm = (s) => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+                              const form = inputEl.closest('form') || document.body;
+                              const rectIn = inputEl.getBoundingClientRect();
+                              const radios = Array.from(form.querySelectorAll('input[type="radio"]:checked'));
+                              const OTHER = ['その他','other'];
+                              const getLabelText = (r) => {
+                                const id = r.getAttribute('id');
+                                if (id) {
+                                  const lbl = form.querySelector(`label[for="${id}"]`);
+                                  if (lbl) return norm(lbl.innerText||lbl.textContent||'');
+                                }
+                                // 祖先<label>
+                                let p = r; let d=0;
+                                while (p && d<3) {
+                                  if ((p.tagName||'').toLowerCase()==='label') return norm(p.innerText||p.textContent||'');
+                                  p = p.parentElement; d++;
+                                }
+                                // 近傍兄弟
+                                const pick = (dir='next') => {
+                                  let sib = dir==='next'? r.nextSibling : r.previousSibling; let hops=0;
+                                  while (sib && hops<3) {
+                                    const t = sib.nodeType===3 ? sib.textContent : (sib.innerText||sib.textContent||'');
+                                    const nt = norm(t);
+                                    if (nt) return nt;
+                                    sib = dir==='next'? sib.nextSibling : sib.previousSibling; hops++;
+                                  }
+                                  return '';
+                                };
+                                return pick('next') || pick('prev');
+                              };
+                              for (const r of radios) {
+                                const label = getLabelText(r);
+                                if (!label) continue;
+                                if (!OTHER.some(o => label.includes(o))) continue;
+                                const rectR = r.getBoundingClientRect();
+                                const dy = Math.abs((rectR.top + rectR.bottom)/2 - (rectIn.top + rectIn.bottom)/2);
+                                if (dy <= 320) return true;
+                              }
+                              return false;
+                            }
+                            """
+                        )
+                        if is_other_linked:
+                            value = ""
+            except Exception:
+                pass
 
             input_assignments[field_name] = {
                 "selector": field_info["selector"],
