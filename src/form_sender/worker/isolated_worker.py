@@ -391,12 +391,21 @@ class IsolatedFormWorker:
 
         while retry_count <= max_retries:
             try:
-                # 全体を asyncio.wait_for で監視し、ハングを回避
-                result = await asyncio.wait_for(
-                    self._execute_single_company_core_isolated(company, client_data, targeting_id),
-                    timeout=hard_timeout,
-                )
+                # 内部ステップの asyncio.TimeoutError はそのまま伝播させると
+                # 外側の wait_for と区別が付かないため、内側発生分は一旦センチネルに包んで再送出する。
+                class _InnerStepTimeoutError(Exception):
+                    pass
 
+                async def _core_with_capture():
+                    try:
+                        return await self._execute_single_company_core_isolated(company, client_data, targeting_id)
+                    except asyncio.TimeoutError as ie:
+                        # 内部ステップのタイムアウト → 自動復旧判定のため通常エラー経路へ流す
+                        raise _InnerStepTimeoutError(str(ie)) from ie
+
+                # 全体ウォッチドッグ。ここでの asyncio.TimeoutError はハードタイムアウトのみ。
+                result = await asyncio.wait_for(_core_with_capture(), timeout=hard_timeout)
+                
                 # 成功時は復旧カウントリセット
                 if result.get("status") == "success":
                     self.recovery_manager.reset_recovery_count()
@@ -432,6 +441,10 @@ class IsolatedFormWorker:
                     "error_message": f"Hard timeout: processing exceeded {hard_timeout}s",
                     "instruction_valid_updated": ErrorClassifier.should_update_instruction_valid("TIMEOUT"),
                 }
+            except _InnerStepTimeoutError as e_inner:
+                # ここは従来の自動復旧に委ねるため、通常の例外経路にフォールスルーさせる
+                error_message = f"Inner step timeout: {str(e_inner)}"
+                raise Exception(error_message)
             except Exception as e:
                 error_message = str(e)
                 logger.error(f"Worker {self.worker_id}: Company {record_id} processing error: {error_message}")
