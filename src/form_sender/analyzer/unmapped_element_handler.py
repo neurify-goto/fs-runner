@@ -6,7 +6,7 @@ from .element_scorer import ElementScorer
 from .context_text_extractor import ContextTextExtractor
 from .field_combination_manager import FieldCombinationManager
 from .form_structure_analyzer import FormStructure
-from config.manager import get_prefectures
+from config.manager import get_prefectures, get_auto_fill_defaults
 from ..utils.privacy_consent_handler import PrivacyConsentHandler
 
 logger = logging.getLogger(__name__)
@@ -976,10 +976,29 @@ class UnmappedElementHandler:
                     continue
                 selector = await self._generate_playwright_selector(el)
                 field_name = f"auto_required_text_{idx}"
-                # （不要なスタブ関数を削除：後段の割当/assigner で処理されるためここでは未使用）
-                # ここでは、電話番号2/3のケースは後段の split_phone 処理が入らない環境でも
-                # 空白ではなく空文字にしてバリデーション衝突を避ける（全角空白より安全）
+                # 既定の自動値（全角空白）
                 auto_value = "　"
+                # 例外: 『その他の理由/理由/詳細/備考/specify/reason/remarks』系は既定文言を入力
+                try:
+                    merged_text = (blob + " " + ctx_text).lower()
+                    reason_tokens = [
+                        "その他の理由",
+                        "その他",
+                        "理由",
+                        "詳細",
+                        "備考",
+                        "remarks",
+                        "remark",
+                        "reason",
+                        "specify",
+                    ]
+                    if any(tok in merged_text for tok in reason_tokens):
+                        defaults = get_auto_fill_defaults() or {}
+                        auto_value = str(
+                            defaults.get("other_reason_text") or "Webからのお問い合わせ"
+                        )
+                except Exception:
+                    pass
                 try:
                     nic = (
                         info.get("name", "")
@@ -1736,6 +1755,103 @@ class UnmappedElementHandler:
                 "auto_handled": True,
                 "group_size": len(radio_list),
             }
+
+            # 追加: 『その他』選択時に連動する自由記述欄（理由/詳細等）を自動補完
+            try:
+                selected_text = (texts[idx] or "").strip().lower()
+                other_tokens = ["その他", "other", "該当なし"]
+                if any(tok in selected_text for tok in [t.lower() for t in other_tokens]):
+                    # 近傍コンテナ内の text/textarea を探索（可視・有効のみ）
+                    # 優先: 『理由/詳細/その他/備考/remarks/specify』系のトークンを含むもの
+                    # 探索範囲: 直近の label/li/dd/div/p を祖先方向へ最大2段
+                    near_input = None
+                    for depth in range(1, 3):
+                        try:
+                            xpath = (
+                                f"xpath=ancestor::*[self::label or self::li or self::dd or self::div or self::p][{depth}]//"
+                                "(input[@type='text' and not(@disabled)] | textarea[not(@disabled)])"
+                            )
+                            cand = radio.locator(xpath)
+                            count = await cand.count()
+                            if count == 0:
+                                continue
+                            # フィルタ: 既にマッピング済みの要素は除外
+                            candidates: List[Tuple[Locator, Dict[str, Any]]] = []
+                            for i in range(min(count, 5)):
+                                el = cand.nth(i)
+                                if id(el) in mapped_element_ids:
+                                    continue
+                                info = await self.element_scorer._get_element_info(el)
+                                if not info.get("visible", True) or not info.get("enabled", True):
+                                    continue
+                                candidates.append((el, info))
+                            if not candidates:
+                                continue
+                            # 優先順位: 属性/placeholderにキーワード含有
+                            def _score_reason_candidate(e: Tuple[Locator, Dict[str, Any]]) -> int:
+                                info = e[1] or {}
+                                blob = " ".join(
+                                    [
+                                        str(info.get("name") or ""),
+                                        str(info.get("id") or ""),
+                                        str(info.get("class") or ""),
+                                        str(info.get("placeholder") or ""),
+                                    ]
+                                ).lower()
+                                keys = [
+                                    "理由", "詳細", "自由", "備考", "remarks", "remark", "reason", "specify", "その他"
+                                ]
+                                return sum(1 for k in keys if k in blob)
+
+                            # スコアの高い候補を選択
+                            scored = sorted(
+                                [((e[0], e[1]), _score_reason_candidate((e[0], e[1]))) for e in candidates],
+                                key=lambda x: x[1],
+                                reverse=True,
+                            )
+                            near_input = scored[0][0][0] if scored else (candidates[0][0])
+                            if near_input is not None:
+                                break
+                        except Exception:
+                            continue
+
+                    if near_input is not None:
+                        # 既定文言を設定
+                        try:
+                            defaults = get_auto_fill_defaults() or {}
+                            reason_text = (
+                                str(defaults.get("other_reason_text") or "Webからのお問い合わせ")
+                            )
+                        except Exception:
+                            reason_text = "Webからのお問い合わせ"
+                        try:
+                            sel2 = await self._generate_playwright_selector(near_input)
+                        except Exception:
+                            sel2 = str(near_input)
+                        info2 = await self.element_scorer._get_element_info(near_input)
+                        handled_key = f"auto_text_other_reason_{group_name}"
+                        handled[handled_key] = {
+                            "element": near_input,
+                            "selector": sel2,
+                            "tag_name": info2.get("tag_name", "input"),
+                            "type": info2.get("type", "text"),
+                            "name": info2.get("name", ""),
+                            "id": info2.get("id", ""),
+                            "input_type": info2.get("type", "text"),
+                            "auto_action": "fill",
+                            "default_value": reason_text,
+                            "required": bool(await self.element_scorer._detect_required_status(near_input)),
+                            "auto_handled": True,
+                        }
+                        try:
+                            logger.info(
+                                f"Auto-filled 'other reason' text near radio group '{group_name}'",
+                                extra={"summary": True},
+                            )
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"other-reason autofill skipped: {e}")
         return handled
 
     async def _auto_handle_selects(

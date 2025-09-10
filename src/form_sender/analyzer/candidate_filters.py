@@ -20,11 +20,39 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
             str(element_info.get("id") or ""),
             str(element_info.get("class") or ""),
         ]).lower()
-        trap_tokens = ["honeypot", "honey", "trap", "botfield", "no-print", "noprint"]
+        # 罠/ダミー系の典型トークン（属性に含まれていれば早期除外）
+        trap_tokens = [
+            "honeypot",
+            "honey",
+            "trap",
+            "botfield",
+            "no-print",
+            "noprint",
+            # よくあるダミーフィールド表現
+            "dummy",
+        ]
         if any(t in name_id_cls for t in trap_tokens):
             return False
         if not bool(element_info.get("visible", True)):
             return False
+
+        # スタイル属性に基づく不可視/非操作要素の早期除外
+        # 代表例: pointer-events:none / opacity:0 / display:none / visibility:hidden / 画面外配置
+        try:
+            style = (element_info.get("style") or "").replace(" ", "").lower()
+        except Exception:
+            style = ""
+        if style:
+            hidden_signals = (
+                "display:none" in style
+                or "visibility:hidden" in style
+                or "pointer-events:none" in style
+                or "opacity:0" in style
+                or "z-index:-1" in style
+                or ("position:absolute" in style and ("left:-9999px" in style or "top:-9999px" in style))
+            )
+            if hidden_signals:
+                return False
 
         # 都道府県: select の場合は option に都道府県名が一定数含まれることを要求
         if field_name == "都道府県":

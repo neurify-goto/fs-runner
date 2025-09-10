@@ -358,6 +358,34 @@ class InputValueAssigner:
 
         blob = _ctx_blob()
 
+        # 『その他の理由』等の自由記述欄（required rescue/匿名テキスト）の安全な既定文言
+        # 条件:
+        # - auto_required_text_* などの匿名必須テキスト、または
+        # - name/id/class/placeholder/ラベルに『その他/理由/specify/reason/remarks/備考/詳細』等を含む
+        try:
+            is_auto_required = str(field_name).startswith("auto_required_text_")
+            reason_tokens = [
+                "その他の理由",
+                "その他",
+                "理由",
+                "詳細",
+                "備考",
+                "remarks",
+                "remark",
+                "reason",
+                "specify",
+            ]
+            looks_like_other_reason = any(t in blob for t in reason_tokens)
+            if is_auto_required and looks_like_other_reason:
+                from config.manager import get_auto_fill_defaults
+
+                defaults = get_auto_fill_defaults() or {}
+                txt = str(defaults.get("other_reason_text") or "Webからのお問い合わせ")
+                if not value:
+                    value = txt
+        except Exception:
+            pass
+
         if field_name == "郵便番号":
             pv = self.field_combination_manager.get_field_value_for_type(
                 "郵便番号", "single", client_data

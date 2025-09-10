@@ -1951,6 +1951,29 @@ class ElementScorer:
             ):
                 return True
 
+            # 5.1) テーブル構造の th 側クラス（例: <th class="required">）を検出
+            try:
+                th_class = await element.evaluate(
+                    """
+                    el => {
+                      // td祖先→直前のthを探索
+                      let p = el;
+                      while (p && p.tagName && p.tagName.toLowerCase() !== 'td') { p = p.parentElement; }
+                      if (!p) return '';
+                      let th = p.previousElementSibling;
+                      while (th && th.tagName && th.tagName.toLowerCase() !== 'th') { th = th.previousElementSibling; }
+                      if (!th) return '';
+                      return (th.getAttribute('class') || '').toLowerCase();
+                    }
+                """
+                )
+            except Exception:
+                th_class = ""
+            if isinstance(th_class, str) and any(
+                k in th_class for k in ["need", "required", "必須", "must", "mandatory"]
+            ):
+                return True
+
             # 5.5) ラベル近傍の必須マーク（span.require 等）の明示検出
             try:
                 near_mark = await element.evaluate(

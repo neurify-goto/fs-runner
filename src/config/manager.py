@@ -14,6 +14,7 @@ class ConfigManager:
         self.config_dir = Path(__file__).parent.parent.parent / "config"
         self._worker_config: Optional[Dict[str, Any]] = None
         self._retry_config: Optional[Dict[str, Any]] = None
+        self._auto_fill_defaults: Optional[Dict[str, Any]] = None
     
     def get_worker_config(self) -> Dict[str, Any]:
         """Worker設定を取得"""
@@ -122,6 +123,23 @@ class ConfigManager:
             )
             return self._get_default_choice_priority_config()
 
+    def get_auto_fill_defaults(self) -> Dict[str, Any]:
+        """自動入力のデフォルト値設定を取得。
+
+        - 例: ラジオで『その他』選択時の補助テキストなど
+        """
+        if self._auto_fill_defaults is None:
+            try:
+                self._auto_fill_defaults = self._load_config("auto_fill_defaults.json")
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    f"auto_fill_defaults.json missing or invalid, using defaults: {e}"
+                )
+                self._auto_fill_defaults = {
+                    "other_reason_text": "Webからのお問い合わせ",
+                }
+        return self._auto_fill_defaults
+
     def _get_default_choice_priority_config(self) -> Dict[str, Any]:
         """デフォルトの選択肢優先度設定"""
         return {
@@ -226,6 +244,10 @@ def get_privacy_consent_config() -> Dict[str, Any]:
 def get_choice_priority_config() -> Dict[str, Any]:
     """選択肢優先度（checkbox/radio用）設定を取得する便利関数"""
     return config_manager.get_choice_priority_config()
+
+def get_auto_fill_defaults() -> Dict[str, Any]:
+    """自動入力のデフォルト値設定を取得する便利関数"""
+    return config_manager.get_auto_fill_defaults()
 
 def get_prefectures() -> Dict[str, Any]:
     """都道府県名リストを取得する便利関数"""

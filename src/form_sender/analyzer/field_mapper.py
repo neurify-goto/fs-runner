@@ -18,7 +18,7 @@ class FieldMapper:
     """フィールドのマッピング処理を担当するクラス"""
 
     # 非必須だが高信頼であれば入力価値が高い項目（汎用・安全）
-    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所", "郵便番号", "郵便番号1", "郵便番号2"}
+    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所", "郵便番号", "郵便番号1", "郵便番号2", "会社名"}
 
     def __init__(
         self,
