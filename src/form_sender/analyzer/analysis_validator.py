@@ -28,9 +28,10 @@ class AnalysisValidator:
         if require_message and 'お問い合わせ本文' not in field_mapping:
             validation_issues.append("Required field 'お問い合わせ本文' is missing")
 
-        if dom_has_email:
-            if 'メールアドレス' not in field_mapping and 'メールアドレス' not in (input_assignments or {}):
-                validation_issues.append("Required field 'メールアドレス' is missing (email field exists in DOM)")
+        # DOMにemail欄が存在する場合は、『field_mapping』にメールアドレスがない時点で必須欠落とする
+        # （input_assignmentsの存在は合否に影響させない。mapping失敗を見逃さないため）
+        if dom_has_email and 'メールアドレス' not in field_mapping:
+            validation_issues.append("Required field 'メールアドレス' is missing (email field exists in DOM)")
 
         for field_name, assignment in input_assignments.items():
             value = assignment.get('value', '')
