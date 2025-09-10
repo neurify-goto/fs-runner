@@ -1745,7 +1745,7 @@ class UnmappedElementHandler:
                 "auto_handled": True,
                 "group_size": len(radio_list),
             }
-            return handled
+        return handled
 
     async def _auto_handle_selects(
         self,
