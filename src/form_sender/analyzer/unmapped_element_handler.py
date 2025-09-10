@@ -1606,9 +1606,8 @@ class UnmappedElementHandler:
                 logger.debug(f"Error grouping radio: {e}")
 
         pri1 = ["営業", "提案", "メール"]
-        # 『その他』は追加入力(自由記述)を誘発しやすいため、選択は避ける。
-        # 例外: 選択肢が『その他』しか無い場合のみ許容。
-        pri2 = ["該当なし"]  # 'その他' は優先語から除外
+        # 既定の優先語（従来どおり）
+        pri2 = ["その他", "other", "該当なし"]
 
         # クライアント性別の正規化（male/female/other）
         def _normalize_gender(val: str) -> Optional[str]:
@@ -1725,33 +1724,7 @@ class UnmappedElementHandler:
                     else self._choose_priority_index(texts, pri1, pri2)
                 )
 
-            # 最終安全弁: 選択結果が『その他/other』なら、非『その他』の候補に切り替え
-            try:
-                other_tokens = ["その他", "other"]
-                def _is_other(t: str) -> bool:
-                    tl = (t or "").strip().lower()
-                    return any(tok.lower() in tl for tok in other_tokens)
-
-                if idx is not None and 0 <= idx < len(texts) and _is_other(texts[idx]):
-                    # 非『その他』の候補を優先して再選定
-                    non_others = [i for i, t in enumerate(texts) if not _is_other(t)]
-                    # 『メール/問い合わせ』系を優先
-                    mail_like = [
-                        "メール", "mail", "email", "e-mail", "問い合わせ", "お問い合わせ", "contact"
-                    ]
-                    def _score_non_other(i: int) -> int:
-                        s = 0
-                        tl = (texts[i] or "").lower()
-                        if any(k.lower() in tl for k in [m.lower() for m in mail_like]):
-                            s += 2
-                        if any(k in (texts[i] or "") for k in pri1):
-                            s += 1
-                        return s
-                    if non_others:
-                        non_others.sort(key=_score_non_other, reverse=True)
-                        idx = non_others[0]
-            except Exception:
-                pass
+            # 『その他』回避フォールバックは撤廃（従来の選択ロジックへ復帰）
 
             radio, element_info = radio_list[idx]
             selector = await self._generate_playwright_selector(radio)
