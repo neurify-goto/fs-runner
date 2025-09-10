@@ -1,4 +1,4 @@
--- companies: statsダッシュボード（4項目）の集計高速化向け部分インデックス
+-- companies: statsダッシュボード（主要項目）の集計高速化向け部分インデックス
 -- 用途: scripts/companies_stats_rpc_functions.sql の get_companies_stats_all()
 -- 方針: duplication IS NULL を含むフィルタの高速化。
 
@@ -12,3 +12,7 @@ create index if not exists ix_companies_stats_with_form_url
   on public.companies (id)
   where form_url is not null and duplication is null;
 
+-- 3) 有効フォーム: form_found = true AND prohibition_detected IS NULL AND duplication IS NULL AND black IS NULL
+create index if not exists ix_companies_stats_valid_form
+  on public.companies (id)
+  where form_found is true and prohibition_detected is null and duplication is null and black is null;
