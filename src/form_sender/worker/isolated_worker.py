@@ -36,6 +36,7 @@ from ..communication.queue_manager import QueueManager, WorkerResult, WorkerTask
 from .input_handler import FormInputHandler
 from ..utils.error_classifier import ErrorClassifier
 from ..analyzer.rule_based_analyzer import RuleBasedAnalyzer
+from ..analyzer.sales_prohibition_detector import SalesProhibitionDetector
 from ..analyzer.success_judge import SuccessJudge
 from ..utils.data_mapper import ClientDataMapper
 from ..browser.manager import BrowserManager
@@ -105,7 +106,7 @@ class IsolatedFormWorker:
             self._content_sanitizer = None
 
     def _evaluate_prohibition_detection(self, sp: Dict[str, Any]) -> (bool, Dict[str, Any]):
-        """営業禁止検出の早期中断要否を判定（設定値で閾値を調整可能）。"""
+        """営業禁止検出の早期中断要否（設定駆動、AND 条件）。"""
         if not isinstance(sp, dict):
             return False, {
                 'level': 'none',
@@ -137,23 +138,28 @@ class IsolatedFormWorker:
             det = (self.config.get('worker_config') or {}).get('detectors', {}).get('prohibition', {})
             lvl_min = str(det.get('early_abort', {}).get('min_level', 'moderate')).lower()
             conf_lvl_min = str(det.get('early_abort', {}).get('min_confidence_level', 'high')).lower()
-            score_min = float(det.get('early_abort', {}).get('min_score', 80))
+            score_min = float(det.get('early_abort', {}).get('min_score', 85))
             matches_min = int(det.get('early_abort', {}).get('min_matches', 2))
         except Exception:
-            lvl_min, conf_lvl_min, score_min, matches_min = 'moderate', 'high', 80.0, 2
+            lvl_min, conf_lvl_min, score_min, matches_min = 'moderate', 'high', 85.0, 2
 
-        # 早期中断判定（レベルは序数比較: weak < mild < moderate < strict）
+        # 序数マップ
         order = {'weak': 0, 'mild': 1, 'moderate': 2, 'strict': 3}
         lvl_min_idx = order.get(lvl_min, 2)
         level_idx = order.get(level_l, order.get('moderate', 2))
 
-        should_abort = False
-        if level_idx >= lvl_min_idx:
-            should_abort = True
-        elif conf_level == conf_lvl_min or conf_score >= score_min:
-            should_abort = True
-        elif matches_count >= matches_min:
-            should_abort = True
+        conf_order = {'none': 0, 'very_low': 1, 'low': 2, 'medium': 3, 'high': 4}
+        conf_lvl_idx = conf_order.get(conf_level or 'none', 0)
+        conf_min_idx = conf_order.get(conf_lvl_min, 4)
+
+        has_flag = bool(sp.get('has_prohibition') or sp.get('prohibition_detected'))
+        should_abort = (
+            has_flag
+            and level_idx >= lvl_min_idx
+            and conf_lvl_idx >= conf_min_idx
+            and conf_score >= score_min
+            and matches_count >= matches_min
+        )
 
         summary = {
             'level': level,
@@ -707,6 +713,36 @@ class IsolatedFormWorker:
             # Analyzerと入力・送信はいずれも同一DOMコンテキストで実行する（iframe対応）
             self._dom_context = target_frame or self.page
 
+            # 営業禁止の事前検出（Analyzer 非依存）
+            try:
+                sp = await SalesProhibitionDetector(self._dom_context).detect_prohibition_text()
+                should_abort, summary = self._evaluate_prohibition_detection(sp or {})
+                if should_abort:
+                    logger.warning(
+                        f"Worker {self.worker_id}: Sales prohibition detected (record_id={record_id}, matches={summary.get('matches_count')}, level={summary.get('level')}, conf={summary.get('confidence_level')}/{summary.get('confidence_score')})"
+                    )
+                    return {
+                        "error": True,
+                        "record_id": record_id,
+                        "status": "failed",
+                        "error_type": "PROHIBITION_DETECTED",
+                        "error_message": "Sales prohibition detected",
+                        "additional_data": {
+                            "classify_context": {
+                                "stage": "pre_submission_check",
+                                "primary_error_type": "PROHIBITION_DETECTED",
+                                "is_bot_detected": False,
+                            },
+                            "prohibition_summary": {
+                                "detected": True,
+                                **summary,
+                                "detection_source": "Worker",
+                            },
+                        },
+                    }
+            except Exception as _e:
+                logger.debug(f"Worker {self.worker_id}: sales prohibition detection skipped: {_e}")
+
             analyzer = RuleBasedAnalyzer(self._dom_context)
             analysis_result = await analyzer.analyze_form(client_data)
             self._current_analysis_result = analysis_result
@@ -716,41 +752,7 @@ class IsolatedFormWorker:
                 logger.warning(f"Worker {self.worker_id}: Form analysis failed: {error_message}")
                 return {"error": True, "record_id": record_id, "status": "failed", "error_type": "ANALYSIS_FAILED", "error_message": error_message}
 
-            # 営業禁止検出（Analyzerの結果を用いた早期中断）
-            try:
-                sp = analysis_result.get('sales_prohibition') or {}
-                has_prohibition = bool(sp.get('has_prohibition') or sp.get('prohibition_detected'))
-                if has_prohibition:
-                    should_abort, summary = self._evaluate_prohibition_detection(sp)
-                    if should_abort:
-                        logger.warning(
-                            f"Worker {self.worker_id}: Sales prohibition detected (record_id={record_id}, matches={summary.get('matches_count')}, level={summary.get('level')}, conf={summary.get('confidence_level')}/{summary.get('confidence_score')})"
-                        )
-                        return {
-                            "error": True,
-                            "record_id": record_id,
-                            "status": "failed",
-                            "error_type": "PROHIBITION_DETECTED",
-                            "error_message": "Sales prohibition detected",
-                            "additional_data": {
-                                "classify_context": {
-                                    "stage": "pre_submission_check",
-                                    "primary_error_type": "PROHIBITION_DETECTED",
-                                    "is_bot_detected": False,
-                                },
-                                "prohibition_summary": {
-                                    "detected": True,
-                                    **summary,
-                                    "detection_source": "RuleBasedAnalyzer",
-                                },
-                            },
-                        }
-                    else:
-                        logger.info(
-                            f"Worker {self.worker_id}: sales prohibition signals detected but below early-abort threshold (record_id={record_id}, level={summary.get('level')}, conf={summary.get('confidence_level')}/{summary.get('confidence_score')}, matches={summary.get('matches_count')})"
-                        )
-            except Exception as _e:
-                logger.debug(f"Worker {self.worker_id}: sales prohibition early-check skipped: {_e}")
+            # Analyzer 由来の営業禁止チェックは廃止（上流で検出済み）
 
             # 1) まずは Analyzer の input_assignments（自動処理含む）を優先して入力
             input_assignments = analysis_result.get('input_assignments', {})
