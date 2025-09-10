@@ -140,7 +140,8 @@ class FieldMapper:
                 field_name, essential_fields_completed
             )
 
-            # 必須フィールドが検出されなかった場合は全フィールドをマッピング対象とする
+            # 必須フィールドが検出されなかった場合の救済方針
+            # fmi一般則: 「必須項目が0のときは原則必須として扱う（FAXは除外）」に整合
             treat_all_as_required = required_analysis and required_analysis.get(
                 "treat_all_as_required", False
             )
@@ -156,14 +157,19 @@ class FieldMapper:
                 ):
                     is_required_match = True
 
-            # treat_all_as_required は汎用誤入力を避けるため、
-            # 本質的必須（essential_fields）に限定して有効化する
+            # treat_all_as_required の扱い:
+            #  - これまでは essential_fields のみに限定していたが、
+            #    一般則に従い『会社名』も必須相当として扱う（FAXは除外）
+            #  - サイト特化ではなく汎用の精度向上。スコア/セーフガードは従来通り適用される。
             should_map_field = (
                 is_core_field
                 or is_required_match
                 or (
                     bool(treat_all_as_required)
-                    and (field_name in self.settings.get("essential_fields", []))
+                    and (
+                        (field_name in self.settings.get("essential_fields", []))
+                        or (field_name == "会社名")
+                    )
                 )
             )
 

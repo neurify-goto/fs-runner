@@ -1258,6 +1258,7 @@ class UnmappedElementHandler:
                 key = info.get("name") or info.get("id") or f"cb_{id(cb)}"
                 groups.setdefault(key, []).append((cb, info))
 
+            # 汎用優先語（従来）
             pri1 = ["営業", "提案", "メール"]
             pri2 = ["その他"]
 
@@ -1298,6 +1299,35 @@ class UnmappedElementHandler:
                         logger.debug(
                             f"Container required detection error for checkbox group '{group_key}': {e}"
                         )
+                # 追加: 『連絡方法/ご希望の連絡』系の選好チェックボックスは、
+                # 必須でなくても汎用的に1つ選択しておく（迷惑の少ない『メール』優先）。
+                # 汎用改善: サイト特化ではなく、語彙で判定。
+                is_contact_method_group = False
+                if not group_required:
+                    try:
+                        tokens = [
+                            "連絡方法",
+                            "ご希望連絡",
+                            "希望連絡",
+                            "連絡手段",
+                            "contact method",
+                            "preferred contact",
+                        ]
+                        # group_key だけでなくコンテキストも確認
+                        blob_key = (group_key or "").lower()
+                        if any(t in blob_key for t in ["連絡", "contact"]):
+                            is_contact_method_group = True
+                        else:
+                            for cb, _info in items:
+                                contexts = await self.context_text_extractor.extract_context_for_element(cb)
+                                best = (
+                                    self.context_text_extractor.get_best_context_text(contexts) or ""
+                                ).lower()
+                                if any(tok in best for tok in [t.lower() for t in tokens]):
+                                    is_contact_method_group = True
+                                    break
+                    except Exception:
+                        is_contact_method_group = False
                 # 追加: プライバシー/規約同意の文脈検出（name/id/classに現れないケースの補完）
                 is_privacy_group = False
                 if not group_required:
@@ -1368,7 +1398,7 @@ class UnmappedElementHandler:
                     except Exception:
                         is_privacy_group = False
 
-                if not group_required and not is_privacy_group:
+                if not group_required and not is_privacy_group and not is_contact_method_group:
                     continue
 
                 texts: List[str] = []
@@ -1398,6 +1428,9 @@ class UnmappedElementHandler:
                         if any(k in tl for k in ["同意", "agree", "承諾"]):
                             idx = i
                             break
+                # 連絡方法グループは『メール優先』（英語/多言語に対応）
+                elif is_contact_method_group:
+                    idx = self._choose_contact_method_index(texts)
                 else:
                     idx = self._choose_priority_index(texts, pri1, pri2)
                 cb, info = items[idx]
@@ -1974,7 +2007,12 @@ class UnmappedElementHandler:
         self, texts: List[str], pri1: List[str], pri2: List[str]
     ) -> int:
         def last_match(keys: List[str]) -> Optional[int]:
-            idxs = [i for i, t in enumerate(texts) if any(k in (t or "") for k in keys)]
+            idxs = []
+            low_keys = [k.lower() for k in keys]
+            for i, t in enumerate(texts):
+                tl = (t or "").lower()
+                if any(k in tl for k in low_keys):
+                    idxs.append(i)
             return idxs[-1] if idxs else None
 
         idx = last_match(pri1)
@@ -1984,6 +2022,37 @@ class UnmappedElementHandler:
         if idx is not None:
             return idx
         return max(0, len(texts) - 1)
+
+    def _choose_contact_method_index(self, texts: List[str]) -> int:
+        """連絡方法チェックボックスの優先選択（メール優先）。
+
+        優先順位: Email > Any/Either/No preference > Phone > Fax（最後の手段）
+        - 大文字小文字・全角半角を吸収して判定
+        """
+        email_tokens = [
+            "email", "e-mail", "mail", "メール", "eメール", "電子メール", "mail address", "email address"
+        ]
+        any_tokens = [
+            "any", "either", "no preference", "どちらでも", "問いません", "どれでも"
+        ]
+        phone_tokens = [
+            "phone", "tel", "telephone", "call", "携帯", "モバイル", "電話"
+        ]
+        fax_tokens = ["fax", "ファックス", "ファクス"]
+
+        def find_first(keys: List[str]) -> Optional[int]:
+            lk = [k.lower() for k in keys]
+            for i, t in enumerate(texts):
+                tl = (t or "").lower()
+                if any(k in tl for k in lk):
+                    return i
+            return None
+
+        for keys in (email_tokens, any_tokens, phone_tokens, fax_tokens):
+            idx = find_first(keys)
+            if idx is not None:
+                return idx
+        return 0
 
     def _choose_gender_index(self, texts: List[str]) -> int:
         male_keywords = ["男", "男性", "male", "man", "Men", "Male"]
