@@ -591,6 +591,53 @@ class RequiredRescue:
                 except Exception as e:
                     logger.debug(f"Ensure required mapping for element failed: {e}")
 
+        # 追加救済: 必須select要素を 'auto_required_select_N' として登録
+        try:
+            selects = classified_elements.get("selects", []) or []
+            auto_idx = 1
+            for el in selects:
+                try:
+                    if id(el) in used_elements:
+                        continue
+                    ei = await self.element_scorer._get_element_info(el)
+                    nm = (ei.get("name") or "")
+                    ide = (ei.get("id") or "")
+                    if (nm, ide) in used_names_ids:
+                        continue
+                    # 必須判定（属性 or ラベルマーカー）
+                    is_req = await self.element_scorer._detect_required_status(el)
+                    if not is_req:
+                        ctxs = await self.context_text_extractor.extract_context_for_element(el)
+                        txts = " ".join([(getattr(c, 'text', '') or '') for c in (ctxs or [])])
+                        req_markers = ["*", "必須", "[必須]", "［必須］"]
+                        is_req = any(m in txts for m in req_markers)
+                    if not is_req:
+                        continue
+                    # 既存の field_mapping にセレクタ一致があればスキップ
+                    try:
+                        sel = await self._generate_playwright_selector(el)
+                        if any((v or {}).get("selector") == sel for v in field_mapping.values()):
+                            continue
+                    except Exception:
+                        sel = ""
+                    # 登録
+                    details = {"element_info": ei, "total_score": 80}
+                    info = await self._create_enhanced_element_info(el, details, [])
+                    info["input_type"] = "select"
+                    info["required"] = True
+                    key = f"auto_required_select_{auto_idx}"
+                    auto_idx += 1
+                    temp_value = self._generate_temp_field_value(key)
+                    if self.duplicate_prevention.register_field_assignment(key, temp_value, 80, info):
+                        field_mapping[key] = info
+                        used_elements.add(id(el))
+                        used_names_ids.add((nm, ide))
+                except Exception:
+                    # 個別selectの失敗は無視して継続
+                    continue
+        except Exception as e:
+            logger.debug(f"Required select rescue skipped: {e}")
+
     def _is_nonfillable_required(self, element_info: Dict[str, Any]) -> bool:
         name_id_cls = (
             (element_info.get("name", "") or "")

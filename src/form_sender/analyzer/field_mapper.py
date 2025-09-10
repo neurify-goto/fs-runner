@@ -2293,8 +2293,10 @@ class FieldMapper:
             "お名前",
             "名前",
         ]
-        has_kana = any(t in name_id_cls for t in kana_tokens) or ("フリガナ" in ctx_text)
-        has_hira = any(t in name_id_cls for t in hira_tokens) or ("ひらがな" in ctx_text)
+        # カナ/ひらがなの判定は、要素の属性か直近の文脈(best)に限定し、
+        # 離れた位置にある別フィールドの『フリガナ』見出しに引っ張られないようにする。
+        has_kana = any(t in name_id_cls for t in kana_tokens) or ("フリガナ" in ctx_best)
+        has_hira = any(t in name_id_cls for t in hira_tokens) or ("ひらがな" in ctx_best)
         # 属性(first/last)の手掛かりを最優先に用い、文脈は補助として利用
         attr_last = any(t in name_id_cls for t in last_tokens)
         attr_first = any(t in name_id_cls for t in first_tokens)

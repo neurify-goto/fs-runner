@@ -368,6 +368,25 @@ class RuleBasedAnalyzer:
             split_groups = self._detect_split_field_patterns(combined_for_split)
 
             # --- Value Assignment & Validation ---
+            # マッピングの事前サニタイズ（除外/負スコア候補を排除）
+            try:
+                sanitized = {}
+                for k, finfo in (self.field_mapping or {}).items():
+                    try:
+                        score = int(finfo.get("score", 0) or 0)
+                    except Exception:
+                        score = 0
+                    excl = False
+                    try:
+                        excl = bool(((finfo.get("score_details", {}) or {}).get("excluded", False)))
+                    except Exception:
+                        excl = False
+                    if score < 0 or excl:
+                        continue
+                    sanitized[k] = finfo
+                self.field_mapping = sanitized
+            except Exception as e:
+                logger.debug(f"pre-sanitize field_mapping skipped: {e}")
             self.assigner.required_analysis = required_analysis
             self.assigner.unified_field_info = unified_field_info
             input_assignment = await self.assigner.assign_enhanced_input_values(
@@ -404,6 +423,26 @@ class RuleBasedAnalyzer:
                                 fi["source"] = (src or "") + ("|value_propagated")
             except Exception:
                 pass
+
+            # マッピングの最終サニタイズ: 除外/負スコアの候補は field_mapping から除去
+            try:
+                sanitized = {}
+                for k, finfo in (self.field_mapping or {}).items():
+                    try:
+                        score = int(finfo.get("score", 0) or 0)
+                    except Exception:
+                        score = 0
+                    excl = False
+                    try:
+                        excl = bool(((finfo.get("score_details", {}) or {}).get("excluded", False)))
+                    except Exception:
+                        excl = False
+                    if score < 0 or excl:
+                        continue
+                    sanitized[k] = finfo
+                self.field_mapping = sanitized
+            except Exception as e:
+                logger.debug(f"sanitize field_mapping skipped: {e}")
 
             # DOM にメール欄が存在するか（型/属性/ラベルの簡易検出）
             def _dom_has_email_field() -> bool:

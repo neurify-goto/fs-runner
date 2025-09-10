@@ -697,7 +697,10 @@ class InputValueAssigner:
             ]
             blob = " ".join([p for p in parts if p]).lower()
 
-            city_tokens = ["市区町村", "市区", "郡", "市", "city", "区", "町", "town", "丁目"]
+            city_tokens = [
+                "市区町村", "市区", "郡", "市", "city", "locality", "p-locality",
+                "区", "町", "town", "丁目"
+            ]
             detail_tokens = [
                 "番地",
                 "丁目",
@@ -717,6 +720,10 @@ class InputValueAssigner:
                 "addr_2",
                 "address2",
                 "address_2",
+                "street-address",
+                "extended-address",
+                "p-street-address",
+                "p-extended-address",
                 "address-line2",
                 "addressline2",
                 "line2",
@@ -733,17 +740,19 @@ class InputValueAssigner:
                 v = client.get("address_1", "")
                 if v:
                     return v
+            # 市区町村ヒントを優先（WP系クラスが同居するケースへの対処）
+            if any(t in blob for t in city_tokens):
+                v = join_nonempty(
+                    [client.get("address_2", ""), client.get("address_3", "")]
+                )
+                if v:
+                    return v
+            # その次に番地・建物等の詳細ヒント
             if field_name.startswith("住所_補助") or any(
                 t in blob for t in detail_tokens
             ):
                 v = join_nonempty(
                     [client.get("address_4", ""), client.get("address_5", "")], "　"
-                )
-                if v:
-                    return v
-            if any(t in blob for t in city_tokens):
-                v = join_nonempty(
-                    [client.get("address_2", ""), client.get("address_3", "")]
                 )
                 if v:
                     return v
