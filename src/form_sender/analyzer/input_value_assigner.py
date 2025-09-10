@@ -480,7 +480,7 @@ class InputValueAssigner:
                     if isinstance(client_data, dict) and "client" in client_data
                     else client_data
                 )
-                city_hints = ["市区町村", "市区", "city", "郡", "区", "町", "town", "丁目"]
+                city_hints = ["市区町村", "市区", "city", "郡", "区", "町", "town"]
                 detail_hints = [
                     "番地",
                     "丁目",
@@ -514,15 +514,16 @@ class InputValueAssigner:
                     except Exception:
                         return ""
 
-                if any(h.lower() in blob for h in city_hints):
-                    a2 = _nz((client or {}).get("address_2"))
-                    a3 = _nz((client or {}).get("address_3"))
-                    composed = (a2 + a3).strip()
-                    return composed if composed else value
+                # 先に詳細欄（番地・建物など）を優先し、次に市区町村を判定
                 if any(h.lower() in blob for h in detail_hints):
                     a4 = _nz((client or {}).get("address_4"))
                     a5 = _nz((client or {}).get("address_5"))
                     composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
+                    return composed if composed else value
+                if any(h.lower() in blob for h in city_hints):
+                    a2 = _nz((client or {}).get("address_2"))
+                    a3 = _nz((client or {}).get("address_3"))
+                    composed = (a2 + a3).strip()
                     return composed if composed else value
             except Exception:
                 pass
@@ -699,8 +700,8 @@ class InputValueAssigner:
 
             city_tokens = [
                 "市区町村", "市区", "郡", "市", "city", "locality", "p-locality",
-                "区", "町", "town", "丁目"
-            ]
+                "区", "町", "town"
+            ]  # 『丁目』は番地系（詳細）に属するため除外
             detail_tokens = [
                 "番地",
                 "丁目",
@@ -740,19 +741,19 @@ class InputValueAssigner:
                 v = client.get("address_1", "")
                 if v:
                     return v
-            # 市区町村ヒントを優先（WP系クラスが同居するケースへの対処）
-            if any(t in blob for t in city_tokens):
-                v = join_nonempty(
-                    [client.get("address_2", ""), client.get("address_3", "")]
-                )
-                if v:
-                    return v
-            # その次に番地・建物等の詳細ヒント
+            # 先に番地・建物等の詳細ヒント（『丁目』含む）を優先
             if field_name.startswith("住所_補助") or any(
                 t in blob for t in detail_tokens
             ):
                 v = join_nonempty(
                     [client.get("address_4", ""), client.get("address_5", "")], "　"
+                )
+                if v:
+                    return v
+            # 次に市区町村ヒント
+            if any(t in blob for t in city_tokens):
+                v = join_nonempty(
+                    [client.get("address_2", ""), client.get("address_3", "")]
                 )
                 if v:
                     return v
