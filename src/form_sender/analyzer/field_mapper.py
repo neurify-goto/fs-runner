@@ -2387,6 +2387,15 @@ class FieldMapper:
 
         # Prioritize split-specific logical names when tokens available
         if has_kana:
+            # フリガナの単一入力（セイ/メイのヒントが無い）なら統合カナを優先
+            try:
+                has_furigana_label = ("フリガナ" in ctx_text) or ("furigana" in ctx_text.lower())
+                has_sei = any(t in (ctx_text + " " + name_id_cls) for t in ["セイ", "姓", "sei", "lastname", "family"])
+                has_mei = any(t in (ctx_text + " " + name_id_cls) for t in ["メイ", "名", "mei", "firstname", "given"])
+                if has_furigana_label and not (has_sei or has_mei):
+                    return "統合氏名カナ"
+            except Exception:
+                pass
             if is_last and not is_first:
                 return "姓カナ"
             if is_first and not is_last:
