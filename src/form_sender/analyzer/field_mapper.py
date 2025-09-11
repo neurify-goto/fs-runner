@@ -2202,6 +2202,13 @@ class FieldMapper:
             if any(tok in blob for tok in postal_tokens):
                 return "郵便番号"
 
+        # 都道府県の推定（prefecture 専用）
+        pref_tokens = ["都道府県", "prefecture", "pref", "p-region", "region"]
+        if tag in ["input", "select"] and typ in ["", "text"]:
+            blob_pref = f"{name_id_cls} {ctx_text}"
+            if any(tok in blob_pref for tok in pref_tokens):
+                return "都道府県"
+
         # 郵便番号でない場合に限り、type=tel を電話番号として扱う
         if tag == "input" and typ == "tel":
             return "電話番号"
