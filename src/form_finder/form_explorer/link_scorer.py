@@ -21,6 +21,34 @@ class LinkScorer:
         self._score_cache = {}  # URL -> スコアのキャッシュ
         self.visited_urls = set()  # 訪問済みURLトラッカー
         
+        # 設定ファイル由来の除外キーワード（採用/応募系など）
+        try:
+            from config.manager import get_form_finder_rules
+            from form_sender.security.log_sanitizer import sanitize_for_log  # noqa: F401  # for logging only
+
+            rules = get_form_finder_rules()
+            link_exclusions = rules.get("link_exclusions", {}) if isinstance(rules, dict) else {}
+            self.excluded_link_keywords: List[str] = [
+                str(k) for k in link_exclusions.get(
+                    "exclude_if_text_or_url_contains_any",
+                    [
+                        # 日本語
+                        "採用", "求人", "応募", "募集", "エントリー", "新卒", "中途", "キャリア",
+                        # 英語系
+                        "recruit", "recruitment", "career", "careers", "job", "jobs", "employment",
+                    ],
+                )
+                if k
+            ]
+            # 事前正規化（高速化）
+            self._excluded_kw_norm: List[str] = [s.lower() for s in self.excluded_link_keywords if s]
+        except Exception:
+            # フォールバック（安全側）
+            self.excluded_link_keywords = [
+                "採用", "求人", "応募", "募集", "エントリー", "recruit", "careers", "job",
+            ]
+            self._excluded_kw_norm = [s.lower() for s in self.excluded_link_keywords]
+        
         # スコア設定値（ハードコード）
         self.score_premium_text = 300
         self.score_high_priority_text = 200
@@ -133,6 +161,20 @@ class LinkScorer:
         
         # DOM順序管理（本家準拠新機能）
         self.dom_index_counter = 0  # DOM順序カウンター
+
+    def _is_excluded_link(self, link: Dict[str, Any]) -> bool:
+        """設定ベースのNGキーワードに該当するリンクを除外する。
+
+        テキストとURLの双方を対象に大小文字無視で部分一致判定を行う。
+        """
+        try:
+            text = (link.get("text") or link.get("title") or "").lower()
+            href = (link.get("href") or "").lower()
+            haystack_norm = text + " " + href
+            return any(kw in haystack_norm for kw in self._excluded_kw_norm)
+        except Exception:
+            # 例外時は保守的に除外しない
+            return False
 
     def score_links(self, links: List[Dict[str, Any]], base_url: str) -> List[Tuple[Dict[str, Any], int]]:
         """リンクリストをスコアリングして優先順位付き結果を返す"""
@@ -389,6 +431,18 @@ class LinkScorer:
             
             # 基本的なURL検証のみ
             if href and isinstance(href, str) and len(href.strip()) > 0:
+                # 採用/応募系などの除外リンクをスキップ
+                if self._is_excluded_link(link):
+                    try:
+                        from form_sender.security.log_sanitizer import sanitize_for_log
+
+                        logger.debug(
+                            f"除外リンク（採用/応募系）: text={sanitize_for_log(str(link.get('text', '')))} href={sanitize_for_log(href)}"
+                        )
+                    except Exception:
+                        logger.debug("除外リンク（採用/応募系）をスキップ")
+                    continue
+
                 # 既に訪問済みかチェック
                 if href not in self.visited_urls:
                     link['href'] = href.strip()

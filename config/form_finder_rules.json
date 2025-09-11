@@ -15,6 +15,26 @@
       "ご相談",
       "連絡"
     ]
+  },
+  "link_exclusions": {
+    "exclude_if_text_or_url_contains_any": [
+      "採用",
+      "求人",
+      "応募",
+      "募集",
+      "エントリー",
+      "recruit",
+      "recruitment",
+      "career",
+      "careers",
+      "job",
+      "jobs",
+      "employment"
+    ]
+  },
+  "form_validation": {
+    "ng_keywords_any": [
+      "学校"
+    ]
   }
 }
-

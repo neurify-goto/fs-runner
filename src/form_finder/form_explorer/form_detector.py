@@ -75,12 +75,19 @@ class FormDetector:
                 "allow_if_general_contact_keywords_any",
                 ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"],
             )
+
+            # 追加のフォームNGワード（例: 学校など）。存在しない場合は空配列。
+            form_validation = rules.get("form_validation", {})
+            self.form_ng_keywords: List[str] = [
+                str(k) for k in form_validation.get("ng_keywords_any", []) if k
+            ]
         except Exception:
             # 設定読み込み失敗時のフォールバック（保守的に同じ規則を適用）
             self.recruitment_exclusion_keywords = ["学歴", "大学", "出身", "経歴"]
             self.general_contact_whitelist_keywords = [
                 "お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"
             ]
+            self.form_ng_keywords = []
 
     async def find_and_validate_forms(self, page: Page, html_content: str) -> List[Dict[str, Any]]:
         """ページ内のフォームを発見・検証（本家準拠版）"""
@@ -883,6 +890,11 @@ class FormDetector:
                 logger.debug("採用専用フォームと推定のため除外")
                 return False
 
+            # 3.6 NGワード（学校など）を含むフォームの除外
+            if self._contains_forbidden_form_terms(form_data):
+                logger.debug("NGワードを含むためフォーム除外（学校等）")
+                return False
+
             # 4. 送信機能の存在チェック
             has_submit_capability = self._has_submit_capability(inputs, buttons, form_data)
             if not has_submit_capability:
@@ -1036,6 +1048,36 @@ class FormDetector:
                 pass
 
             return True
+        except Exception:
+            return False
+
+    def _contains_forbidden_form_terms(self, form_data: Dict[str, Any]) -> bool:
+        """設定ファイルのNGワード（例: 学校）を含むかを判定。
+
+        周辺テキスト、ボタン文言、入力プレースホルダ/名前/IDを対象に部分一致で検出する。
+        """
+        try:
+            if not self.form_ng_keywords:
+                return False
+
+            texts: List[str] = []
+            texts.append(form_data.get('surroundingText') or form_data.get('surrounding_text') or '')
+            texts.extend([(btn.get('text') or '') for btn in form_data.get('buttons', [])])
+
+            for inp in form_data.get('inputs', []) or []:
+                texts.append(inp.get('placeholder') or '')
+                texts.append(inp.get('name') or '')
+                texts.append(inp.get('id') or '')
+
+            haystack_norm = ' '.join(texts).lower()
+            found = any((str(kw).lower() in haystack_norm) for kw in self.form_ng_keywords if kw)
+            if found:
+                try:
+                    # ログは具体語を出さず方針のみ
+                    logger.debug("フォームNGワード検出: 設定キーワードに一致")
+                except Exception:
+                    pass
+            return found
         except Exception:
             return False
 
