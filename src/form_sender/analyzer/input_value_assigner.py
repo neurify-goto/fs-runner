@@ -755,14 +755,20 @@ class InputValueAssigner:
                 "street",
             ]
             pref_tokens = ["都道府県", "prefecture", "県", "都", "府"]
+            # 都道府県専用でない場合を除外するキーワード
+            non_pref_keywords = ["以下", "以降", "から", "まで", "を入力", "住所", "番地", "丁目"]
 
             def join_nonempty(parts, sep=""):
                 return sep.join([p for p in parts if p])
 
+            # 都道府県トークンがあっても、一般住所欄の可能性がある場合は除外
             if any(t in blob for t in pref_tokens):
-                v = client.get("address_1", "")
-                if v:
-                    return v
+                # 除外キーワードがある場合は都道府県専用ではない
+                is_general_address = any(keyword in blob for keyword in non_pref_keywords)
+                if not is_general_address:
+                    v = client.get("address_1", "")
+                    if v:
+                        return v
             # 衝突回避: city/detail 両ヒット時はヒット強度で判定（同点なら city 優先）
             _has_city = any(t in blob for t in city_tokens)
             _has_detail_flag = field_name.startswith("住所_補助") or any(
