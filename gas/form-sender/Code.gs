@@ -298,6 +298,11 @@ function startFormSenderFromTriggerAt7() {
       console.warn('既存form-senderワークフロー停止中に例外:', e);
     }
 
+    // 停止後1分間待機
+    console.log('ワークフロー停止後、1分間待機します...');
+    Utilities.sleep(60000); // 1分間（60,000ミリ秒）待機
+    console.log('待機完了。新規ワークフローを開始します。');
+
     // （既存トリガー削除は関数冒頭で実施済み）
 
     // アクティブtargetingの処理
@@ -374,6 +379,11 @@ function startFormSenderFromTriggerAt13() {
     } catch (e) {
       console.warn('既存form-senderワークフロー停止中に例外:', e);
     }
+
+    // 停止後1分間待機
+    console.log('ワークフロー停止後、1分間待機します...');
+    Utilities.sleep(60000); // 1分間（60,000ミリ秒）待機
+    console.log('待機完了。新規ワークフローを開始します。');
 
     // （既存トリガー削除は関数冒頭で実施済み）
 
