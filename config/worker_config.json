@@ -148,8 +148,8 @@
     "backoff_jitter_ratio": 0.2,
     "classify_cache_max_size": 256,
     "classify_cache_ttl_sec": 600,
-    "requeue_interval_seconds": 300,
-    "requeue_stale_minutes": 15
+    "requeue_interval_seconds": 60,
+    "requeue_stale_minutes": 5
   },
   "detectors": {
     "prohibition": {

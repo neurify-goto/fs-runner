@@ -6,7 +6,8 @@ create or replace function public.claim_next_batch(
   p_run_id text,
   p_limit integer,
   p_shard_id integer default null,
-  p_max_daily integer default null
+  p_max_daily integer default null,
+  p_assigned_grace_minutes integer default 2 -- 直近割当の猶予分（cap消費に含めない）
 )
 returns table(company_id bigint)
 language plpgsql
@@ -44,11 +45,14 @@ begin
        and s.submitted_at >= v_start_utc
        and s.submitted_at <  v_end_utc;
 
+    -- 直近に割り当てられた行は短時間の猶予を与え、cap消費から除外する
+    -- 目的: 大量並列直後の一時的な『cap先食い』で窒息しないようにする
     select count(*) into v_today_assigned
       from public.send_queue sq
      where sq.target_date_jst = p_target_date
        and sq.targeting_id    = p_targeting_id
-       and sq.status          = 'assigned';
+       and sq.status          = 'assigned'
+       and (sq.assigned_at is null or sq.assigned_at < now() - (coalesce(p_assigned_grace_minutes, 2) || ' minutes')::interval);
 
     v_effective_limit := greatest(0, least(p_limit, p_max_daily - v_today_success - v_today_assigned));
     if v_effective_limit <= 0 then
