@@ -120,7 +120,7 @@ begin
     raise notice 'CQT_STEP:END stage=1 inserted=%, last_id=%, has_more=%, elapsed_ms=%', v_inserted, v_last_id, v_has_more, v_elapsed_ms::bigint;
     return query select v_inserted, v_last_id, v_has_more, v_stage;
   else
-    -- Stage2: 成功履歴なし（当日未送信）
+    -- Stage2: 成功履歴なし（当日未送信）かつ直近2週間(JST)に送信試行が無い
     v_sql :=
       'with hist as (
          select company_id, bool_or(success = true) as has_success
@@ -137,6 +137,12 @@ begin
                  and s_today.company_id = c.id
                  and s_today.submitted_at >= ($1::timestamp AT TIME ZONE ''Asia/Tokyo'')
                  and s_today.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
+           -- 直近2週間(JST)に送信試行があるものは除外
+           left join public.submissions s_recent14
+                  on s_recent14.targeting_id = $2
+                 and s_recent14.company_id = c.id
+                 and s_recent14.submitted_at >= (($1::timestamp - interval ''14 days'') AT TIME ZONE ''Asia/Tokyo'')
+                 and s_recent14.submitted_at <  (($1::timestamp) AT TIME ZONE ''Asia/Tokyo'')
            join hist h on h.company_id = c.id
          where c.id > $6 and c.id <= ($6 + $7)
             and c.form_url is not null
@@ -144,6 +150,7 @@ begin
             and coalesce(c.prohibition_detected, false) = false
             and c.duplication is null
             and s_today.id is null
+            and s_recent14.id is null
             and coalesce(h.has_success, false) = false';
     if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
       v_sql := v_sql || ' and (' || p_targeting_sql || ')';
