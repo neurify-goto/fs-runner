@@ -8,6 +8,8 @@ GitHub Actions対応フォーム検出クラス（本家準拠版）
 
 import logging
 from typing import List, Dict, Any, Optional
+from config.manager import get_form_finder_rules
+from form_sender.security.log_sanitizer import sanitize_for_log
 from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,25 @@ class FormDetector:
             '[class*="contact"]', '[class*="inquiry"]', '[class*="form"]',  # 部分マッチ
             '[id*="contact"]', '[id*="inquiry"]', '[id*="form"]'        # ID部分マッチ
         ]
+
+        # 採用専用フォーム除外（設定ファイル駆動）
+        try:
+            rules = get_form_finder_rules()
+            rec = rules.get("recruitment_only_exclusion", {})
+            self.recruitment_exclusion_keywords: List[str] = rec.get(
+                "exclude_if_keywords_present_any",
+                ["学歴", "大学", "出身", "経歴"],
+            )
+            self.general_contact_whitelist_keywords: List[str] = rec.get(
+                "allow_if_general_contact_keywords_any",
+                ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"],
+            )
+        except Exception:
+            # 設定読み込み失敗時のフォールバック（保守的に同じ規則を適用）
+            self.recruitment_exclusion_keywords = ["学歴", "大学", "出身", "経歴"]
+            self.general_contact_whitelist_keywords = [
+                "お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"
+            ]
 
     async def find_and_validate_forms(self, page: Page, html_content: str) -> List[Dict[str, Any]]:
         """ページ内のフォームを発見・検証（本家準拠版）"""
@@ -856,7 +877,12 @@ class FormDetector:
             if self._is_login_form(inputs):
                 logger.debug("ログインフォームのため除外")
                 return False
-            
+
+            # 3.5 採用専用フォームの除外（周辺テキスト・ボタン文言で判定）
+            if self._is_recruitment_only_form(form_data):
+                logger.debug("採用専用フォームと推定のため除外")
+                return False
+
             # 4. 送信機能の存在チェック
             has_submit_capability = self._has_submit_capability(inputs, buttons, form_data)
             if not has_submit_capability:
@@ -961,6 +987,54 @@ class FormDetector:
             return True
         
         return False
+
+    def _is_recruitment_only_form(self, form_data: Dict[str, Any]) -> bool:
+        """採用専用フォームを簡易判定する。
+
+        周辺テキストやボタン文言に、学歴・大学・出身・経歴などの採用関連語が含まれ、
+        かつ一般的な問い合わせを示す語（お問い合わせ/問い合わせ/contact/inquiry等）が含まれない場合に限り除外とする。
+        （採用と問い合わせを兼ねるフォームは許容）
+        """
+        try:
+            # 周辺テキスト（ラベル・見出し等を含む）
+            surrounding = (
+                form_data.get('surroundingText')
+                or form_data.get('surrounding_text')
+                or ''
+            )
+            # ボタン文言も参考にする
+            button_texts = ' '.join(
+                (btn.get('text', '') or '') for btn in form_data.get('buttons', [])
+            )
+            haystack = f"{surrounding} {button_texts}"
+
+            # 事前サニタイズ（不要な制御文字の除去）
+            haystack = self._sanitize_text_content(haystack, max_length=self.surrounding_text_limit)
+
+            # 採用系キーワード出現判定
+            has_recruit_kw = any(k for k in self.recruitment_exclusion_keywords if k and k in haystack)
+            if not has_recruit_kw:
+                return False
+
+            # 問い合わせ系キーワード出現判定（併用フォームの許容）
+            has_general_contact_kw = any(
+                k for k in self.general_contact_whitelist_keywords if k and k in haystack
+            )
+            if has_general_contact_kw:
+                return False
+
+            # ログ出力（機微情報はサニタイズ）
+            try:
+                matched = [k for k in self.recruitment_exclusion_keywords if k in haystack]
+                logger.debug(
+                    f"採用専用フォーム候補を検出: keywords={sanitize_for_log(str(matched))}"
+                )
+            except Exception:
+                pass
+
+            return True
+        except Exception:
+            return False
 
     def _prioritize_multiple_forms(self, forms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """複数フォーム処理の優先度付け"""

@@ -1,0 +1,20 @@
+{
+  "recruitment_only_exclusion": {
+    "exclude_if_keywords_present_any": [
+      "学歴",
+      "大学",
+      "出身",
+      "経歴"
+    ],
+    "allow_if_general_contact_keywords_any": [
+      "お問い合わせ",
+      "お問合せ",
+      "問い合わせ",
+      "contact",
+      "inquiry",
+      "ご相談",
+      "連絡"
+    ]
+  }
+}
+

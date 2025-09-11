@@ -46,6 +46,21 @@ class ConfigManager:
         if self._retry_config is None:
             self._retry_config = self._load_config("retry_config.json")
         return self._retry_config
+
+    def get_form_finder_rules(self) -> Dict[str, Any]:
+        """Form-Finder固有のフィルタ/除外ルールを取得"""
+        try:
+            return self._load_config("form_finder_rules.json")
+        except Exception:
+            # 最小限のフォールバック（厳密には設定ファイルが望ましい）
+            return {
+                "recruitment_only_exclusion": {
+                    "exclude_if_keywords_present_any": ["学歴", "大学", "出身", "経歴"],
+                    "allow_if_general_contact_keywords_any": [
+                        "お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"
+                    ],
+                }
+            }
     
     def get_retry_setting(self, operation_type: str) -> Dict[str, Any]:
         """特定の操作タイプのリトライ設定を取得
@@ -215,6 +230,10 @@ def get_database_config() -> Dict[str, Any]:
 def get_groq_config() -> Dict[str, Any]:
     """Groq API設定を取得する便利関数"""
     return config_manager.get_groq_config()
+
+def get_form_finder_rules() -> Dict[str, Any]:
+    """Form-Finder固有のフィルタ/除外ルールを取得する便利関数"""
+    return config_manager.get_form_finder_rules()
 
 def get_cookie_consent_config() -> Dict[str, Any]:
     """Cookie同意処理設定を取得する便利関数"""
