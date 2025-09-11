@@ -1273,9 +1273,26 @@ class UnmappedElementHandler:
             for group_key, items in groups.items():
                 group_required = False
                 for cb, info in items:
+                    # 直接の required 属性チェック
                     if await self.element_scorer._detect_required_status(cb):
                         group_required = True
                         break
+                    # コンテナ側（dt/th/親要素）に必須マーカーがあるか簡易チェック（ラジオと同様の救済）
+                    try:
+                        if await self._detect_group_required_via_container(cb):
+                            group_required = True
+                            break
+                    except Exception:
+                        pass
+                # 追加フォールバック: 近傍コンテキストに『必須』が含まれるかを簡易確認
+                if not group_required:
+                    try:
+                        ctxs = await self.context_text_extractor.extract_context_for_element(items[0][0])
+                        best = (self.context_text_extractor.get_best_context_text(ctxs) or "")
+                        if "必須" in best:
+                            group_required = True
+                    except Exception:
+                        pass
                     name_id_class = " ".join(
                         [
                             info.get("name", ""),
@@ -2108,6 +2125,13 @@ class UnmappedElementHandler:
             "token",
             "otp",
             "verification",
+            # 追加: 確認コード/認証コード系（メール確認欄と誤検出しやすい）
+            "chkcode",
+            "checkcode",
+            "confirmcode",
+            "authcode",
+            "securitycode",
+            "code",  # 広すぎるため後段で条件付きでも弾く
         ]
 
         # 既に確定している主メール欄（論理フィールド『メールアドレス』）の name/id を取得して、
@@ -2136,11 +2160,14 @@ class UnmappedElementHandler:
             if any(b in name_id_class for b in blacklist):
                 continue
             attr_hit = any(p in name_id_class for p in confirmation_attr_patterns)
-            # プレースホルダに『確認』『再入力』等が含まれる場合も確認欄とみなす
+            # プレースホルダに『確認』『再入力』等が含まれる場合も確認欄候補とするが、
+            # 『email/mail/メール』系の手がかりが同時に存在する場合のみ True（誤検出抑止）。
             if not attr_hit and placeholder_raw:
                 low_pl = placeholder_raw.lower()
                 if any(t.lower() in low_pl for t in confirmation_ctx_tokens):
-                    attr_hit = True
+                    email_hint = any(k in (name_id_class) for k in ["email","e-mail","mail","メール"]) or (info.get("type","email") or "").lower() == "email"
+                    if email_hint:
+                        attr_hit = True
 
             # バリアント規則:
             # - 主メール name/id に対して、"_<name>" or "<name>2" や "<id>2" を確認欄とみなす
@@ -2182,6 +2209,13 @@ class UnmappedElementHandler:
                     )
                 except Exception:
                     ctx_hit = False
+            # CAPTCHA/確認コードのさらなる除外: name/id/placeholder/label に『コード』『認証』があれば除く
+            if (attr_hit or ctx_hit):
+                blob_all = name_id_class + " " + (info.get("label_text","") or "").lower()
+                if any(k in blob_all for k in ["確認コード","認証コード","コード","security code","verification code","auth code","chkcode","checkcode"]):
+                    attr_hit = False
+                    ctx_hit = False
+
             if not (attr_hit or ctx_hit):
                 continue
             selector = await self._generate_playwright_selector(el)

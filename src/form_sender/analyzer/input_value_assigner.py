@@ -192,11 +192,28 @@ class InputValueAssigner:
                 blob = nm + " " + ide
                 if "tel" in blob or "phone" in blob:
                     import re
-
-                    m = re.search(r"(?:tel|phone)[^\d]*([123])(?!.*\d)", blob)
-                    if not m:
+                    # 末尾側に現れる 1/2/3 を優先（'tel_1_must[1]' 等に対応）
+                    matches = list(re.finditer(r"(?:tel|phone)[^\n]*?([123])", blob))
+                    idx = None
+                    if matches:
+                        try:
+                            idx = int(matches[-1].group(1))
+                        except Exception:
+                            idx = None
+                    # 配列添字 [1]/[2]/[3] にも対応
+                    if idx is None:
+                        arr = re.findall(r"\[(\d+)\]", blob)
+                        if arr:
+                            try:
+                                idx0 = int(arr[-1])
+                                if idx0 in (1, 2, 3):
+                                    idx = idx0
+                                elif idx0 in (0, 1, 2):
+                                    idx = {0: 1, 1: 2, 2: 3}[idx0]
+                            except Exception:
+                                idx = None
+                    if not idx:
                         continue
-                    idx = int(m.group(1))
                     if idx == 2 and p2:
                         input_assignments[f"auto_phone_part_{idx}"] = {
                             "selector": selector,

@@ -123,6 +123,10 @@ def _passes_phone(ei: Dict[str, Any], best_txt: str) -> bool:
     neg_ctx = any(t in best_txt for t in ["時", "時頃", "午前", "午後", "連絡方法"]) or any(
         t in attrs_blob for t in ["timeno", "h1", "h2"]
     )
+    # FAX 系の明確なトークンがある場合は除外（電話欄の誤割当て抑止）
+    fax_like = ["fax", "ファックス", "ﾌｧｯｸｽ", "ＦＡＸ"]
+    if any(t in attrs_blob for t in fax_like) or any(t in best_txt for t in [s.lower() for s in fax_like]):
+        return False
     return bool(etype == "tel" or pos_attr or (pos_ctx and not neg_ctx))
 
 

@@ -140,6 +140,16 @@ async def allow_candidate(field_name: str, element: Locator, element_info: Dict[
                 female = any(k in (t or "") for t in opt_texts for k in ["女", "女性", "female"])
                 if not (male and female):
                     return False
+        # 氏名フィールドの誤検出抑止: tel/phone/email/mail 系の要素は候補にしない
+        if field_name in ("姓", "名"):
+            blob = " ".join([
+                str(element_info.get("name") or ""),
+                str(element_info.get("id") or ""),
+                str(element_info.get("class") or ""),
+                str(element_info.get("placeholder") or ""),
+            ]).lower()
+            if any(tok in blob for tok in ["tel", "phone", "email", "e-mail", "mail"]):
+                return False
     except Exception:
         pass
 
