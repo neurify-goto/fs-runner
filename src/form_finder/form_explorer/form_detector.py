@@ -1011,15 +1011,18 @@ class FormDetector:
             # 事前サニタイズ（不要な制御文字の除去）
             haystack = self._sanitize_text_content(haystack, max_length=self.surrounding_text_limit)
 
-            # 採用系キーワード出現判定
-            has_recruit_kw = any(k for k in self.recruitment_exclusion_keywords if k and k in haystack)
+            # 英語UI等での大文字表記に対応（日本語は影響なし）
+            norm_haystack = haystack.lower()
+            recruit_kws_norm = [str(k).lower() for k in self.recruitment_exclusion_keywords if k]
+            general_kws_norm = [str(k).lower() for k in self.general_contact_whitelist_keywords if k]
+
+            # 採用系キーワード出現判定（OR）
+            has_recruit_kw = any(k in norm_haystack for k in recruit_kws_norm)
             if not has_recruit_kw:
                 return False
 
-            # 問い合わせ系キーワード出現判定（併用フォームの許容）
-            has_general_contact_kw = any(
-                k for k in self.general_contact_whitelist_keywords if k and k in haystack
-            )
+            # 問い合わせ系キーワード出現判定（兼用は許容）
+            has_general_contact_kw = any(k in norm_haystack for k in general_kws_norm)
             if has_general_contact_kw:
                 return False
 

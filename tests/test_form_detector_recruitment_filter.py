@@ -55,3 +55,27 @@ def test_is_recruitment_only_form_allows_when_contact_keywords_present():
     assert detector._is_recruitment_only_form(form_data) is False
     # 品質チェックは通過（送信ボタンと入力あり）
     assert detector._validate_form_quality(form_data, "<html></html>") is True
+
+
+def test_is_recruitment_only_form_allows_when_contact_is_uppercase_english():
+    detector = FormDetector()
+    form_data = {
+        "inputs": _base_inputs(),
+        "buttons": _base_buttons(),
+        # 英語UIで大文字 CONTACT を含む（兼用扱いで許可）
+        "surroundingText": "Please CONTACT us. 学歴 の記載は任意です.",
+    }
+    assert detector._is_recruitment_only_form(form_data) is False
+    assert detector._validate_form_quality(form_data, "<html></html>") is True
+
+
+def test_is_recruitment_only_form_allows_when_contact_is_capitalized():
+    detector = FormDetector()
+    form_data = {
+        "inputs": _base_inputs(),
+        "buttons": _base_buttons(),
+        # Contact（先頭大文字）も許容対象
+        "surroundingText": "For Contact or Inquiry, 学歴 は不要です.",
+    }
+    assert detector._is_recruitment_only_form(form_data) is False
+    assert detector._validate_form_quality(form_data, "<html></html>") is True
