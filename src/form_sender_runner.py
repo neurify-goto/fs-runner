@@ -713,7 +713,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # ブラックリスト回避: companies.black が NULL のもののみ処理対象
         comp = (
             supabase.table('companies')
-            .select('id, form_url, black')
+            .select('id, form_url, black, company_name')
             .eq('id', company_id)
             .limit(1)
             .execute()
@@ -724,6 +724,52 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
         if company.get('black') is not None:
             raise RuntimeError('company blacklisted')
+        # 追加ポリシー: 企業名に「医療法人」または「病院」を含む場合は送信対象外（send_queue時点で除外するが二重化）
+        try:
+            cname = company.get('company_name') or ''
+            if isinstance(cname, str) and (('医療法人' in cname) or ('病院' in cname)):
+                classify_detail = {
+                    'code': 'SKIPPED_BY_NAME_POLICY',
+                    'category': 'POLICY',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 1.0,
+                    'evidence': {
+                        'name_policy_keywords': ['医療法人', '病院']
+                    }
+                }
+                _md_args = {
+                    'p_target_date': str(target_date),
+                    'p_targeting_id': targeting_id,
+                    'p_company_id': company_id,
+                    'p_success': False,
+                    'p_error_type': 'SKIPPED_BY_NAME_POLICY',
+                    'p_classify_detail': classify_detail,
+                    'p_field_mapping': None,
+                    'p_bot_protection': False,
+                    'p_submitted_at': jst_now().isoformat(),
+                    'p_run_id': run_id,
+                }
+                try:
+                    supabase.rpc('mark_done', _md_args).execute()
+                except Exception as e_mdnp:
+                    if _should_fallback_on_rpc_error(e_mdnp, 'mark_done', ['p_run_id']):
+                        _md_args.pop('p_run_id', None)
+                        supabase.rpc('mark_done', _md_args).execute()
+                    else:
+                        raise
+                # 完了ログ（企業名は出さない）
+                try:
+                    wid = getattr(worker, 'worker_id', 0)
+                    _get_lifecycle_logger().info(
+                        f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=SKIPPED_BY_NAME_POLICY"
+                    )
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            # 判定エラー時は通常処理を継続（安全側）
+            pass
     except Exception as e:
         logger.error(f"fetch company error ({company_id}): {e}")
         # mark failed quickly（代表コードで詳細分類を付与）
