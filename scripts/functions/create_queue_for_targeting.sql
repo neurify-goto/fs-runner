@@ -98,6 +98,10 @@ begin
   -- NG社名除外（配列が空/NULLならスキップ）
   v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
 
+  -- 追加の名称ポリシー除外: 「医療法人」「病院」を含む企業名は対象外
+  -- 要件: send_queue 作成段階で除外し、後続処理に乗せない
+  v_sql := v_sql || ' and (c.company_name not like ''%医療法人%'' and c.company_name not like ''%病院%'')';
+
   v_sql := v_sql || ' order by c.id asc limit $4 )
     insert into public.send_queue(
       target_date_jst, targeting_id, company_id, priority, shard_id, status, attempts, created_at)
@@ -159,6 +163,9 @@ begin
 
     -- NG社名除外（配列が空/NULLならスキップ）
     v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
+
+    -- 追加の名称ポリシー除外
+    v_sql := v_sql || ' and (c.company_name not like ''%医療法人%'' and c.company_name not like ''%病院%'')';
 
     v_sql := v_sql || ' order by c.id asc limit $4 )
       insert into public.send_queue(
