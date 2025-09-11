@@ -143,7 +143,7 @@ class ConfigManager:
         return {
             "checkbox": {
                 "primary_keywords": ["営業", "提案", "メール"],
-                "secondary_keywords": ["その他", "other", "該当なし"],
+                "secondary_keywords": ["その他", "一般", "other", "該当なし"],
                 "privacy_keywords": [
                     "プライバシー", "個人情報", "privacy", "利用規約", "terms"
                 ],
@@ -153,7 +153,7 @@ class ConfigManager:
             },
             "radio": {
                 "primary_keywords": ["営業", "提案", "メール"],
-                "secondary_keywords": ["その他", "other", "該当なし"],
+                "secondary_keywords": ["その他", "一般", "other", "該当なし"],
             },
         }
     
