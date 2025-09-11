@@ -724,10 +724,14 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
         if company.get('black') is not None:
             raise RuntimeError('company blacklisted')
-        # 追加ポリシー: 企業名に「医療法人」または「病院」を含む場合は送信対象外（send_queue時点で除外するが二重化）
+        # 追加ポリシー: 企業名に以下の語を含む場合は送信対象外（send_queue時点で除外するが二重化）
+        # - 医療法人 / 病院
+        # - 法律事務所 / 弁護士 / 税理士 / 弁理士
         try:
             cname = company.get('company_name') or ''
-            if isinstance(cname, str) and (('医療法人' in cname) or ('病院' in cname)):
+            policy_words = ['医療法人', '病院', '法律事務所', '弁護士', '税理士', '弁理士']
+            matched = [w for w in policy_words if isinstance(cname, str) and (w in cname)]
+            if matched:
                 classify_detail = {
                     'code': 'SKIPPED_BY_NAME_POLICY',
                     'category': 'POLICY',
@@ -735,7 +739,8 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                     'cooldown_seconds': 0,
                     'confidence': 1.0,
                     'evidence': {
-                        'name_policy_keywords': ['医療法人', '病院']
+                        # トリガーになった語のみを保存（全ポリシー語ではなく）
+                        'name_policy_keywords': matched
                     }
                 }
                 _md_args = {
