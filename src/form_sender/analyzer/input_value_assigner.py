@@ -755,8 +755,8 @@ class InputValueAssigner:
                 "street",
             ]
             pref_tokens = ["都道府県", "prefecture", "県", "都", "府"]
-            # 都道府県専用でない場合を除外するキーワード
-            non_pref_keywords = ["以下", "以降", "から", "まで", "を入力", "住所", "番地", "丁目"]
+            # 都道府県専用でない場合を除外するキーワード（一般住所欄を示すもの）
+            non_pref_keywords = ["以下", "以降", "から", "まで", "を入力", "番地", "丁目"]
 
             def join_nonempty(parts, sep=""):
                 return sep.join([p for p in parts if p])
