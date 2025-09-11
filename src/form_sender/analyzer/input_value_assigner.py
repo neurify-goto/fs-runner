@@ -642,33 +642,31 @@ class InputValueAssigner:
             except Exception as e:
                 logger.error(f"Unexpected error in kana type detection: {e}")
                 kana_type = "katakana"
-            return self.field_combination_manager.generate_unified_kana_value(
+            # 早期returnせず、生成値を value に格納してフォールバック判定へ進める
+            value = self.field_combination_manager.generate_unified_kana_value(
                 kana_type, client_data
             )
-
-            # If still empty after specific mapping, use fallback
-            if not value:
-                # 住所補助は必須時のみ全角スペースで救済し、任意時は空文字を維持
-                if str(field_name).startswith("住所_補助"):
-                    if self.required_analysis.get("treat_all_as_required", False) or field_info.get("required", False):
-                        value = "　"  # 全角スペース（送信ブロック回避）
-                    else:
-                        value = ""
-                else:
-                    # For any unmappable field (when all are required or specific field is required), use full-width space
-                    if self.required_analysis.get(
-                        "treat_all_as_required", False
-                    ) or field_info.get("required", False):
-                        value = "　"  # 全角スペース
-                    else:
-                        # For non-required fields, use empty string
-                        value = ""
 
         # 住所/住所_補助* の文脈に応じた割当
         if field_name.startswith("住所"):
             addr = self._handle_address_assignment(field_name, field_info, client_data)
             if addr:
                 return addr
+
+        # 共通フォールバック（P1: 早期returnにより未実行だった問題を解消）
+        if not value:
+            # 住所補助は必須時のみ全角スペース、任意は空文字
+            if str(field_name).startswith("住所_補助"):
+                if self.required_analysis.get("treat_all_as_required", False) or field_info.get("required", False):
+                    value = "　"  # 全角スペース（送信ブロック回避）
+                else:
+                    value = ""
+            else:
+                # すべて必須扱い、または当該フィールドが必須なら全角スペース
+                if self.required_analysis.get("treat_all_as_required", False) or field_info.get("required", False):
+                    value = "　"
+                else:
+                    value = ""
 
         return value
 
