@@ -418,6 +418,13 @@ class FieldMapper:
         await self._fallback_map_postal_field(
             classified_elements, field_mapping, used_elements
         )
+        # 追加救済: 都道府県（p-region/region/prefecture）を name/id/class/placeholder/ラベルから補完
+        try:
+            await self._salvage_prefecture_by_attr(
+                classified_elements, field_mapping, used_elements
+            )
+        except Exception as e:
+            logger.debug(f"prefecture salvage skipped: {e}")
         # 住所の取りこぼし救済（placeholder/ラベル/属性から強い住所シグナルを検出）
         await self._fallback_map_address_field(
             classified_elements, field_mapping, used_elements
@@ -448,6 +455,48 @@ class FieldMapper:
         except Exception as e:
             logger.debug(f"prefecture remap skipped: {e}")
         return field_mapping
+
+    async def _salvage_prefecture_by_attr(self, classified_elements, field_mapping, used_elements):
+        if "都道府県" in field_mapping:
+            return
+        # 候補: input/select
+        cands = (classified_elements.get("text_inputs") or []) + (
+            classified_elements.get("selects") or []
+        )
+        tokens = ["p-region", "prefecture", "pref", "region", "都道府県"]
+        best = None
+        for el in cands:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                continue
+            blob = " ".join(
+                [
+                    (ei.get("name", "") or ""),
+                    (ei.get("id", "") or ""),
+                    (ei.get("class", "") or ""),
+                    (ei.get("placeholder", "") or ""),
+                ]
+            ).lower()
+            ctxs = await self.context_text_extractor.extract_context_for_element(el)
+            ctx_text = " ".join([(getattr(c, "text", "") or "").lower() for c in ctxs or []])
+            if any(t in blob for t in tokens) or any(t in ctx_text for t in tokens):
+                best = (el, ei, ctxs)
+                break
+        if not best:
+            return
+        el, ei, ctxs = best
+        details = {"element_info": ei, "total_score": 85}
+        info = await self._create_enhanced_element_info(el, details, ctxs)
+        info["required"] = True
+        info["input_type"] = info.get("input_type") or ("select" if (ei.get("tag_name",""))=="select" else "text")
+        info["source"] = "salvage_prefecture"
+        tmp = self._generate_temp_field_value("都道府県")
+        if self.duplicate_prevention.register_field_assignment("都道府県", tmp, 85, info):
+            field_mapping["都道府県"] = info
+            used_elements.add(id(el))
 
     async def _has_kana_split_candidates(self, classified_elements: Dict[str, List[Locator]]) -> bool:
         """DOMに『セイ/メイ』系の分割かな入力が存在するか簡易検出。
