@@ -1069,19 +1069,15 @@ class FormDetector:
                 texts.append(inp.get('name') or '')
                 texts.append(inp.get('id') or '')
 
-            haystack = ' '.join(texts)
-            haystack_norm = haystack.lower()
-            for kw in self.form_ng_keywords:
-                kw_norm = str(kw).lower()
-                if kw_norm and (kw_norm in haystack_norm or kw in haystack):
-                    try:
-                        logger.debug(
-                            f"フォームNGワード検出: keyword={sanitize_for_log(kw)}"
-                        )
-                    except Exception:
-                        pass
-                    return True
-            return False
+            haystack_norm = ' '.join(texts).lower()
+            found = any((str(kw).lower() in haystack_norm) for kw in self.form_ng_keywords if kw)
+            if found:
+                try:
+                    # ログは具体語を出さず方針のみ
+                    logger.debug("フォームNGワード検出: 設定キーワードに一致")
+                except Exception:
+                    pass
+            return found
         except Exception:
             return False
 

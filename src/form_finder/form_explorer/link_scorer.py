@@ -40,11 +40,14 @@ class LinkScorer:
                 )
                 if k
             ]
+            # 事前正規化（高速化）
+            self._excluded_kw_norm: List[str] = [s.lower() for s in self.excluded_link_keywords if s]
         except Exception:
             # フォールバック（安全側）
             self.excluded_link_keywords = [
                 "採用", "求人", "応募", "募集", "エントリー", "recruit", "careers", "job",
             ]
+            self._excluded_kw_norm = [s.lower() for s in self.excluded_link_keywords]
         
         # スコア設定値（ハードコード）
         self.score_premium_text = 300
@@ -167,12 +170,8 @@ class LinkScorer:
         try:
             text = (link.get("text") or link.get("title") or "").lower()
             href = (link.get("href") or "").lower()
-            haystack = f"{text} {href}"
-            for kw in self.excluded_link_keywords:
-                kw_norm = str(kw).lower()
-                if kw_norm and kw_norm in haystack:
-                    return True
-            return False
+            haystack_norm = text + " " + href
+            return any(kw in haystack_norm for kw in self._excluded_kw_norm)
         except Exception:
             # 例外時は保守的に除外しない
             return False
