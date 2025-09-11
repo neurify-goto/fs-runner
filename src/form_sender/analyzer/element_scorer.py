@@ -307,6 +307,12 @@ class ElementScorer:
                     "katakana",
                     "hiragana",
                     "furigana",
+                    # 追加: 日本語フォームで『ふりがな』を意味する一般的な別名
+                    # 多くの実サイトで id/name/class に 'ruby' を用いるため、
+                    # 誤検出抑止のための他ロジックと併用して包含
+                    "ruby",
+                    "ルビ",
+                    "るび",
                     "ｶﾅ",
                     "ｶﾀｶﾅ",
                     "ﾌﾘｶﾞﾅ",
@@ -336,10 +342,14 @@ class ElementScorer:
                 t = t.lower()
                 katakana_tokens = [
                     "katakana",
+                    # 追加: ルビ指定もカタカナ欄として扱うケースが多い
+                    "ruby",
                     "カタカナ",
                     "ｶﾀｶﾅ",
                     "カナ",
                     "ｶﾅ",
+                    "ルビ",
+                    "るび",
                     "フリガナ",
                     "ふりがな",
                 ]  # 『フリガナ/ふりがな』は多くがカタカナ指定として扱う
@@ -1609,6 +1619,13 @@ class ElementScorer:
             ):
                 return -90
 
+        # 会社名: 個人名コンテキストが混在していれば最優先で減点（先に評価）
+        if field_name == "会社名":
+            personal_ctx = [
+                "お名前", "氏名", "姓名", "full name", "first name", "given name", "last name", "family name"
+            ]
+            if any(t in context_lower for t in [s.lower() for s in personal_ctx]):
+                return -75
         # ポジティブマッチング（従来通り）
         keywords = definitive_mappings.get(field_name, [])
         positive_hit = any(keyword in context_lower for keyword in keywords)

@@ -59,7 +59,7 @@ class FieldPatterns:
                 "tags": ["input"],
                 "weight": 18,
                 "strict_patterns": ["フリガナ", "カタカナ", "kana", "furigana"],
-                "kana_indicator": ["kana", "カナ", "カタカナ", "furigana"],
+                "kana_indicator": ["kana", "カナ", "カタカナ", "furigana", "ruby", "ルビ", "るび"],
                 "exclude_patterns": [
                     "company", "会社", "企業", "法人", "団体", "organization",
                     "zip", "postal", "郵便", "住所", "address", "tel", "phone", "電話",
@@ -231,7 +231,7 @@ class FieldPatterns:
                 "weight": 18,
                 "strict_patterns": ["セイ", "姓カナ", "sei_kana", "lastname_kana", "katakana_sei", "kana"],
                 # かな判定: フィールド名に"kana"が含まれているかで判断
-                "kana_indicator": ["kana", "カナ", "katakana", "furigana"],
+                "kana_indicator": ["kana", "カナ", "katakana", "furigana", "ruby"],
                 # 除外パターンから漢字フィールドを強く除外
                 "exclude_patterns": [
                     "company", "会社", "corp", "corporation", "firm", "organization", "business",
@@ -258,7 +258,7 @@ class FieldPatterns:
                 "tags": ["input"],
                 "weight": 12,
                 "strict_patterns": ["メイ", "名カナ", "mei_kana", "firstname_kana", "katakana_mei", "kana"],
-                "kana_indicator": ["kana", "カナ", "katakana", "furigana"],
+                "kana_indicator": ["kana", "カナ", "katakana", "furigana", "ruby"],
                 # ふりがな系の属性名（furigana）は分割カナで一般的に使われるため除外しない
                 "exclude_patterns": [
                     "company", "会社", "corp", "corporation", "firm", "organization", "business",
@@ -673,12 +673,12 @@ class FieldPatterns:
             
             # 21b. 都道府県 (prefecture) - 住所内の選択式（select優先）
             "都道府県": {
-                "names": ["pref", "prefecture", "todouhuken", "todofuken", "都道府県"],
-                "ids": ["pref", "prefecture"],
-                "classes": ["pref", "prefecture"],
+                "names": ["pref", "prefecture", "todouhuken", "todofuken", "都道府県", "region"],
+                "ids": ["pref", "prefecture", "region", "p-region"],
+                "classes": ["pref", "prefecture", "p-region", "region"],
                 "placeholders": ["都道府県", "Prefecture"],
-                "types": [],
-                "tags": ["select"],
+                "types": ["text"],  # 一部フォームでは text input を使用
+                "tags": ["select", "input"],  # select 以外に input も許容
                 "weight": 14,
                 "strict_patterns": ["都道府県", "prefecture", "pref"],
                 "exclude_patterns": [
@@ -696,11 +696,20 @@ class FieldPatterns:
 
             # 22. 会社名カナ (company_name_kana) - GAS必須
             "会社名カナ": {
-                "names": ["company_kana", "corp_kana", "company_name_kana", "corporation_kana", 
-                         "会社名カナ", "会社カナ", "kaisha_kana", "kaisya_kana", "firm_kana"],
-                "ids": ["company_kana", "corp_kana", "company-name-kana", "corporation-kana", 
-                       "company_name_kana"],
-                "classes": ["company-kana", "corp-kana", "kana", "company_name_kana"],
+                "names": [
+                    "company_kana", "corp_kana", "company_name_kana", "corporation_kana",
+                    "会社名カナ", "会社カナ", "kaisha_kana", "kaisya_kana", "firm_kana",
+                    # 一般的な別名
+                    "company_ruby", "corp_ruby", "organization_ruby", "org_ruby",
+                    "company_furigana", "corporation_furigana", "org_furigana"
+                ],
+                "ids": [
+                    "company_kana", "corp_kana", "company-name-kana", "corporation-kana",
+                    "company_name_kana", "company_ruby", "corp_ruby", "organization_ruby", "org_ruby",
+                    "company_furigana"
+                ],
+                "classes": ["company-kana", "corp-kana", "kana", "ruby", "furigana", "company_name_kana"],
+                "kana_indicator": ["kana", "カナ", "katakana", "furigana", "ruby", "ルビ", "るび"],
                 "placeholders": [
                     "会社名カナ", "カブシキガイシャ", "Company Kana", "コーポレーション",
                     "法人名（カタカナ）", "会社名（カタカナ）", "組織名カナ",

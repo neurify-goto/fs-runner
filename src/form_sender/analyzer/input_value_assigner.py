@@ -480,7 +480,7 @@ class InputValueAssigner:
                     if isinstance(client_data, dict) and "client" in client_data
                     else client_data
                 )
-                city_hints = ["市区町村", "市区", "city", "郡", "区", "町", "town", "丁目"]
+                city_hints = ["市区町村", "市区", "city", "郡", "区", "町", "town"]
                 detail_hints = [
                     "番地",
                     "丁目",
@@ -514,16 +514,41 @@ class InputValueAssigner:
                     except Exception:
                         return ""
 
-                if any(h.lower() in blob for h in city_hints):
-                    a2 = _nz((client or {}).get("address_2"))
-                    a3 = _nz((client or {}).get("address_3"))
-                    composed = (a2 + a3).strip()
-                    return composed if composed else value
-                if any(h.lower() in blob for h in detail_hints):
-                    a4 = _nz((client or {}).get("address_4"))
-                    a5 = _nz((client or {}).get("address_5"))
-                    composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
-                    return composed if composed else value
+                # 衝突回避: city/detail 両ヒット時はヒット強度で判定（同点なら city 優先）
+                _has_city = any(h.lower() in blob for h in city_hints)
+                _has_detail = any(h.lower() in blob for h in detail_hints)
+                if _has_city or _has_detail:
+                    def _hits(tokens):
+                        bl = blob
+                        return sum(bl.count(t.lower()) for t in tokens)
+                    if _has_city and _has_detail:
+                        c_hits = _hits([t.lower() for t in city_hints])
+                        d_hits = _hits([t.lower() for t in detail_hints])
+                        prefer_city = c_hits >= d_hits  # 同点は city
+                        if prefer_city:
+                            a2 = _nz((client or {}).get("address_2"))
+                            a3 = _nz((client or {}).get("address_3"))
+                            composed = (a2 + a3).strip()
+                            if composed:
+                                return composed
+                        # detail 優先
+                        a4 = _nz((client or {}).get("address_4"))
+                        a5 = _nz((client or {}).get("address_5"))
+                        composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
+                        if composed:
+                            return composed
+                    elif _has_city:
+                        a2 = _nz((client or {}).get("address_2"))
+                        a3 = _nz((client or {}).get("address_3"))
+                        composed = (a2 + a3).strip()
+                        if composed:
+                            return composed
+                    else:  # _has_detail only
+                        a4 = _nz((client or {}).get("address_4"))
+                        a5 = _nz((client or {}).get("address_5"))
+                        composed = (a4 + ("　" if a4 and a5 else "") + a5).strip()
+                        if composed:
+                            return composed
             except Exception:
                 pass
 
@@ -617,33 +642,31 @@ class InputValueAssigner:
             except Exception as e:
                 logger.error(f"Unexpected error in kana type detection: {e}")
                 kana_type = "katakana"
-            return self.field_combination_manager.generate_unified_kana_value(
+            # 早期returnせず、生成値を value に格納してフォールバック判定へ進める
+            value = self.field_combination_manager.generate_unified_kana_value(
                 kana_type, client_data
             )
-
-            # If still empty after specific mapping, use fallback
-            if not value:
-                # 住所補助は必須時のみ全角スペースで救済し、任意時は空文字を維持
-                if str(field_name).startswith("住所_補助"):
-                    if self.required_analysis.get("treat_all_as_required", False) or field_info.get("required", False):
-                        value = "　"  # 全角スペース（送信ブロック回避）
-                    else:
-                        value = ""
-                else:
-                    # For any unmappable field (when all are required or specific field is required), use full-width space
-                    if self.required_analysis.get(
-                        "treat_all_as_required", False
-                    ) or field_info.get("required", False):
-                        value = "　"  # 全角スペース
-                    else:
-                        # For non-required fields, use empty string
-                        value = ""
 
         # 住所/住所_補助* の文脈に応じた割当
         if field_name.startswith("住所"):
             addr = self._handle_address_assignment(field_name, field_info, client_data)
             if addr:
                 return addr
+
+        # 共通フォールバック（P1: 早期returnにより未実行だった問題を解消）
+        if not value:
+            # 住所補助は必須時のみ全角スペース、任意は空文字
+            if str(field_name).startswith("住所_補助"):
+                if self.required_analysis.get("treat_all_as_required", False) or field_info.get("required", False):
+                    value = "　"  # 全角スペース（送信ブロック回避）
+                else:
+                    value = ""
+            else:
+                # すべて必須扱い、または当該フィールドが必須なら全角スペース
+                if self.required_analysis.get("treat_all_as_required", False) or field_info.get("required", False):
+                    value = "　"
+                else:
+                    value = ""
 
         return value
 
@@ -697,7 +720,10 @@ class InputValueAssigner:
             ]
             blob = " ".join([p for p in parts if p]).lower()
 
-            city_tokens = ["市区町村", "市区", "郡", "市", "city", "区", "町", "town", "丁目"]
+            city_tokens = [
+                "市区町村", "市区", "郡", "市", "city", "locality", "p-locality",
+                "区", "町", "town"
+            ]  # 『丁目』は番地系（詳細）に属するため除外
             detail_tokens = [
                 "番地",
                 "丁目",
@@ -717,6 +743,10 @@ class InputValueAssigner:
                 "addr_2",
                 "address2",
                 "address_2",
+                "street-address",
+                "extended-address",
+                "p-street-address",
+                "p-extended-address",
                 "address-line2",
                 "addressline2",
                 "line2",
@@ -725,28 +755,55 @@ class InputValueAssigner:
                 "street",
             ]
             pref_tokens = ["都道府県", "prefecture", "県", "都", "府"]
+            # 都道府県専用でない場合を除外するキーワード（一般住所欄を示すもの）
+            non_pref_keywords = ["以下", "以降", "から", "まで", "を入力", "番地", "丁目"]
 
             def join_nonempty(parts, sep=""):
                 return sep.join([p for p in parts if p])
 
+            # 都道府県トークンがあっても、一般住所欄の可能性がある場合は除外
             if any(t in blob for t in pref_tokens):
-                v = client.get("address_1", "")
-                if v:
-                    return v
-            if field_name.startswith("住所_補助") or any(
+                # 除外キーワードがある場合は都道府県専用ではない
+                is_general_address = any(keyword in blob for keyword in non_pref_keywords)
+                if not is_general_address:
+                    v = client.get("address_1", "")
+                    if v:
+                        return v
+            # 衝突回避: city/detail 両ヒット時はヒット強度で判定（同点なら city 優先）
+            _has_city = any(t in blob for t in city_tokens)
+            _has_detail_flag = field_name.startswith("住所_補助") or any(
                 t in blob for t in detail_tokens
-            ):
-                v = join_nonempty(
-                    [client.get("address_4", ""), client.get("address_5", "")], "　"
-                )
-                if v:
-                    return v
-            if any(t in blob for t in city_tokens):
-                v = join_nonempty(
-                    [client.get("address_2", ""), client.get("address_3", "")]
-                )
-                if v:
-                    return v
+            )
+            if _has_city or _has_detail_flag:
+                def _hits(tokens):
+                    return sum(blob.count(t) for t in tokens)
+                if _has_city and _has_detail_flag:
+                    c_hits = _hits(city_tokens)
+                    d_hits = _hits(detail_tokens)
+                    prefer_city = c_hits >= d_hits  # 同点は city
+                    if prefer_city:
+                        v = join_nonempty(
+                            [client.get("address_2", ""), client.get("address_3", "")]
+                        )
+                        if v:
+                            return v
+                    v = join_nonempty(
+                        [client.get("address_4", ""), client.get("address_5", "")], "　"
+                    )
+                    if v:
+                        return v
+                elif _has_city:
+                    v = join_nonempty(
+                        [client.get("address_2", ""), client.get("address_3", "")]
+                    )
+                    if v:
+                        return v
+                else:
+                    v = join_nonempty(
+                        [client.get("address_4", ""), client.get("address_5", "")], "　"
+                    )
+                    if v:
+                        return v
             # デフォルトは住所全体
             full_addr = self.field_combination_manager.generate_combined_value(
                 "address", client_data

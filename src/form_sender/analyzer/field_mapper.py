@@ -18,7 +18,17 @@ class FieldMapper:
     """フィールドのマッピング処理を担当するクラス"""
 
     # 非必須だが高信頼であれば入力価値が高い項目（汎用・安全）
-    OPTIONAL_HIGH_PRIORITY_FIELDS = {"件名", "電話番号", "住所", "郵便番号", "郵便番号1", "郵便番号2", "会社名"}
+    OPTIONAL_HIGH_PRIORITY_FIELDS = {
+        "件名",
+        "電話番号",
+        "住所",
+        "郵便番号",
+        "郵便番号1",
+        "郵便番号2",
+        "会社名",
+        "都道府県",
+        "会社名カナ",
+    }
 
     def __init__(
         self,
@@ -408,6 +418,13 @@ class FieldMapper:
         await self._fallback_map_postal_field(
             classified_elements, field_mapping, used_elements
         )
+        # 追加救済: 都道府県（p-region/region/prefecture）を name/id/class/placeholder/ラベルから補完
+        try:
+            await self._salvage_prefecture_by_attr(
+                classified_elements, field_mapping, used_elements
+            )
+        except Exception as e:
+            logger.debug(f"prefecture salvage skipped: {e}")
         # 住所の取りこぼし救済（placeholder/ラベル/属性から強い住所シグナルを検出）
         await self._fallback_map_address_field(
             classified_elements, field_mapping, used_elements
@@ -438,6 +455,48 @@ class FieldMapper:
         except Exception as e:
             logger.debug(f"prefecture remap skipped: {e}")
         return field_mapping
+
+    async def _salvage_prefecture_by_attr(self, classified_elements, field_mapping, used_elements):
+        if "都道府県" in field_mapping:
+            return
+        # 候補: input/select
+        cands = (classified_elements.get("text_inputs") or []) + (
+            classified_elements.get("selects") or []
+        )
+        tokens = ["p-region", "prefecture", "pref", "region", "都道府県"]
+        best = None
+        for el in cands:
+            if id(el) in used_elements:
+                continue
+            try:
+                ei = await self.element_scorer._get_element_info(el)
+            except Exception:
+                continue
+            blob = " ".join(
+                [
+                    (ei.get("name", "") or ""),
+                    (ei.get("id", "") or ""),
+                    (ei.get("class", "") or ""),
+                    (ei.get("placeholder", "") or ""),
+                ]
+            ).lower()
+            ctxs = await self.context_text_extractor.extract_context_for_element(el)
+            ctx_text = " ".join([(getattr(c, "text", "") or "").lower() for c in ctxs or []])
+            if any(t in blob for t in tokens) or any(t in ctx_text for t in tokens):
+                best = (el, ei, ctxs)
+                break
+        if not best:
+            return
+        el, ei, ctxs = best
+        details = {"element_info": ei, "total_score": 85}
+        info = await self._create_enhanced_element_info(el, details, ctxs)
+        info["required"] = True
+        info["input_type"] = info.get("input_type") or ("select" if (ei.get("tag_name",""))=="select" else "text")
+        info["source"] = "salvage_prefecture"
+        tmp = self._generate_temp_field_value("都道府県")
+        if self.duplicate_prevention.register_field_assignment("都道府県", tmp, 85, info):
+            field_mapping["都道府県"] = info
+            used_elements.add(id(el))
 
     async def _has_kana_split_candidates(self, classified_elements: Dict[str, List[Locator]]) -> bool:
         """DOMに『セイ/メイ』系の分割かな入力が存在するか簡易検出。
@@ -2192,6 +2251,13 @@ class FieldMapper:
             if any(tok in blob for tok in postal_tokens):
                 return "郵便番号"
 
+        # 都道府県の推定（prefecture 専用）
+        pref_tokens = ["都道府県", "prefecture", "pref", "p-region", "region"]
+        if tag in ["input", "select"] and typ in ["", "text"]:
+            blob_pref = f"{name_id_cls} {ctx_text}"
+            if any(tok in blob_pref for tok in pref_tokens):
+                return "都道府県"
+
         # 郵便番号でない場合に限り、type=tel を電話番号として扱う
         if tag == "input" and typ == "tel":
             return "電話番号"
@@ -2293,8 +2359,10 @@ class FieldMapper:
             "お名前",
             "名前",
         ]
-        has_kana = any(t in name_id_cls for t in kana_tokens) or ("フリガナ" in ctx_text)
-        has_hira = any(t in name_id_cls for t in hira_tokens) or ("ひらがな" in ctx_text)
+        # カナ/ひらがなの判定は、要素の属性か直近の文脈(best)に限定し、
+        # 離れた位置にある別フィールドの『フリガナ』見出しに引っ張られないようにする。
+        has_kana = any(t in name_id_cls for t in kana_tokens) or ("フリガナ" in ctx_best)
+        has_hira = any(t in name_id_cls for t in hira_tokens) or ("ひらがな" in ctx_best)
         # 属性(first/last)の手掛かりを最優先に用い、文脈は補助として利用
         attr_last = any(t in name_id_cls for t in last_tokens)
         attr_first = any(t in name_id_cls for t in first_tokens)
@@ -2319,6 +2387,15 @@ class FieldMapper:
 
         # Prioritize split-specific logical names when tokens available
         if has_kana:
+            # フリガナの単一入力（セイ/メイのヒントが無い）なら統合カナを優先
+            try:
+                has_furigana_label = ("フリガナ" in ctx_text) or ("furigana" in ctx_text.lower())
+                has_sei = any(t in (ctx_text + " " + name_id_cls) for t in ["セイ", "姓", "sei", "lastname", "family"])
+                has_mei = any(t in (ctx_text + " " + name_id_cls) for t in ["メイ", "名", "mei", "firstname", "given"])
+                if has_furigana_label and not (has_sei or has_mei):
+                    return "統合氏名カナ"
+            except Exception:
+                pass
             if is_last and not is_first:
                 return "姓カナ"
             if is_first and not is_last:
