@@ -1,3 +1,7 @@
+-- 旧シグネチャを先に削除して重複定義を排除（PostgRESTの多重定義エラー対策）
+drop function if exists public.claim_next_batch(date,bigint,text,integer,integer);
+drop function if exists public.claim_next_batch(date,bigint,text,integer,integer,integer);
+
 -- 原子的専有で次のバッチを取得
 -- shard_id を指定すると該当シャードのみから取得
 create or replace function public.claim_next_batch(
