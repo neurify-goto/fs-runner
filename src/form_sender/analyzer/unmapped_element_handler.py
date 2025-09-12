@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, List, Any, Optional, Callable, Awaitable, Tuple
 from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 
@@ -10,6 +11,13 @@ from config.manager import get_prefectures
 from ..utils.privacy_consent_handler import PrivacyConsentHandler
 
 logger = logging.getLogger(__name__)
+
+# Module-level precompiled regex and constants (perf + consistency)
+RE_VERIFICATION_CODE = re.compile(r"[A-Za-z0-9]{4,10}")
+RE_BRACKET_INDEX = re.compile(r"\[(\d)\](?!.*\d)")
+RE_TEL_SUFFIX = re.compile(r"(?:tel|phone|電話)[^\d]*([0-9])(?!.*\d)")
+RE_TAIL_DIGIT = re.compile(r"(\d)(?!.*\d)$")
+VERIFICATION_STOPWORDS = {"mail", "email", "code", "text", "input", "name", "phone", "tel"}
 
 
 class UnmappedElementHandler:
@@ -758,7 +766,7 @@ class UnmappedElementHandler:
                 if not (("tel" in blob) or ("phone" in blob) or ("電話" in blob)):
                     return None
                 # 配列風 [d] の最終出現を優先
-                m_br = re.search(r"\[(\d)\](?!.*\d)", blob)
+                m_br = RE_BRACKET_INDEX.search(blob)
                 if m_br:
                     raw = int(m_br.group(1))
                     # 0始まり/1始まり双方に対応
@@ -771,7 +779,7 @@ class UnmappedElementHandler:
                 for s in (nm, ide, cls):
                     if not s:
                         continue
-                    m = re.search(r"(?:tel|phone|電話)[^\d]*([0-9])(?!.*\d)", s)
+                    m = RE_TEL_SUFFIX.search(s)
                     if m:
                         raw = int(m.group(1))
                         return 1 if raw == 0 else raw
@@ -787,7 +795,7 @@ class UnmappedElementHandler:
                         return 3
 
                 # フォールバック: 末尾の一桁数字
-                tail = re.search(r"(\d)(?!.*\d)$", blob)
+                tail = RE_TAIL_DIGIT.search(blob)
                 if tail:
                     raw = int(tail.group(1))
                     return 1 if raw == 0 else raw
@@ -2489,6 +2497,11 @@ class UnmappedElementHandler:
                     code = None
                 code = (code or "").strip()
                 if not code:
+                    continue
+                # Validate: alphanumeric 4-10 and not in common stopwords
+                if not RE_VERIFICATION_CODE.fullmatch(code):
+                    continue
+                if code.lower() in VERIFICATION_STOPWORDS:
                     continue
 
                 handled[f"auto_verification_code_{len(handled)+1}"] = {
