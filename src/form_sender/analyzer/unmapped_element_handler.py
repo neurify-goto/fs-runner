@@ -1314,27 +1314,33 @@ class UnmappedElementHandler:
                             group_required = True
                     except Exception:
                         pass
-                    name_id_class = " ".join(
-                        [
-                            info.get("name", ""),
-                            info.get("id", ""),
-                            info.get("class", ""),
-                        ]
-                    ).lower()
-                    if any(
-                        k in name_id_class
-                        for k in [
-                            "acceptance",
-                            "consent",
-                            "同意",
-                            "policy",
-                            "privacy",
-                            "個人情報",
-                            "personal",
-                        ]
-                    ):
-                        group_required = True
-                        break
+                    # グループ内のいずれかの要素属性に同意/ポリシー系トークンが含まれる場合は必須扱い
+                    if not group_required:
+                        try:
+                            for _cb2, _info2 in items:
+                                name_id_class = " ".join(
+                                    [
+                                        _info2.get("name", ""),
+                                        _info2.get("id", ""),
+                                        _info2.get("class", ""),
+                                    ]
+                                ).lower()
+                                if any(
+                                    k in name_id_class
+                                    for k in [
+                                        "acceptance",
+                                        "consent",
+                                        "同意",
+                                        "policy",
+                                        "privacy",
+                                        "個人情報",
+                                        "personal",
+                                    ]
+                                ):
+                                    group_required = True
+                                    break  # グループ内の探索だけ中断（外側のグループ処理は継続）
+                        except Exception:
+                            pass
                 # コンテナ側の必須マーカー検出（DT/DD, TH/TD, 見出しなど）
                 if not group_required:
                     try:
