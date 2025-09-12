@@ -21,5 +21,11 @@
       "female": ["女", "女性", "female"],
       "other": ["その他", "other"]
     }
+  },
+  "select": {
+    "exclude_keywords": [
+      "選択", "選択してください", "ご選択", "お選び", "お選びください", "選んで", "選んでください",
+      "choose", "please choose", "select", "please select", "未選択", "---", "—", "–"
+    ]
   }
 }
