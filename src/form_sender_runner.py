@@ -855,6 +855,14 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             )
         except Exception:
             pass
+        # 軽量なステート掃除（会社間での痕跡最小化）。失敗しても続行。
+        try:
+            bm = getattr(worker, 'browser_manager', None)
+            ctx = getattr(bm, 'context', None) if bm else None
+            if ctx and hasattr(ctx, 'clear_cookies'):
+                await ctx.clear_cookies()
+        except Exception:
+            pass
         return True
 
     # 3-a) 営業禁止事前チェックはワーカー側に統合（同一ページアクセスで実施）
@@ -995,6 +1003,14 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 _get_lifecycle_logger().info(
                     f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason={error_type or 'UNKNOWN'}"
                 )
+        except Exception:
+            pass
+        # 会社ごとにCookieをクリア（WAF/トラッキング連鎖抑止）。失敗しても続行。
+        try:
+            bm = getattr(worker, 'browser_manager', None)
+            ctx = getattr(bm, 'context', None) if bm else None
+            if ctx and hasattr(ctx, 'clear_cookies'):
+                await ctx.clear_cookies()
         except Exception:
             pass
     except Exception as e:

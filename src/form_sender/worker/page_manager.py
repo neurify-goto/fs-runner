@@ -49,9 +49,11 @@ class PageManager:
 
             # フラグ（デフォルトはON）
             stealth_enabled = bool(stealth_cfg.get("enabled", True))
-            cookie_blackhole = bool(cookie_cfg.get("override_document_cookie", True))
+            # 既定は安全側（OFF）。設定で明示有効化時のみON。
+            cookie_blackhole = bool(cookie_cfg.get("override_document_cookie", False))
             cookie_block_cmp = bool(cookie_cfg.get("block_cmp_scripts", True))
-            cookie_strip_set = bool(cookie_cfg.get("strip_set_cookie", True))
+            # 既定は安全側（OFF）。設定で明示有効化時のみON。
+            cookie_strip_set = bool(cookie_cfg.get("strip_set_cookie", False))
             ui_reject_enabled = bool(cookie_cfg.get("ui_reject_banners", True))
 
             # RB 既定（PageManagerは保守的：ここではOFF既定、RBはBrowserManager側が本筋）
@@ -62,9 +64,16 @@ class PageManager:
             # 新しいコンテキストとページを作成
             context = await self.browser.new_context(
                 viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
                 locale="ja-JP",
                 timezone_id="Asia/Tokyo",
+                extra_http_headers={
+                    "Accept-Language": "ja, en-US;q=0.8, en;q=0.7",
+                },
             )
             # cookie ブラックホール（設定尊重）
             try:
@@ -78,6 +87,12 @@ class PageManager:
             except Exception:
                 pass
             self.page = await context.new_page()
+            try:
+                await self.page.set_extra_http_headers({
+                    "Accept-Language": "ja, en-US;q=0.8, en;q=0.7",
+                })
+            except Exception:
+                pass
             # ネットワーク層（設定尊重: CMP/Set-Cookie）
             try:
                 await install_cookie_routes(

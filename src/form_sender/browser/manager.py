@@ -187,16 +187,24 @@ class BrowserManager:
                 try:
                     # コンテキストが無い場合のみ作成
                     if not self.context:
-                        # どの環境でもロケール/タイムゾーンを固定（JST運用要件）
+                        # どの環境でもロケール/タイムゾーン/Accept-Language を固定（JST運用要件 + 自然な言語ヘッダ）
                         context_common = dict(
                             locale="ja-JP",
                             timezone_id="Asia/Tokyo",
+                            extra_http_headers={
+                                "Accept-Language": "ja, en-US;q=0.8, en;q=0.7",
+                            },
                         )
                         if platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None):
                             self.context = await self.browser.new_context(**context_common)
                         else:
+                            # UAはページヘッダと整合するフル文字列を利用（検出回避のため一致させる）
                             self.context = await self.browser.new_context(
-                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                user_agent=(
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/120.0.0.0 Safari/537.36"
+                                ),
                                 **context_common,
                             )
                     # Cookie ブラックホール（任意）を context に注入（new_page より前）
@@ -204,7 +212,8 @@ class BrowserManager:
                         cookie_cfg = (self.config.get("worker_config", {}).get("browser", {}).get("cookie_control", {}) if isinstance(self.config, dict) else {})
                     except Exception:
                         cookie_cfg = {}
-                    await install_init_script(self.context, bool(cookie_cfg.get("override_document_cookie", True)))
+                    # 既定は無効（誤検出/互換性への影響を避ける）。設定で明示有効化時のみON。
+                    await install_init_script(self.context, bool(cookie_cfg.get("override_document_cookie", False)))
 
                     # playwright-stealth を初回のみ適用（コンテキスト単位、冪等）
                     await self._ensure_stealth(self.context)
@@ -235,8 +244,21 @@ class BrowserManager:
                         pass
                     if not (platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None)):
                         await page.set_extra_http_headers({
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                            "User-Agent": (
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/120.0.0.0 Safari/537.36"
+                            ),
+                            "Accept-Language": "ja, en-US;q=0.8, en;q=0.7",
                         })
+                    else:
+                        # macOS GUI でも Accept-Language を明示（UAはシステムChromeに委任）
+                        try:
+                            await page.set_extra_http_headers({
+                                "Accept-Language": "ja, en-US;q=0.8, en;q=0.7",
+                            })
+                        except Exception:
+                            pass
 
                     logger.info(f"Worker {self.worker_id}: Accessing target form page: ***URL_REDACTED***")
                     # 初期ロードは macOS GUI でも安定性重視で 'domcontentloaded' を既定とする

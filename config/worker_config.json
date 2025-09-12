@@ -114,7 +114,13 @@
       "strip_set_cookie": false,
       "strip_set_cookie_third_party_only": true,
       "strip_set_cookie_domains": [],
-      "strip_set_cookie_exclude_domains": ["cloudflare.com"],
+      "strip_set_cookie_exclude_domains": [
+        "cloudflare.com",
+        "recaptcha.net",
+        "google.com",
+        "gstatic.com",
+        "hcaptcha.com"
+      ],
       "override_document_cookie": false,
       "ui_reject_banners": true
     }
