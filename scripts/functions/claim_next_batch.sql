@@ -1,6 +1,8 @@
 -- 旧シグネチャを先に削除して重複定義を排除（PostgRESTの多重定義エラー対策）
 drop function if exists public.claim_next_batch(date,bigint,text,integer,integer);
 drop function if exists public.claim_next_batch(date,bigint,text,integer,integer,integer);
+-- 既存エラー対処: 7引数版（戻り値の変更に伴い再作成が必要）
+drop function if exists public.claim_next_batch(date,bigint,text,integer,integer,integer,integer);
 
 -- 原子的専有で次のバッチを取得
 -- shard_id を指定すると該当シャードのみから取得
@@ -95,3 +97,9 @@ begin
   select upd.company_id, upd.queue_id, upd.assigned_at from upd;
 end;
 $$;
+
+-- 権限再付与: DROPによりEXECUTE権限が失効するため、必要ロールに再付与する
+-- ポリシー: 外部公開はしないため anon には付与しない。運用パターンに合わせて
+-- PostgRESTの標準ロールである authenticated / service_role のみ許可する。
+grant execute on function public.claim_next_batch(date,bigint,text,integer,integer,integer,integer)
+  to authenticated, service_role;
