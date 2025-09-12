@@ -1,6 +1,6 @@
 {
   "checkbox": {
-    "primary_keywords": ["営業", "提案", "メール"],
+    "primary_keywords": ["営業", "提案", "メール", "法人"],
     "secondary_keywords": ["その他", "一般", "other", "該当なし"],
     "tertiary_keywords": ["問い合わせ", "問合"],
     "privacy_keywords": [
@@ -13,7 +13,7 @@
     "max_group_select": 8
   },
   "radio": {
-    "primary_keywords": ["営業", "提案", "メール"],
+    "primary_keywords": ["営業", "提案", "メール", "法人"],
     "secondary_keywords": ["その他", "一般", "other", "該当なし"],
     "tertiary_keywords": ["問い合わせ", "問合"],
     "gender": {

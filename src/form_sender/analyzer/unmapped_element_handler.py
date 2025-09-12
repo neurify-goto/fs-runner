@@ -1266,8 +1266,8 @@ class UnmappedElementHandler:
                 key = info.get("name") or info.get("id") or f"cb_{id(cb)}"
                 groups.setdefault(key, []).append((cb, info))
 
-            # 汎用優先語（従来）
-            pri1 = ["営業", "提案", "メール"]
+            # 汎用優先語（従来+法人）
+            pri1 = ["営業", "提案", "メール", "法人"]
             pri2 = ["その他"]
 
             for group_key, items in groups.items():
@@ -1608,7 +1608,7 @@ class UnmappedElementHandler:
             except Exception as e:
                 logger.debug(f"Error grouping radio: {e}")
 
-        pri1 = ["営業", "提案", "メール"]
+        pri1 = ["営業", "提案", "メール", "法人"]
         # 既定の優先語（従来どおり）
         pri2 = ["その他", "other", "該当なし"]
 
@@ -1757,7 +1757,7 @@ class UnmappedElementHandler:
         client_data: Optional[Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
         handled: Dict[str, Dict[str, Any]] = {}
-        pri1 = ["営業", "提案", "メール"]
+        pri1 = ["営業", "提案", "メール", "法人"]
         pri2 = ["その他"]
         client_info = (
             client_data.get("client")
@@ -1926,11 +1926,11 @@ class UnmappedElementHandler:
                             if isinstance(pre_idx, int) and pre_idx >= 0
                             else ""
                         )
-                    is_dummy_default = (
-                        (not pre_text and not pre_val)
-                        or any(tok in pre_text.lower() for tok in exclude_tokens)
-                        or pre_val == ""
-                    )
+                        is_dummy_default = (
+                            (not pre_text and not pre_val)
+                            or any(tok in pre_text.lower() for tok in exclude_tokens)
+                            or pre_val == ""
+                        )
                         if is_dummy_default:
                             required = True  # 実質必須として自動選択を適用
                     except Exception:
