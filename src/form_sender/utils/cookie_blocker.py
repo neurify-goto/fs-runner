@@ -235,47 +235,126 @@ _KNOWN_REJECT_SELECTORS = [
 
 
 async def try_reject_banners(page: Page, enabled: bool = True, timeout_ms: int = 2000) -> None:
-    """バナーを検出して Reject 系操作を試行（失敗しても黙って続行）。"""
+    """バナーを検出して Reject 系操作を試行（ノーバナー時は即時帰還）。
+
+    変更点（性能改善）:
+    - 既知セレクタは即時 `query_selector` のみで検知（クリック時だけ短いtimeout）。
+    - テキストパターンは正規表現を一つに統合して1回探索。
+    - クリック前に `count()` で存在確認し、見つからなければ待機しない。
+    - iframe は優先度順（CMP/consentを含むURL優先）で最大数に制限、全体のタイムバジェットを強制。
+    """
     if not enabled:
         return
+
     try:
-        # 1) 既知セレクタを素早く試す
+        # 内部タイムバジェット（過大timeout防止）
+        # クリック待機は控えめ、検索は極小。合計 ~1.5s 以内を目安。
+        search_timeout_ms = min(max(50, int(timeout_ms * 0.2)), 400)
+        click_timeout_ms = min(timeout_ms, 1200)
+        total_budget_ms = 1500
+        max_frames = 5
+
+        start_ms = _now_ms()
+
+        # 事前に結合正規表現を準備
+        combined = _combined_reject_regex()
+
+        # 1) Main frame: 既知セレクタ → まとめ正規表現（存在確認→クリック）
+        if await _try_known_selectors(page, click_timeout_ms):
+            return
+        if await _try_role_regex(page, combined, search_timeout_ms, click_timeout_ms):
+            return
+
+        # 2) iframes: 優先度付きで上限まで探索（タイムバジェット超過で中止）
+        frames = [f for f in page.frames if f != page.main_frame]
+        frames = _prioritize_frames(frames)
+        for f in frames[:max_frames]:
+            if _elapsed_ms(start_ms) >= total_budget_ms:
+                break
+            if await _try_known_selectors(f, click_timeout_ms):
+                return
+            if await _try_role_regex(f, combined, search_timeout_ms, click_timeout_ms):
+                return
+    except Exception:
+        # 失敗しても全体処理は続行
+        pass
+
+
+# ===== helpers =====
+
+def _now_ms() -> int:
+    try:
+        import time
+        return int(time.time() * 1000)
+    except Exception:
+        return 0
+
+
+def _elapsed_ms(since_ms: int) -> int:
+    return max(0, _now_ms() - since_ms)
+
+
+def _combined_reject_regex():
+    # 1回だけコンパイルしてキャッシュ
+    try:
+        if not hasattr(_combined_reject_regex, "_cache"):
+            pat = "(?:" + "|".join(_REJECT_TEXTS) + ")"
+            _combined_reject_regex._cache = re.compile(pat, re.I)
+        return _combined_reject_regex._cache
+    except Exception:
+        return re.compile("|".join(_REJECT_TEXTS), re.I)
+
+
+async def _try_known_selectors(scope: Page, click_timeout_ms: int) -> bool:
+    try:
         for sel in _KNOWN_REJECT_SELECTORS:
             try:
-                el = await page.query_selector(sel)
+                el = await scope.query_selector(sel)
                 if el:
-                    await el.click(timeout=timeout_ms)
-                    return
+                    await el.click(timeout=click_timeout_ms)
+                    return True
             except Exception:
                 continue
-
-        # 2) ロール/テキストで幅広く探す
-        for pat in _REJECT_TEXTS:
-            try:
-                locator = page.get_by_role("button", name=re.compile(pat, re.I))
-                await locator.first.click(timeout=timeout_ms)
-                return
-            except Exception:
-                continue
-
-        # 3) iframe 内も軽く探索
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            for sel in _KNOWN_REJECT_SELECTORS:
-                try:
-                    el = await frame.query_selector(sel)
-                    if el:
-                        await el.click(timeout=timeout_ms)
-                        return
-                except Exception:
-                    continue
-            for pat in _REJECT_TEXTS:
-                try:
-                    locator = frame.get_by_role("button", name=re.compile(pat, re.I))
-                    await locator.first.click(timeout=timeout_ms)
-                    return
-                except Exception:
-                    continue
     except Exception:
-        pass
+        return False
+    return False
+
+
+async def _try_role_regex(scope: Page, regex, search_timeout_ms: int, click_timeout_ms: int) -> bool:
+    try:
+        loc = scope.get_by_role("button", name=regex)
+        try:
+            # 存在確認は超短時間で（見つかった時だけクリックに進む）
+            cnt = await loc.count()
+        except Exception:
+            cnt = 0
+        if cnt and cnt > 0:
+            try:
+                await loc.first.click(timeout=click_timeout_ms)
+                return True
+            except Exception:
+                # クリック失敗時はスキップ（他候補に期待）
+                return False
+    except Exception:
+        return False
+    return False
+
+
+def _prioritize_frames(frames: List[Page]):  # type: ignore[name-defined]
+    # URLにCMP/consent/cookieキーワードを含むものを優先
+    def score(f) -> int:
+        try:
+            u = (getattr(f, "url", "") or "").lower()
+        except Exception:
+            u = ""
+        s = 0
+        if _url_matches_any(u, CMP_HOST_PATTERNS):
+            s += 2
+        if any(k in u for k in ["consent", "cookie", "privacy", "gdpr"]):
+            s += 1
+        return -s  # sort ascending => higher score first
+
+    try:
+        return sorted(frames, key=score)
+    except Exception:
+        return frames
