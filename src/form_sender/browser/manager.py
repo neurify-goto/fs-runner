@@ -218,11 +218,18 @@ class BrowserManager:
                             "fonts": self._rb_block_fonts,
                             "stylesheets": self._rb_block_stylesheets,
                         }
+                        # 追加オプション（存在しない場合は安全な既定にフォールバック）
+                        s_third = bool(cookie_cfg.get("strip_set_cookie_third_party_only", True))
+                        s_domains = cookie_cfg.get("strip_set_cookie_domains", []) or []
+                        s_exclude = cookie_cfg.get("strip_set_cookie_exclude_domains", []) or []
                         await install_cookie_routes(
                             page,
                             block_cmp_scripts=bool(cookie_cfg.get("block_cmp_scripts", True)),
-                            strip_set_cookie=bool(cookie_cfg.get("strip_set_cookie", True)),
+                            strip_set_cookie=bool(cookie_cfg.get("strip_set_cookie", False)),
                             resource_block_rules=rb_rules,
+                            strip_set_cookie_third_party_only=s_third,
+                            strip_set_cookie_domains=list(s_domains) if isinstance(s_domains, list) else [],
+                            strip_set_cookie_exclude_domains=list(s_exclude) if isinstance(s_exclude, list) else [],
                         )
                     except Exception:
                         pass

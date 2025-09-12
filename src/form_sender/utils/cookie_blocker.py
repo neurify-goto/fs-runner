@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Iterable, Dict, Any, Optional, Tuple
+from typing import Iterable, Dict, Any, Optional, Tuple, List
+from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, Route
 
@@ -58,6 +59,24 @@ def _url_matches_any(url: str, patterns: Iterable[str]) -> bool:
     return any(p in u for p in patterns)
 
 
+def _hostname(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _host_matches(host: str, patterns: Iterable[str]) -> bool:
+    h = (host or "").lower()
+    for p in patterns or []:
+        p = (p or "").lower().lstrip(".")
+        if not p:
+            continue
+        if h == p or h.endswith("." + p):
+            return True
+    return False
+
+
 def get_cookie_blackhole_script() -> str:
     """document.cookie を無害化する初期化スクリプト。検出耐性を考慮し最低限のみ。"""
     return (
@@ -84,8 +103,11 @@ async def install_cookie_routes(
     page: Page,
     *,
     block_cmp_scripts: bool = True,
-    strip_set_cookie: bool = True,
+    strip_set_cookie: bool = False,
     resource_block_rules: Optional[Dict[str, bool]] = None,
+    strip_set_cookie_third_party_only: bool = True,
+    strip_set_cookie_domains: Optional[List[str]] = None,
+    strip_set_cookie_exclude_domains: Optional[List[str]] = None,
 ) -> None:
     """ネットワークルーティングを設定。
 
@@ -99,10 +121,17 @@ async def install_cookie_routes(
     block_fonts = bool(resource_block_rules.get("fonts", False))
     block_styles = bool(resource_block_rules.get("stylesheets", False))
 
+    # 呼び出し時の main host（about:blank の可能性を考慮し、ハンドラ内で都度取得も行う）
+    initial_main_url = getattr(page.main_frame, "url", "")
+
     async def _route_handler(route: Route):
         req = route.request
         r_type = req.resource_type
         url = req.url
+        host = _hostname(url)
+        # 動的に main host を評価（初期は about:blank の場合がある）
+        main_url = getattr(page.main_frame, "url", "") or initial_main_url
+        main_host = _hostname(main_url)
 
         # 1) 静的資源のブロック（既存ポリシーと一致）
         if (block_images and r_type in ("image", "media")) or \
@@ -124,6 +153,22 @@ async def install_cookie_routes(
 
         # 3) Set-Cookie 除去（ドキュメント/XHR/Fetch に限定）
         if strip_set_cookie and r_type in ("document", "xhr", "fetch"):
+            # 限定条件の判定（既定: 第三者のみ）。exclude に該当するホストは除外
+            try:
+                if strip_set_cookie_exclude_domains and _host_matches(host, strip_set_cookie_exclude_domains):
+                    raise RuntimeError("exclude-domain")
+                should_strip = False
+                if strip_set_cookie_domains:
+                    should_strip = _host_matches(host, strip_set_cookie_domains)
+                elif strip_set_cookie_third_party_only:
+                    # main_host が未確定（about:blank等）の場合は安全側でストリップしない
+                    should_strip = bool(main_host) and host and (host != main_host and not host.endswith("." + main_host))
+                else:
+                    should_strip = True
+            except RuntimeError:
+                should_strip = False
+
+            if should_strip:
             try:
                 resp = await route.fetch()
                 # ヘッダから Set-Cookie を除去
@@ -234,4 +279,3 @@ async def try_reject_banners(page: Page, enabled: bool = True, timeout_ms: int =
                     continue
     except Exception:
         pass
-

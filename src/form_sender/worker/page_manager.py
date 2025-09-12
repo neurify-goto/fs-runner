@@ -84,7 +84,10 @@ class PageManager:
                     self.page,
                     block_cmp_scripts=cookie_block_cmp,
                     strip_set_cookie=cookie_strip_set,
-                    resource_block_rules={"images": rb_images, "fonts": rb_fonts, "stylesheets": rb_styles}
+                    resource_block_rules={"images": rb_images, "fonts": rb_fonts, "stylesheets": rb_styles},
+                    strip_set_cookie_third_party_only=bool(cookie_cfg.get("strip_set_cookie_third_party_only", True)),
+                    strip_set_cookie_domains=list(cookie_cfg.get("strip_set_cookie_domains", []) or []),
+                    strip_set_cookie_exclude_domains=list(cookie_cfg.get("strip_set_cookie_exclude_domains", []) or []),
                 )
             except Exception:
                 pass
