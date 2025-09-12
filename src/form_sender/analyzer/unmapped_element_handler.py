@@ -761,7 +761,11 @@ class UnmappedElementHandler:
                 m_br = re.search(r"\[(\d)\](?!.*\d)", blob)
                 if m_br:
                     raw = int(m_br.group(1))
-                    return raw + 1  # 0→1, 1→2, 2→3
+                    # 0始まり/1始まり双方に対応
+                    if raw in (1, 2, 3):
+                        return raw
+                    if raw in (0,):
+                        return raw + 1  # 0→1
 
                 # 接頭辞 + 数字（tel1/phone2/電話3）
                 for s in (nm, ide, cls):
