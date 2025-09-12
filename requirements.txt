@@ -10,6 +10,7 @@ lxml==4.9.3
 playwright==1.40.0
 # Stealth evasion for Playwright (bot/protection回避用)
 playwright-stealth==2.0.0
+tldextract==3.4.4  # eTLD+1 判定（サブドメインを第一者として扱うため）
 
 # HTTP client - Supabaseとの互換性を考慮
 aiohttp==3.9.0

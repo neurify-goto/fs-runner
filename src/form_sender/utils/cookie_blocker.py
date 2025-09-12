@@ -18,6 +18,11 @@ from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, Route, Frame, TimeoutError as PlaywrightTimeoutError
 import logging
+try:
+    import tldextract  # MIT License
+    _HAS_TLDEXTRACT = True
+except Exception:
+    _HAS_TLDEXTRACT = False
 
 
 # 主要CMPドメイン（過剰ブロックを避けつつ高頻度なもの中心）
@@ -83,6 +88,30 @@ def _host_matches(host: str, patterns: Iterable[str]) -> bool:
         if h == p or h.endswith("." + p):
             return True
     return False
+
+
+def _registrable_domain(host: str) -> str:
+    """eTLD+1（登録可能ドメイン）を返す。tldextractが無い場合は末尾2ラベルのフォールバック。
+
+    例: www.example.co.uk → example.co.uk
+    """
+    h = (host or "").lower()
+    if not h:
+        return ""
+    try:
+        if _HAS_TLDEXTRACT:
+            ext = tldextract.extract(h)
+            if ext.domain and ext.suffix:
+                return f"{ext.domain}.{ext.suffix}".lower()
+            # suffixが取れないケースはそのまま返す
+            return h
+    except Exception:
+        pass
+    # フォールバック: 末尾2ラベル
+    parts = h.split('.')
+    if len(parts) >= 2:
+        return '.'.join(parts[-2:])
+    return h
 
 
 def get_cookie_blackhole_script() -> str:
@@ -170,7 +199,13 @@ async def install_cookie_routes(
                     should_strip = _host_matches(host, strip_set_cookie_domains)
                 elif strip_set_cookie_third_party_only:
                     # main_host が未確定（about:blank等）の場合は安全側でストリップしない
-                    should_strip = bool(main_host) and host and (host != main_host and not host.endswith("." + main_host))
+                    # 判定は eTLD+1（登録可能ドメイン）単位で行う（www/api 等の同一サイトサブドメインはファーストパーティ扱い）
+                    if bool(main_host) and host:
+                        rd_main = _registrable_domain(main_host)
+                        rd_host = _registrable_domain(host)
+                        should_strip = bool(rd_main) and bool(rd_host) and (rd_main != rd_host)
+                    else:
+                        should_strip = False
                 else:
                     should_strip = True
             except RuntimeError:
