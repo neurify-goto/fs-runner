@@ -292,7 +292,7 @@ async def try_reject_banners(page: Page, enabled: bool = True, timeout_ms: int =
         combined = _combined_reject_regex()
 
         # 1) Main frame: 既知セレクタ → まとめ正規表現（存在確認→クリック）
-        if await _try_known_selectors(page, click_timeout_ms):
+        if await _try_known_selectors(page, search_timeout_ms, click_timeout_ms):
             return
         if await _try_role_regex(page, combined, search_timeout_ms, click_timeout_ms):
             return
@@ -303,7 +303,7 @@ async def try_reject_banners(page: Page, enabled: bool = True, timeout_ms: int =
         for f in frames[:max_frames]:
             if _elapsed_ms(start_ms) >= total_budget_ms:
                 break
-            if await _try_known_selectors(f, click_timeout_ms):
+            if await _try_known_selectors(f, search_timeout_ms, click_timeout_ms):
                 return
             if await _try_role_regex(f, combined, search_timeout_ms, click_timeout_ms):
                 return
@@ -330,11 +330,11 @@ def _combined_reject_regex():
     return _COMBINED_REJECT_RE
 
 
-async def _try_known_selectors(scope: Page, click_timeout_ms: int) -> bool:
+async def _try_known_selectors(scope: Page, search_timeout_ms: int, click_timeout_ms: int) -> bool:
     try:
         for sel in _KNOWN_REJECT_SELECTORS:
             try:
-                el = await scope.query_selector(sel)
+                el = await scope.query_selector(sel, timeout=search_timeout_ms)
                 if el:
                     await el.click(timeout=click_timeout_ms)
                     return True
@@ -348,18 +348,16 @@ async def _try_known_selectors(scope: Page, click_timeout_ms: int) -> bool:
 async def _try_role_regex(scope: Page, regex, search_timeout_ms: int, click_timeout_ms: int) -> bool:
     try:
         loc = scope.get_by_role("button", name=regex)
+        # 存在確認は wait_for(state='attached') で短時間評価
         try:
-            # 存在確認は超短時間で（見つかった時だけクリックに進む）
-            cnt = await loc.count()
-        except Exception:
-            cnt = 0
-        if cnt and cnt > 0:
+            await loc.first.wait_for(state="attached", timeout=search_timeout_ms)
             try:
                 await loc.first.click(timeout=click_timeout_ms)
                 return True
             except Exception:
-                # クリック失敗時はスキップ（他候補に期待）
                 return False
+        except Exception:
+            return False
     except Exception:
         return False
     return False

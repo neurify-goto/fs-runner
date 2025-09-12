@@ -80,10 +80,18 @@ class PageManager:
                 await install_init_script(context, cookie_blackhole)
             except Exception:
                 pass
-            # playwright-stealth を適用（設定尊重）
+            # playwright-stealth を適用（設定尊重）: 言語をBrowserManagerと同一に上書き
             try:
                 if stealth_enabled:
-                    await Stealth().apply_stealth_async(context)
+                    langs = None
+                    try:
+                        # worker_config.browser.stealth.languages を尊重（無ければ ja-JP/ja）
+                        langs = (worker_cfg.get("browser", {}).get("stealth", {}).get("languages") if isinstance(worker_cfg, dict) else None)
+                    except Exception:
+                        langs = None
+                    if not isinstance(langs, (list, tuple)) or not langs:
+                        langs = ["ja-JP", "ja"]
+                    await Stealth(navigator_languages_override=tuple(langs)).apply_stealth_async(context)
             except Exception:
                 pass
             self.page = await context.new_page()
