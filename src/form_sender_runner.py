@@ -721,6 +721,61 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         if not comp.data:
             raise RuntimeError('company not found')
         company = comp.data[0]
+        # 当日すでに submissions 記録がある場合はスキップ（DB側JOINを外したため、ここで一意性を担保）
+        try:
+            start_utc, end_utc = jst_utc_bounds(target_date)
+            dup = (
+                supabase.table('submissions')
+                .select('id', count='exact')
+                .eq('targeting_id', targeting_id)
+                .eq('company_id', company_id)
+                .gte('submitted_at', start_utc.isoformat().replace('+00:00', 'Z'))
+                .lt('submitted_at', end_utc.isoformat().replace('+00:00', 'Z'))
+                .limit(1)
+                .execute()
+            )
+            dup_cnt = getattr(dup, 'count', None)
+            if not isinstance(dup_cnt, int):
+                dup_cnt = len(getattr(dup, 'data', []) or [])
+            if dup_cnt and dup_cnt > 0:
+                classify_detail = {
+                    'code': 'SKIPPED_ALREADY_SENT_TODAY',
+                    'category': 'POLICY',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 1.0,
+                }
+                _md_args = {
+                    'p_target_date': str(target_date),
+                    'p_targeting_id': targeting_id,
+                    'p_company_id': company_id,
+                    'p_success': False,
+                    'p_error_type': 'SKIPPED_ALREADY_SENT_TODAY',
+                    'p_classify_detail': classify_detail,
+                    'p_field_mapping': None,
+                    'p_bot_protection': False,
+                    'p_submitted_at': jst_now().isoformat(),
+                    'p_run_id': run_id,
+                }
+                try:
+                    supabase.rpc('mark_done', _md_args).execute()
+                except Exception as e_mdsk:
+                    if _should_fallback_on_rpc_error(e_mdsk, 'mark_done', ['p_run_id']):
+                        _md_args.pop('p_run_id', None)
+                        supabase.rpc('mark_done', _md_args).execute()
+                    else:
+                        raise
+                try:
+                    wid = getattr(worker, 'worker_id', 0)
+                    _get_lifecycle_logger().info(
+                        f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=SKIPPED_ALREADY_SENT_TODAY"
+                    )
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            # チェック失敗時は通常処理を継続
+            pass
         # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
         if company.get('black') is not None:
             raise RuntimeError('company blacklisted')
