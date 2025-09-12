@@ -208,10 +208,8 @@ class BrowserManager:
                     await self._ensure_stealth(self.context)
                     # 新規ページをオープン（stealth適用後に作成する必要あり）
                     page = await self.context.new_page()
-                    # 資源ブロックは常に有効化（計画: 画像ブロックON、フォントON）。
                     # UAの変更はmacOS GUIでは避けて安定性を優先。
-                    await self._setup_resource_blocking_routes(page)
-                    # Cookieコントロールのネットワーク層（CMPブロック/Set-Cookie除去）
+                    # Cookieコントロールのネットワーク層（CMPブロック/Set-Cookie除去 + 資源ブロックも統合）
                     try:
                         rb_rules = {
                             "images": self._rb_block_images,
