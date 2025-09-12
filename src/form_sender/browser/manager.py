@@ -75,6 +75,9 @@ class BrowserManager:
                     logger.info(f"Worker {self.worker_id}: Playwright initialized with stealth context manager")
                 except Exception as e:
                     logger.warning(f"Worker {self.worker_id}: Stealth context init failed, fallback to plain Playwright: {e}")
+                    # フォールバック時は必ずステルスCM参照を破棄して、close() 側で stop() を実行可能にする
+                    self._stealth_cm = None
+                    self._stealth = None
                     self.playwright = await async_playwright().start()
             else:
                 self.playwright = await async_playwright().start()
@@ -370,19 +373,23 @@ class BrowserManager:
                 self.browser = None
 
         if self.playwright:
+            # ステルス有無に関わらず、最終的に stop() を試みてプロセスリークを防ぐ
             try:
                 if self._stealth_cm is not None:
-                    # use_async の __aexit__ を呼んで後始末
-                    await self._stealth_cm.__aexit__(None, None, None)
-                    logger.info(f"Worker {self.worker_id}: Stealth context manager exited.")
-                else:
+                    try:
+                        await self._stealth_cm.__aexit__(None, None, None)
+                        logger.info(f"Worker {self.worker_id}: Stealth context manager exited.")
+                    finally:
+                        # CM 参照は破棄して以降の停止処理に影響しないようにする
+                        self._stealth_cm = None
+                # 冪等に stop() を呼ぶ（ステルス側で停止済みでも例外を握り潰して継続）
+                try:
                     await self.playwright.stop()
                     logger.info(f"Worker {self.worker_id}: Playwright stopped.")
-            except Exception as e:
-                # Playwrightが既に停止している場合は警告レベルでログ出力
-                if "invalid state" in str(e) or "Connection closed" in str(e):
-                    logger.warning(f"Worker {self.worker_id}: Playwright was already stopped: {e}")
-                else:
-                    logger.error(f"Worker {self.worker_id}: Error stopping Playwright: {e}")
+                except Exception as e:
+                    if "invalid state" in str(e) or "Connection closed" in str(e):
+                        logger.warning(f"Worker {self.worker_id}: Playwright was already stopped: {e}")
+                    else:
+                        logger.error(f"Worker {self.worker_id}: Error stopping Playwright: {e}")
             finally:
                 self.playwright = None

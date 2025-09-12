@@ -93,12 +93,6 @@ class PageManager:
             self.page.set_default_timeout(30000)
             self.page.set_default_navigation_timeout(30000)
 
-            # 同意バナーのUI拒否（短時間、設定尊重）
-            try:
-                await try_reject_banners(self.page, enabled=ui_reject_enabled, timeout_ms=2000)
-            except Exception:
-                pass
-
             logger.info("ページを初期化しました")
             return self.page
 
@@ -137,6 +131,19 @@ class PageManager:
 
             # ページロード完了待機
             await self.wait_for_page_load()
+
+            # コンフィグに基づき、ナビゲーション後にクッキーバナーを拒否（UI層）
+            try:
+                from config.manager import get_worker_config
+                worker_cfg = get_worker_config()
+                cookie_cfg = (worker_cfg.get("browser", {}).get("cookie_control", {}) if isinstance(worker_cfg, dict) else {})
+                ui_reject_enabled = bool(cookie_cfg.get("ui_reject_banners", True))
+            except Exception:
+                ui_reject_enabled = True
+            try:
+                await try_reject_banners(self.page, enabled=ui_reject_enabled, timeout_ms=2000)
+            except Exception:
+                pass
 
             logger.info("ページアクセス成功")
             return {"success": True}
