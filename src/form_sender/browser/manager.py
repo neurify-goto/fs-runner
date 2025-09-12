@@ -40,8 +40,13 @@ class BrowserManager:
         try:
             import asyncio as _asyncio
             self._context_lock = _asyncio.Lock()
-        except Exception:
+        except Exception as e:
+            # ロックが確保できない環境でも機能は継続（安全だが競合耐性は低下）
             self._context_lock = None
+            try:
+                logger.warning(f"Worker {self.worker_id}: context lock unavailable, proceeding without lock: {e}")
+            except Exception:
+                pass
 
         # 設定値
         # デフォルトはやや長め（初回読み込みの安定性重視）
@@ -201,14 +206,7 @@ class BrowserManager:
                     except Exception:
                         # 健全性検査失敗は続行（下で再生成）
                         pass
-                    # 既存コンテキストの健全性を事前チェック（切断済みなら再生成させる）
-                    if self.context:
-                        try:
-                            _ = self.context.pages  # 接続切れ時に例外が上がることがある
-                        except Exception:
-                            # 破損/切断されたコンテキストは破棄し、ステルス適用フラグもリセット
-                            self.context = None
-                            self._stealth_applied = False
+                    # 二重の健全性チェックは不要（_ensure_context_health 内で実施済み）
 
                     # コンテキストが無い場合のみ作成
                     context_created_here = False
@@ -273,16 +271,22 @@ class BrowserManager:
                         }
                         # 追加オプション（存在しない場合は安全な既定にフォールバック）
                         s_third = bool(cookie_cfg.get("strip_set_cookie_third_party_only", True))
-                        s_domains = cookie_cfg.get("strip_set_cookie_domains", []) or []
-                        s_exclude = cookie_cfg.get("strip_set_cookie_exclude_domains", []) or []
+                        s_domains = cookie_cfg.get("strip_set_cookie_domains", [])
+                        if not isinstance(s_domains, list):
+                            logger.warning("cookie_control.strip_set_cookie_domains must be a list; using empty list")
+                            s_domains = []
+                        s_exclude = cookie_cfg.get("strip_set_cookie_exclude_domains", [])
+                        if not isinstance(s_exclude, list):
+                            logger.warning("cookie_control.strip_set_cookie_exclude_domains must be a list; using empty list")
+                            s_exclude = []
                         await install_cookie_routes(
                             page,
                             block_cmp_scripts=bool(cookie_cfg.get("block_cmp_scripts", True)),
                             strip_set_cookie=bool(cookie_cfg.get("strip_set_cookie", False)),
                             resource_block_rules=rb_rules,
                             strip_set_cookie_third_party_only=s_third,
-                            strip_set_cookie_domains=list(s_domains) if isinstance(s_domains, list) else [],
-                            strip_set_cookie_exclude_domains=list(s_exclude) if isinstance(s_exclude, list) else [],
+                            strip_set_cookie_domains=list(s_domains),
+                            strip_set_cookie_exclude_domains=list(s_exclude),
                         )
                     except Exception:
                         pass
@@ -337,13 +341,18 @@ class BrowserManager:
                     except Exception:
                         pass
                     # 当回で作成したcontextがあればクリーンアップ（リーク抑止）
-                    try:
-                        if context_created_here and self.context:
-                            await self.context.close()
+                    if context_created_here:
+                        try:
+                            if self.context:
+                                await self.context.close()
+                        except Exception as _ctx_close_err:
+                            try:
+                                logger.debug(f"Worker {self.worker_id}: context close on timeout failed: {_ctx_close_err}")
+                            except Exception:
+                                pass
+                        finally:
                             self.context = None
                             self._stealth_applied = False
-                    except Exception:
-                        pass
                     logger.error(f"Worker {self.worker_id}: Page load timeout for ***URL_REDACTED*** (attempt {i+1}/2)")
                 except Exception as e:
                     last_err = e

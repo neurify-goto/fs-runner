@@ -16,7 +16,8 @@ import re
 from typing import Iterable, Dict, Any, Optional, Tuple, List
 from urllib.parse import urlparse
 
-from playwright.async_api import BrowserContext, Page, Route, Frame
+from playwright.async_api import BrowserContext, Page, Route, Frame, TimeoutError as PlaywrightTimeoutError
+import logging
 
 
 # 主要CMPドメイン（過剰ブロックを避けつつ高頻度なもの中心）
@@ -188,8 +189,29 @@ async def install_cookie_routes(
                         content_type=resp.headers.get("content-type")
                     )
                     return
-                except Exception:
-                    # フェッチ/フィルフィル失敗時は通常継続
+                except (PlaywrightTimeoutError, ConnectionError) as e:
+                    try:
+                        logging.getLogger(__name__).debug(f"route fetch/fulfill failed (timeout/conn): {e}")
+                    except Exception:
+                        pass
+                    try:
+                        await route.continue_()
+                        return
+                    except Exception as cont_err:
+                        try:
+                            logging.getLogger(__name__).debug(f"route continue failed: {cont_err}")
+                        except Exception:
+                            pass
+                        try:
+                            await route.abort()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    # 予期しない例外でも処理は継続
+                    try:
+                        logging.getLogger(__name__).debug(f"route fetch/fulfill unexpected: {e}")
+                    except Exception:
+                        pass
                     try:
                         await route.continue_()
                         return
@@ -224,6 +246,9 @@ _REJECT_TEXTS = [
     r"Rechazar todo",   # ES
     r"Rifiuta tutto",   # IT
 ]
+
+# Module-level compiled regex for performance
+_COMBINED_REJECT_RE = re.compile("(?:" + "|".join(_REJECT_TEXTS) + ")", re.I)
 
 _KNOWN_REJECT_SELECTORS = [
     # OneTrust
@@ -302,14 +327,7 @@ def _elapsed_ms(since_ms: int) -> int:
 
 
 def _combined_reject_regex():
-    # 1回だけコンパイルしてキャッシュ
-    try:
-        if not hasattr(_combined_reject_regex, "_cache"):
-            pat = "(?:" + "|".join(_REJECT_TEXTS) + ")"
-            _combined_reject_regex._cache = re.compile(pat, re.I)
-        return _combined_reject_regex._cache
-    except Exception:
-        return re.compile("|".join(_REJECT_TEXTS), re.I)
+    return _COMBINED_REJECT_RE
 
 
 async def _try_known_selectors(scope: Page, click_timeout_ms: int) -> bool:
