@@ -1029,6 +1029,12 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                 backoff_initial, backoff_max = 2, 60
             backoff = backoff_initial
             processed = 0
+            # 連続アイドル検出: 一定時間連続で claim が空振りの場合は安全に終了
+            try:
+                idle_limit = int(get_worker_config().get('runner', {}).get('idle_exit_seconds', 900))  # 既定15分
+            except Exception:
+                idle_limit = 900
+            last_work_ts = _time.time()
             # 取り残し再配布の定期実行（worker_id=0 のみ）
             try:
                 runner_cfg = get_worker_config().get('runner', {})
@@ -1089,9 +1095,20 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                     sleep_for = max(0.1, backoff + random.uniform(-jitter, jitter))
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, backoff_max)
+                    # アイドル継続判定
+                    try:
+                        now_ts = _time.time()
+                        if idle_limit > 0 and (now_ts - last_work_ts) >= idle_limit:
+                            _get_lifecycle_logger().info(
+                                f"no_work_timeout: worker_id={worker_id}, targeting_id={targeting_id}, idle_for_sec={int(now_ts - last_work_ts)}"
+                            )
+                            return
+                    except Exception:
+                        pass
                 else:
                     backoff = backoff_initial
                     processed += 1
+                    last_work_ts = _time.time()
                     # テスト用: 規定数に達したら終了
                     if max_processed is not None and processed >= max_processed:
                         return

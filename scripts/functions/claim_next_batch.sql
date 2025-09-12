@@ -67,23 +67,24 @@ begin
     v_effective_limit := p_limit;
   end if;
 
+  -- これまで当日重複排除のため submissions との LEFT JOIN で s.id is null を条件に含めていたが、
+  -- 運用上、send_queue 自体が当日一意（(date, targeting_id, company_id) UNIQUE）であり、
+  -- mark_done が確定時に status を done/failed へ更新するため、重複抑止は send_queue の状態で十分。
+  -- 一方、JOIN 条件により「当日すでに submissions がある pending 行」が永遠に取得不能となり、
+  -- 事実上のスタック（空振りループ）を引き起こすケースが観測された。
+  -- よって当該 JOIN を排除し、原子的専有は send_queue の status 管理に一元化する。
+
   return query
   with to_claim as (
     select sq.id
-    from public.send_queue sq
-    left join public.submissions s
-      on s.targeting_id = p_targeting_id
-     and s.company_id   = sq.company_id
-     and s.submitted_at >= v_start_utc
-     and s.submitted_at <  v_end_utc
-    where sq.target_date_jst = p_target_date
-      and sq.targeting_id    = p_targeting_id
-      and sq.status          = 'pending'
-      and (p_shard_id is null or sq.shard_id = p_shard_id)
-      and s.id is null
-    order by sq.priority, sq.id
-    limit v_effective_limit
-    for update of sq skip locked
+      from public.send_queue sq
+     where sq.target_date_jst = p_target_date
+       and sq.targeting_id    = p_targeting_id
+       and sq.status          = 'pending'
+       and (p_shard_id is null or sq.shard_id = p_shard_id)
+     order by sq.priority, sq.id
+     limit v_effective_limit
+     for update of sq skip locked
   ), upd as (
     update public.send_queue sq
        set status = 'assigned', assigned_by = p_run_id, assigned_at = now()
