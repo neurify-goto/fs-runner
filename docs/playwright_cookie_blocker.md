@@ -19,6 +19,22 @@
 
 本稿では、まず基礎となる概念（ブラウザコンテキスト）から始め、高度な傍受技術（`page.route`、`addInitScript`）、そしてそれらの実践的な応用へと読者を導きます。
 
+### デフォルト設定（本リポジトリ）
+
+本プロジェクトの既定値は、実運用の送信精度とプライバシーの両立を狙ったバランス設定です。
+
+- ネットワーク層
+  - CMPスクリプトのブロック: 有効（`cookie_control.block_cmp_scripts = true`）
+  - Set-Cookieヘッダーの除去: 有効（`cookie_control.strip_set_cookie = true`）
+    - 但し「第三者のみ」対象（`strip_set_cookie_third_party_only = true`）
+    - 重要ドメイン（例: cloudflare.com, recaptcha.net, gstatic.com, google.com, hcaptcha.com）は除外リストで保護
+- JS層
+  - `document.cookie` のオーバーライド（ブラックホール）: 既定で無効（必要時のみ有効化）
+- UI層
+  - 同意バナーの自動「拒否」操作: 有効（短時間で探索・操作）
+
+必要に応じて `config/worker_config.json` の `browser.cookie_control.*` を調整してください。
+
 ## 第I部 基礎概念：状態のサンドボックスとしてのブラウザコンテキスト
 
 ### 1.1. `BrowserContext`の中心的な役割
@@ -377,6 +393,5 @@ Google スプレッドシートにエクスポート
     
 
 結論として、Playwrightのネイティブ機能は、汎用的なサードパーティプラグインが提供できるものよりも強力でカスタマイズされたソリューションを構築する能力を開発者に与えます。これらのツールを習得することで、あらゆるCookie関連の課題に対処するための盤石な基盤が築かれます。
-
 
 

@@ -111,7 +111,7 @@
     },
     "cookie_control": {
       "block_cmp_scripts": true,
-      "strip_set_cookie": false,
+      "strip_set_cookie": true,
       "strip_set_cookie_third_party_only": true,
       "strip_set_cookie_domains": [],
       "strip_set_cookie_exclude_domains": [
