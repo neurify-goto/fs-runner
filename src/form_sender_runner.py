@@ -688,7 +688,15 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         if not rows:
             return False
 
-        company_id = rows[0]['company_id']
+        company_id = rows[0].get('company_id')
+        # claim 時点の assigned_at（関数戻り値に含まれない環境では None）
+        queue_assigned_at = None
+        try:
+            val = rows[0].get('assigned_at')
+            if isinstance(val, str) and val:
+                queue_assigned_at = val
+        except Exception:
+            queue_assigned_at = None
         # 処理開始ログ（最小限、IDのみ）
         try:
             wid = getattr(worker, 'worker_id', 0)
@@ -778,7 +786,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             logger.warning(f"duplicate check failed for company_id={company_id} (suppressed): {e_dup}")
             try:
                 # 自分が割り当てた行のみ pending に戻す（競合安全）
-                (
+                q = (
                     supabase.table('send_queue')
                     .update({'status': 'pending', 'assigned_by': None, 'assigned_at': None})
                     .eq('target_date_jst', str(target_date))
@@ -786,8 +794,11 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                     .eq('company_id', company_id)
                     .eq('status', 'assigned')
                     .eq('assigned_by', run_id)
-                    .execute()
                 )
+                # 可能なら assigned_at の一致も条件に含めて競合安全性を高める
+                if queue_assigned_at:
+                    q = q.eq('assigned_at', queue_assigned_at)
+                q.execute()
                 try:
                     wid = getattr(worker, 'worker_id', 0)
                     _get_lifecycle_logger().info(

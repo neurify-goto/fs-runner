@@ -13,7 +13,7 @@ create or replace function public.claim_next_batch(
   p_max_daily integer default null,
   p_assigned_grace_minutes integer default 2 -- 直近割当の猶予分（cap消費に含めない）
 )
-returns table(company_id bigint)
+returns table(company_id bigint, queue_id bigint, assigned_at timestamp with time zone)
 language plpgsql
 as $$
 declare
@@ -90,8 +90,8 @@ begin
        set status = 'assigned', assigned_by = p_run_id, assigned_at = now()
       from to_claim tc
      where sq.id = tc.id
-     returning sq.company_id as company_id
+     returning sq.company_id as company_id, sq.id as queue_id, sq.assigned_at as assigned_at
   )
-  select upd.company_id from upd;
+  select upd.company_id, upd.queue_id, upd.assigned_at from upd;
 end;
 $$;
