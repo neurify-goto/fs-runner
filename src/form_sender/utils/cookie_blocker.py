@@ -193,6 +193,19 @@ async def install_cookie_routes(
             pass
         return _hostname(initial_main_url)
 
+    # registrable domain cache (per-page-instance)
+    _rd_cache: Dict[str, str] = {}
+
+    def _rd_cached(h: str) -> str:
+        if not h:
+            return ""
+        v = _rd_cache.get(h)
+        if v is not None:
+            return v
+        v = _registrable_domain(h)
+        _rd_cache[h] = v
+        return v
+
     async def _route_handler(route: Route):
         req = route.request
         r_type = req.resource_type
@@ -230,8 +243,8 @@ async def install_cookie_routes(
                     should_strip = _host_matches(host, strip_set_cookie_domains)
                 elif strip_set_cookie_third_party_only:
                     # 判定は eTLD+1（登録可能ドメイン）単位で行う（www/api 等の同一サイトサブドメインはファーストパーティ扱い）
-                    rd_main = _registrable_domain(main_host)
-                    rd_host = _registrable_domain(host)
+                    rd_main = _rd_cached(main_host)
+                    rd_host = _rd_cached(host)
                     should_strip = bool(rd_main) and bool(rd_host) and (rd_main != rd_host)
                 else:
                     should_strip = True
