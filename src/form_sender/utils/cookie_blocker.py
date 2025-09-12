@@ -161,14 +161,45 @@ async def install_cookie_routes(
     # 呼び出し時の main host（about:blank の可能性を考慮し、ハンドラ内で都度取得も行う）
     initial_main_url = getattr(page.main_frame, "url", "")
 
+    def _derive_main_host_for_request() -> str:
+        """初回ナビゲーション直後でも安定して main_host を導出する。
+
+        優先順:
+        1) page.main_frame.url（about:blank 以外）
+        2) リクエストヘッダ Referer
+        3) ドキュメント要求ならリクエストURL自体（第一者とみなす）
+        4) route登録時の initial_main_url
+        """
+        try:
+            main_url_now = getattr(page.main_frame, "url", "") or ""
+            if main_url_now and not main_url_now.startswith("about:"):
+                return _hostname(main_url_now)
+        except Exception:
+            pass
+        try:
+            ref = (route.request.headers or {}).get("referer") or (route.request.headers or {}).get("Referer")
+            if ref:
+                h = _hostname(ref)
+                if h:
+                    return h
+        except Exception:
+            pass
+        try:
+            if route.request.resource_type == "document":
+                h = _hostname(route.request.url)
+                if h:
+                    return h
+        except Exception:
+            pass
+        return _hostname(initial_main_url)
+
     async def _route_handler(route: Route):
         req = route.request
         r_type = req.resource_type
         url = req.url
         host = _hostname(url)
-        # 動的に main host を評価（初期は about:blank の場合がある）
-        main_url = getattr(page.main_frame, "url", "") or initial_main_url
-        main_host = _hostname(main_url)
+        # 動的に main host を評価（about:blank回避のためRefererやdocument判定を利用）
+        main_host = _derive_main_host_for_request()
 
         # 1) 静的資源のブロック（既存ポリシーと一致）
         if (block_images and r_type in ("image", "media")) or \
@@ -198,14 +229,10 @@ async def install_cookie_routes(
                 if strip_set_cookie_domains:
                     should_strip = _host_matches(host, strip_set_cookie_domains)
                 elif strip_set_cookie_third_party_only:
-                    # main_host が未確定（about:blank等）の場合は安全側でストリップしない
                     # 判定は eTLD+1（登録可能ドメイン）単位で行う（www/api 等の同一サイトサブドメインはファーストパーティ扱い）
-                    if bool(main_host) and host:
-                        rd_main = _registrable_domain(main_host)
-                        rd_host = _registrable_domain(host)
-                        should_strip = bool(rd_main) and bool(rd_host) and (rd_main != rd_host)
-                    else:
-                        should_strip = False
+                    rd_main = _registrable_domain(main_host)
+                    rd_host = _registrable_domain(host)
+                    should_strip = bool(rd_main) and bool(rd_host) and (rd_main != rd_host)
                 else:
                     should_strip = True
             except RuntimeError:
