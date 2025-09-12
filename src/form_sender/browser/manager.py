@@ -13,8 +13,7 @@ from playwright.async_api import (
     Browser,
     BrowserContext,
     Page,
-    TimeoutError as PlaywrightTimeoutError,
-    Route
+    TimeoutError as PlaywrightTimeoutError
 )
 from playwright_stealth import Stealth
 from form_sender.utils.cookie_blocker import install_cookie_routes, install_init_script, try_reject_banners
@@ -323,28 +322,6 @@ class BrowserManager:
         except Exception as e:
             # 失敗しても処理は続行（回避が無くても動作自体は可能）
             logger.warning(f"Worker {self.worker_id}: Failed to apply stealth evasions (suppressed): {e}")
-
-    async def _setup_resource_blocking_routes(self, page: Page) -> None:
-        """不要なリソースをブロックして安定性を向上させる"""
-        async def handle_route(route: Route):
-            try:
-                req = route.request
-                r_type = req.resource_type
-                if (self._rb_block_images and r_type in ["image", "media"]) or \
-                   (self._rb_block_fonts and r_type == "font") or \
-                   (self._rb_block_stylesheets and r_type == "stylesheet"):
-                    await route.abort()
-                else:
-                    await route.continue_()
-            except Exception:
-                try:
-                    await route.continue_()
-                except Exception:
-                    pass
-        try:
-            await page.route("**/*", handle_route)
-        except Exception as e:
-            logger.warning(f"Worker {self.worker_id}: Failed to setup resource blocking routes: {e}")
 
     async def _cleanup_context_on_error(self):
         """エラー時のコンテキストクリーンアップ"""
