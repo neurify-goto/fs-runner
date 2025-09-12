@@ -36,17 +36,9 @@ class BrowserManager:
         self._stealth_applied: bool = False
         self._stealth_cm = None  # async context manager returned by Stealth().use_async(async_playwright())
         self._stealth_enabled: bool = True
-        # コンテキストのライフサイクル用ロック（並行呼び出し安全化）
-        try:
-            import asyncio as _asyncio
-            self._context_lock = _asyncio.Lock()
-        except Exception as e:
-            # ロックが確保できない環境でも機能は継続（安全だが競合耐性は低下）
-            self._context_lock = None
-            try:
-                logger.warning(f"Worker {self.worker_id}: context lock unavailable, proceeding without lock: {e}")
-            except Exception:
-                pass
+        # コンテキストのライフサイクル用ロック（遅延初期化: 実行中のイベントループに結びつける）
+        self._context_lock = None
+        self._context_lock_loop = None
 
         # 設定値
         # デフォルトはやや長め（初回読み込みの安定性重視）
@@ -198,8 +190,9 @@ class BrowserManager:
                 try:
                     # 原子的な健全性チェック（並行競合を抑止）
                     try:
-                        if self._context_lock is not None:
-                            async with self._context_lock:
+                        _lock = self._ensure_context_lock()
+                        if _lock is not None:
+                            async with _lock:
                                 await self._ensure_context_health()
                         else:
                             await self._ensure_context_health()
@@ -220,8 +213,9 @@ class BrowserManager:
                             },
                         )
                         # 作成はロック下で二重生成を回避
-                        if self._context_lock is not None:
-                            async with self._context_lock:
+                        _lock = self._ensure_context_lock()
+                        if _lock is not None:
+                            async with _lock:
                                 if not self.context:
                                     if platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None):
                                         self.context = await self.browser.new_context(**context_common)
@@ -416,6 +410,30 @@ class BrowserManager:
                 await old.close()
             except Exception:
                 pass
+
+    def _ensure_context_lock(self):
+        """現在の実行ループに結びついたLockを遅延生成して返す。ループが無ければNone。
+
+        - Lockが別ループにバインドされている場合は作り直す
+        - Python 3.12以降の『別ループへのLock使用』RuntimeErrorを防ぐ
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 実行中イベントループが無い状況（同期コンテキスト等）
+            return None
+
+        try:
+            if self._context_lock is not None and self._context_lock_loop is loop:
+                return self._context_lock
+        except Exception:
+            # 属性未定義等は作り直し
+            pass
+
+        # 新しいループに結びついたLockを生成
+        self._context_lock = asyncio.Lock()
+        self._context_lock_loop = loop
+        return self._context_lock
 
     async def _ensure_stealth(self, context: BrowserContext) -> None:
         """playwright-stealth の回避スクリプトを適用（1回のみ）。
