@@ -1851,18 +1851,20 @@ class UnmappedElementHandler:
                 texts = [d.get("text", "") for d in opt_data]
                 values = [d.get("value", "") for d in opt_data]
 
-                # ダミー/プレースホルダー除外トークン（設定優先、無ければフォールバック）
+                # ダミー/プレースホルダー除外トークン（設定優先、未定義や空ならデフォルトにフォールバック）
+                DEFAULT_EXCLUDE_TOKENS = [
+                    "選択", "選択してください", "ご選択", "お選び", "お選びください", "選んで", "選んでください",
+                    "choose", "please choose", "select", "please select", "未選択", "---", "—", "–",
+                ]
+                exclude_tokens = []
                 try:
                     choice_cfg = get_choice_priority_config() or {}
-                    exclude_tokens = [
-                        str(x).lower()
-                        for x in (choice_cfg.get("select", {}).get("exclude_keywords", []) or [])
-                    ]
+                    raw = (choice_cfg.get("select", {}).get("exclude_keywords", []) or [])
+                    exclude_tokens = [str(x).lower() for x in raw if str(x).strip()]
                 except Exception:
-                    exclude_tokens = [
-                        "選択", "選択してください", "ご選択", "お選び", "お選びください", "選んで", "選んでください",
-                        "choose", "please choose", "select", "please select", "未選択", "---", "—", "–",
-                    ]
+                    exclude_tokens = []
+                if not exclude_tokens:
+                    exclude_tokens = [s.lower() for s in DEFAULT_EXCLUDE_TOKENS]
 
                 def _is_dummy_option(idx: int) -> bool:
                     try:
