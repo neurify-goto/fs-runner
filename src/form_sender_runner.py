@@ -688,7 +688,15 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         if not rows:
             return False
 
-        company_id = rows[0]['company_id']
+        company_id = rows[0].get('company_id')
+        # claim 時点の assigned_at（関数戻り値に含まれない環境では None）
+        queue_assigned_at = None
+        try:
+            val = rows[0].get('assigned_at')
+            if isinstance(val, str) and val:
+                queue_assigned_at = val
+        except Exception:
+            queue_assigned_at = None
         # 処理開始ログ（最小限、IDのみ）
         try:
             wid = getattr(worker, 'worker_id', 0)
@@ -721,6 +729,90 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         if not comp.data:
             raise RuntimeError('company not found')
         company = comp.data[0]
+        # 当日すでに submissions 記録がある場合はスキップ（DB側JOINを外したため、ここで一意性を担保）
+        try:
+            start_utc, end_utc = jst_utc_bounds(target_date)
+            dup = (
+                supabase.table('submissions')
+                .select('id', count='exact')
+                .eq('targeting_id', targeting_id)
+                .eq('company_id', company_id)
+                .gte('submitted_at', start_utc.isoformat().replace('+00:00', 'Z'))
+                .lt('submitted_at', end_utc.isoformat().replace('+00:00', 'Z'))
+                .limit(1)
+                .execute()
+            )
+            dup_cnt = getattr(dup, 'count', None)
+            if not isinstance(dup_cnt, int):
+                dup_cnt = len(getattr(dup, 'data', []) or [])
+            if dup_cnt and dup_cnt > 0:
+                classify_detail = {
+                    'code': 'SKIPPED_ALREADY_SENT_TODAY',
+                    'category': 'POLICY',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 1.0,
+                }
+                _md_args = {
+                    'p_target_date': str(target_date),
+                    'p_targeting_id': targeting_id,
+                    'p_company_id': company_id,
+                    'p_success': False,
+                    'p_error_type': 'SKIPPED_ALREADY_SENT_TODAY',
+                    'p_classify_detail': classify_detail,
+                    'p_field_mapping': None,
+                    'p_bot_protection': False,
+                    'p_submitted_at': jst_now().isoformat(),
+                    'p_run_id': run_id,
+                }
+                try:
+                    supabase.rpc('mark_done', _md_args).execute()
+                except Exception as e_mdsk:
+                    if _should_fallback_on_rpc_error(e_mdsk, 'mark_done', ['p_run_id']):
+                        _md_args.pop('p_run_id', None)
+                        supabase.rpc('mark_done', _md_args).execute()
+                    else:
+                        raise
+                try:
+                    wid = getattr(worker, 'worker_id', 0)
+                    _get_lifecycle_logger().info(
+                        f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=SKIPPED_ALREADY_SENT_TODAY"
+                    )
+                except Exception:
+                    pass
+                return True
+        except Exception as e_dup:
+            # Fail-closed: 重複確認が失敗した場合は送信を中止し、キューを即時requeue（可能な範囲で）。
+            logger.warning(f"duplicate check failed for company_id={company_id} (suppressed): {e_dup}")
+            try:
+                # 自分が割り当てた行のみ pending に戻す（競合安全）
+                q = (
+                    supabase.table('send_queue')
+                    .update({'status': 'pending', 'assigned_by': None, 'assigned_at': None})
+                    .eq('target_date_jst', str(target_date))
+                    .eq('targeting_id', targeting_id)
+                    .eq('company_id', company_id)
+                    .eq('status', 'assigned')
+                    .eq('assigned_by', run_id)
+                )
+                # 可能なら assigned_at の一致も条件に含めて競合安全性を高める
+                if queue_assigned_at:
+                    q = q.eq('assigned_at', queue_assigned_at)
+                q.execute()
+                try:
+                    wid = getattr(worker, 'worker_id', 0)
+                    _get_lifecycle_logger().info(
+                        f"requeue_on_dupcheck_error: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}"
+                    )
+                except Exception:
+                    pass
+                # ここでは mark_done は呼ばない（再試行のため）。
+                return True  # 処理はした（requeue済）と見なす
+            except Exception as e_rq:
+                # 即時requeueも失敗した場合は、assigned のまま放置し、stale requeue に委ねる
+                logger.error(f"requeue after dupcheck failure error (company_id={company_id}): {e_rq}")
+                # 送信は行わない。
+                return True
         # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
         if company.get('black') is not None:
             raise RuntimeError('company blacklisted')
@@ -1029,6 +1121,12 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                 backoff_initial, backoff_max = 2, 60
             backoff = backoff_initial
             processed = 0
+            # 連続アイドル検出: 一定時間連続で claim が空振りの場合は安全に終了
+            try:
+                idle_limit = int(get_worker_config().get('runner', {}).get('idle_exit_seconds', 900))  # 既定15分
+            except Exception:
+                idle_limit = 900
+            last_work_ts = _time.time()
             # 取り残し再配布の定期実行（worker_id=0 のみ）
             try:
                 runner_cfg = get_worker_config().get('runner', {})
@@ -1089,9 +1187,20 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                     sleep_for = max(0.1, backoff + random.uniform(-jitter, jitter))
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, backoff_max)
+                    # アイドル継続判定
+                    try:
+                        now_ts = _time.time()
+                        if idle_limit > 0 and (now_ts - last_work_ts) >= idle_limit:
+                            _get_lifecycle_logger().info(
+                                f"no_work_timeout: worker_id={worker_id}, targeting_id={targeting_id}, idle_for_sec={int(now_ts - last_work_ts)}"
+                            )
+                            return
+                    except Exception:
+                        pass
                 else:
                     backoff = backoff_initial
                     processed += 1
+                    last_work_ts = _time.time()
                     # テスト用: 規定数に達したら終了
                     if max_processed is not None and processed >= max_processed:
                         return
