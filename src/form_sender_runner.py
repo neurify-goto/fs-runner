@@ -773,9 +773,35 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 except Exception:
                     pass
                 return True
-        except Exception:
-            # チェック失敗時は通常処理を継続
-            pass
+        except Exception as e_dup:
+            # Fail-closed: 重複確認が失敗した場合は送信を中止し、キューを即時requeue（可能な範囲で）。
+            logger.warning(f"duplicate check failed for company_id={company_id} (suppressed): {e_dup}")
+            try:
+                # 自分が割り当てた行のみ pending に戻す（競合安全）
+                (
+                    supabase.table('send_queue')
+                    .update({'status': 'pending', 'assigned_by': None, 'assigned_at': None})
+                    .eq('target_date_jst', str(target_date))
+                    .eq('targeting_id', targeting_id)
+                    .eq('company_id', company_id)
+                    .eq('status', 'assigned')
+                    .eq('assigned_by', run_id)
+                    .execute()
+                )
+                try:
+                    wid = getattr(worker, 'worker_id', 0)
+                    _get_lifecycle_logger().info(
+                        f"requeue_on_dupcheck_error: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}"
+                    )
+                except Exception:
+                    pass
+                # ここでは mark_done は呼ばない（再試行のため）。
+                return True  # 処理はした（requeue済）と見なす
+            except Exception as e_rq:
+                # 即時requeueも失敗した場合は、assigned のまま放置し、stale requeue に委ねる
+                logger.error(f"requeue after dupcheck failure error (company_id={company_id}): {e_rq}")
+                # 送信は行わない。
+                return True
         # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
         if company.get('black') is not None:
             raise RuntimeError('company blacklisted')
