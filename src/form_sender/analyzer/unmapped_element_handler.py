@@ -1291,6 +1291,21 @@ class UnmappedElementHandler:
             pri1 = ["営業", "提案", "メール"]
             pri2 = ["その他"]
 
+            # 近傍コンテキストのベストテキストは重いので、グループ処理内でキャッシュ
+            context_best_cache: Dict[int, str] = {}
+
+            async def _best_text_cached(loc: Locator) -> str:
+                key = id(loc)
+                if key in context_best_cache:
+                    return context_best_cache[key]
+                try:
+                    ctxs = await self.context_text_extractor.extract_context_for_element(loc)
+                    best = (self.context_text_extractor.get_best_context_text(ctxs) or "")
+                except Exception:
+                    best = ""
+                context_best_cache[key] = best
+                return best
+
             for group_key, items in groups.items():
                 group_required = False
                 for cb, info in items:
@@ -1308,9 +1323,8 @@ class UnmappedElementHandler:
                 # 追加フォールバック: 近傍コンテキストに『必須』が含まれるかを簡易確認
                 if not group_required:
                     try:
-                        ctxs = await self.context_text_extractor.extract_context_for_element(items[0][0])
-                        best = (self.context_text_extractor.get_best_context_text(ctxs) or "")
-                        if "必須" in best:
+                        best = await _best_text_cached(items[0][0])
+                        if "必須" in (best or ""):
                             group_required = True
                     except Exception:
                         pass
@@ -1369,10 +1383,7 @@ class UnmappedElementHandler:
                             is_contact_method_group = True
                         else:
                             for cb, _info in items:
-                                contexts = await self.context_text_extractor.extract_context_for_element(cb)
-                                best = (
-                                    self.context_text_extractor.get_best_context_text(contexts) or ""
-                                ).lower()
+                                best = (await _best_text_cached(cb) or "").lower()
                                 if any(tok in best for tok in [t.lower() for t in tokens]):
                                     is_contact_method_group = True
                                     break
@@ -1424,19 +1435,9 @@ class UnmappedElementHandler:
                         lower_agree = [t.lower() for t in agree_tokens]
 
                         for cb, info in items:
-                            # 1) 既存の軽量コンテキスト抽出で判定
-                            contexts = await self.context_text_extractor.extract_context_for_element(cb)
-                            texts = []
-                            try:
-                                texts = [
-                                    c.text for c in (contexts or []) if getattr(c, "text", None)
-                                ]
-                            except Exception:
-                                texts = []
-                            best = (
-                                self.context_text_extractor.get_best_context_text(contexts) or ""
-                            )
-                            blob = (" ".join(texts + [best])).lower()
+                            # 1) 既存の軽量コンテキスト抽出（キャッシュ使⽤）
+                            best = await _best_text_cached(cb)
+                            blob = (best or "").lower()
                             if any(tok in blob for tok in lower_priv) and (
                                 any(tok in blob for tok in lower_agree) or len(items) == 1
                             ):
