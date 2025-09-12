@@ -161,7 +161,7 @@ async def install_cookie_routes(
     # 呼び出し時の main host（about:blank の可能性を考慮し、ハンドラ内で都度取得も行う）
     initial_main_url = getattr(page.main_frame, "url", "")
 
-    def _derive_main_host_for_request() -> str:
+    def _derive_main_host_for_request(route: Route, initial_url: str) -> str:
         """初回ナビゲーション直後でも安定して main_host を導出する。
 
         優先順:
@@ -191,10 +191,11 @@ async def install_cookie_routes(
                     return h
         except Exception:
             pass
-        return _hostname(initial_main_url)
+        return _hostname(initial_url)
 
     # registrable domain cache (per-page-instance)
     _rd_cache: Dict[str, str] = {}
+    _RD_CACHE_MAX = 256
 
     def _rd_cached(h: str) -> str:
         if not h:
@@ -203,6 +204,12 @@ async def install_cookie_routes(
         if v is not None:
             return v
         v = _registrable_domain(h)
+        # 簡易上限（先頭を落とす）
+        try:
+            if len(_rd_cache) >= _RD_CACHE_MAX:
+                _rd_cache.pop(next(iter(_rd_cache)))
+        except Exception:
+            _rd_cache.clear()
         _rd_cache[h] = v
         return v
 
@@ -212,7 +219,7 @@ async def install_cookie_routes(
         url = req.url
         host = _hostname(url)
         # 動的に main host を評価（about:blank回避のためRefererやdocument判定を利用）
-        main_host = _derive_main_host_for_request()
+        main_host = _derive_main_host_for_request(route, initial_main_url)
 
         # 1) 静的資源のブロック（既存ポリシーと一致）
         if (block_images and r_type in ("image", "media")) or \
