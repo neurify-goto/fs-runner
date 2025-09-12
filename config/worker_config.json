@@ -104,6 +104,16 @@
       "block_images": true,
       "block_fonts": true,
       "block_stylesheets": false
+    },
+    "stealth": {
+      "enabled": true,
+      "languages": ["ja-JP", "ja"]
+    },
+    "cookie_control": {
+      "block_cmp_scripts": true,
+      "strip_set_cookie": true,
+      "override_document_cookie": true,
+      "ui_reject_banners": true
     }
   },
   "groq": {

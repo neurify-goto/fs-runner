@@ -9,6 +9,8 @@ import logging
 import time
 from typing import Dict, Any, Optional, List
 from playwright.async_api import Page, Browser, TimeoutError as PlaywrightTimeoutError
+from playwright_stealth import Stealth
+from ..utils.cookie_blocker import install_init_script, install_cookie_routes, try_reject_banners
 
 from ..security.logger import SecurityLogger
 from ..utils.secure_logger import get_secure_logger
@@ -41,8 +43,27 @@ class PageManager:
                 locale="ja-JP",
                 timezone_id="Asia/Tokyo",
             )
-
+            # cookie ブラックホール（任意: 既定ON）
+            try:
+                await install_init_script(context, True)
+            except Exception:
+                pass
+            # playwright-stealth を適用（冪等）
+            try:
+                await Stealth().apply_stealth_async(context)
+            except Exception:
+                pass
             self.page = await context.new_page()
+            # ネットワーク層（CMP/Set-Cookie）と既存RBの共存
+            try:
+                await install_cookie_routes(
+                    self.page,
+                    block_cmp_scripts=True,
+                    strip_set_cookie=True,
+                    resource_block_rules={"images": False, "fonts": False, "stylesheets": False}
+                )
+            except Exception:
+                pass
             
             # タイムアウト設定
             self.page.set_default_timeout(30000)
