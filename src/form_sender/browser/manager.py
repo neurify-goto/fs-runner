@@ -185,6 +185,13 @@ class BrowserManager:
             for i in range(2):
                 page = None
                 try:
+                    # 既存コンテキストの健全性を事前チェック（切断済みなら再生成させる）
+                    if self.context:
+                        try:
+                            _ = self.context.pages  # 接続切れ時に例外が上がることがある
+                        except Exception:
+                            self.context = None
+
                     # コンテキストが無い場合のみ作成
                     if not self.context:
                         # どの環境でもロケール/タイムゾーン/Accept-Language を固定（JST運用要件 + 自然な言語ヘッダ）
@@ -301,7 +308,14 @@ class BrowserManager:
                     except Exception:
                         pass
                     # ターゲット/接続クローズは一度だけ再試行
-                    if any(k in str(e) for k in ["Target page", "Connection closed", "Browser connection lost"]):
+                    if any(k in str(e) for k in ["Target page", "Connection closed", "Browser connection lost", "Target closed"]):
+                        # コンテキストが壊れている可能性が高いので破棄して再生成させる
+                        try:
+                            if self.context:
+                                await self.context.close()
+                        except Exception:
+                            pass
+                        self.context = None
                         logger.warning(f"Worker {self.worker_id}: Retrying after transient page error (attempt {i+1}/2): {e}")
                         await asyncio.sleep(0.5)
                         continue
