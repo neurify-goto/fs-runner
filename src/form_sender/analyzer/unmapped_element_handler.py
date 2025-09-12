@@ -2441,6 +2441,11 @@ class UnmappedElementHandler:
                 if not hint:
                     continue
 
+                # 郵便番号/住所系の『code』を除外（zip/postal/postcode/郵便）
+                postal_like = ["zip", "postal", "postcode", "zipcode", "郵便", "住所"]
+                if any(t in blob for t in postal_like) or any(t in best for t in postal_like):
+                    continue
+
                 # 近傍の表示コード文字列を探索（英数4〜10桁）
                 selector = await self._generate_playwright_selector(el)
                 code = None
