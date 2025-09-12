@@ -36,6 +36,9 @@ class BrowserManager:
         self._stealth_applied: bool = False
         self._stealth_cm = None  # async context manager returned by Stealth().use_async(async_playwright())
         self._stealth_enabled: bool = True
+        # playwright-stealth バージョン両対応用
+        self._stealth_api: str = "unknown"  # 'v2' | 'v1' | 'none'
+        self._stealth_async_func = None  # v1 の場合: function(page) -> awaitable
         # コンテキストのライフサイクル用ロック（遅延初期化: 実行中のイベントループに結びつける）
         self._context_lock = None
         self._context_lock_loop = None
@@ -66,22 +69,32 @@ class BrowserManager:
             logger.info(f"Worker {self.worker_id}: Initializing Playwright browser")
             is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
 
-            # playwright-stealth の推奨パターン
+            # playwright-stealth のバージョン検出と起動
             if self._stealth_enabled:
+                # v2（Stealth/use_async）優先、失敗したら v1（stealth_async）→ 最後にプレーン
                 try:
-                    self._stealth = Stealth(
+                    from playwright_stealth import Stealth as _S  # type: ignore
+                    self._stealth = _S(
                         navigator_languages_override=self._navigator_languages
                     )
                     self._stealth_cm = self._stealth.use_async(async_playwright())
-                    # use_async は async context manager を返すため、手動で __aenter__
                     self.playwright = await self._stealth_cm.__aenter__()
-                    logger.info(f"Worker {self.worker_id}: Playwright initialized with stealth context manager")
-                except Exception as e:
-                    logger.warning(f"Worker {self.worker_id}: Stealth context init failed, fallback to plain Playwright: {e}")
-                    # フォールバック時は必ずステルスCM参照を破棄して、close() 側で stop() を実行可能にする
-                    self._stealth_cm = None
-                    self._stealth = None
-                    self.playwright = await async_playwright().start()
+                    self._stealth_api = 'v2'
+                    logger.info(f"Worker {self.worker_id}: Playwright initialized with stealth v2 context manager")
+                except Exception as e_v2:
+                    # v1: ページ単位で適用（後続で new_page 時に適用）
+                    try:
+                        from playwright_stealth import stealth_async as _stealth_async  # type: ignore
+                        self.playwright = await async_playwright().start()
+                        self._stealth_api = 'v1'
+                        self._stealth_async_func = _stealth_async
+                        logger.info(f"Worker {self.worker_id}: Playwright initialized with stealth v1 (page-level)")
+                    except Exception as e_v1:
+                        self._stealth_cm = None
+                        self._stealth = None
+                        self._stealth_api = 'none'
+                        self.playwright = await async_playwright().start()
+                        logger.warning(f"Worker {self.worker_id}: Stealth unavailable, using plain Playwright (v2 err: {e_v2}; v1 err: {e_v1})")
             else:
                 self.playwright = await async_playwright().start()
             if is_github_actions:
@@ -251,10 +264,16 @@ class BrowserManager:
                     # 既定は無効（誤検出/互換性への影響を避ける）。設定で明示有効化時のみON。
                     await install_init_script(self.context, bool(cookie_cfg.get("override_document_cookie", False)))
 
-                    # playwright-stealth を初回のみ適用（コンテキスト単位、冪等）
+                    # playwright-stealth を初回のみ適用（v2: context単位）
                     await self._ensure_stealth(self.context)
-                    # 新規ページをオープン（stealth適用後に作成する必要あり）
+                    # 新規ページをオープン
                     page = await self.context.new_page()
+                    # v1: ページ単位で stealth を適用
+                    try:
+                        if self._stealth_api == 'v1' and self._stealth_async_func:
+                            await self._stealth_async_func(page)
+                    except Exception:
+                        pass
                     # UAの変更はmacOS GUIでは避けて安定性を優先。
                     # Cookieコントロールのネットワーク層（CMPブロック/Set-Cookie除去 + 資源ブロックも統合）
                     try:
@@ -454,11 +473,20 @@ class BrowserManager:
                 self._stealth_applied = True  # 明示的に無効化されている場合は再適用不要
                 return
 
-            if self._stealth is None:
-                self._stealth = Stealth()
-            await self._stealth.apply_stealth_async(context)
-            self._stealth_applied = True
-            logger.info(f"Worker {self.worker_id}: Applied playwright-stealth evasions to context")
+            if self._stealth_api == 'v2':
+                if self._stealth is None:
+                    try:
+                        from playwright_stealth import Stealth as _S  # type: ignore
+                        self._stealth = _S()
+                    except Exception:
+                        self._stealth_api = 'none'
+                        return
+                await self._stealth.apply_stealth_async(context)
+                self._stealth_applied = True
+                logger.info(f"Worker {self.worker_id}: Applied playwright-stealth v2 to context")
+            else:
+                # v1 はページ単位で new_page 後に適用するため、ここではフラグを変更しない
+                pass
         except Exception as e:
             # 失敗しても処理は続行（回避が無くても動作自体は可能）
             logger.warning(f"Worker {self.worker_id}: Failed to apply stealth evasions (suppressed): {e}")

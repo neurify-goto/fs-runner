@@ -9,7 +9,9 @@ lxml==4.9.3
 # Browser automation (JavaScript必須サイト対応)
 playwright==1.40.0
 # Stealth evasion for Playwright (bot/protection回避用)
-playwright-stealth==2.0.0
+# playwright-stealth 2.x introduces Stealth().use_async/apply_stealth_async API.
+# 1.0.6 以降は旧API（stealth_async/sync）が提供されるため、コード側で両対応しています。
+playwright-stealth>=1.0.6,<3
 tldextract==3.4.4  # eTLD+1 判定（サブドメインを第一者として扱うため）
 
 # HTTP client - Supabaseとの互換性を考慮
