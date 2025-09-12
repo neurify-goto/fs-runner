@@ -662,6 +662,22 @@ class FieldMapper:
                 candidates = None
             if not candidates:
                 return
+        # FAX系の候補であれば昇格しない（TEL優先）
+        try:
+            async def _is_fax_like(el) -> bool:
+                ei = await self.element_scorer._get_element_info(el)
+                blob = " ".join([
+                    (ei.get("name", "") or ""), (ei.get("id", "") or ""),
+                    (ei.get("class", "") or ""), (ei.get("placeholder", "") or ""),
+                ]).lower()
+                ctxs = await self.context_text_extractor.extract_context_for_element(el)
+                best = (self.context_text_extractor.get_best_context_text(ctxs) or "").lower()
+                tokens = ["fax", "ファックス", "ＦＡＸ"]
+                return any(t in blob for t in tokens) or any(t in best for t in tokens)
+            if any([await _is_fax_like(candidates[i]) for i in (1,2,3)]):
+                return
+        except Exception:
+            pass
         # 統合『電話番号』が候補のいずれかを指していれば降格
         # 統合『電話番号』は分割が確定した時点で削除（重複入力防止）
         field_mapping.pop("電話番号", None)

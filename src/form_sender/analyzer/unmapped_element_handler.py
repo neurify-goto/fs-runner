@@ -404,6 +404,23 @@ class UnmappedElementHandler:
         except Exception as e:
             logger.debug(f"Auto handle email confirmation skipped: {e}")
 
+        # 追加: 確認コード（プレーン文字提示）の自動投入
+        try:
+            ver_handled = await self._auto_handle_verification_code(
+                classified_elements.get("text_inputs", []) or [],
+                mapped_element_ids,
+            )
+            auto_handled.update(ver_handled)
+            mapped_element_ids.update(
+                {
+                    id(v.get("element"))
+                    for v in ver_handled.values()
+                    if isinstance(v, dict) and v.get("element")
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Auto verification code fill skipped: {e}")
+
         # 汎用救済: 未マッピングの必須テキスト入力に全角空白を入力
         try:
             req_texts = await self._auto_handle_required_texts(
@@ -1331,16 +1348,14 @@ class UnmappedElementHandler:
                 if not group_required:
                     try:
                         tokens = [
-                            "連絡方法",
-                            "ご希望連絡",
-                            "希望連絡",
-                            "連絡手段",
-                            "contact method",
-                            "preferred contact",
+                            "連絡方法", "ご希望連絡", "希望連絡", "連絡手段",
+                            "contact method", "preferred contact",
+                            # お問い合わせ系（問い合わせカテゴリ/項目/種別/subject/category/type 相当）
+                            "お問い合わせ", "お問合せ", "問合せ", "inquiry", "contact", "subject", "category", "カテゴリ", "項目", "種別",
                         ]
                         # group_key だけでなくコンテキストも確認
                         blob_key = (group_key or "").lower()
-                        if any(t in blob_key for t in ["連絡", "contact"]):
+                        if any(t in blob_key for t in ["連絡", "contact", "inquiry", "subject", "category", "カテゴリ", "項目", "種別"]):
                             is_contact_method_group = True
                         else:
                             for cb, _info in items:
@@ -1353,6 +1368,21 @@ class UnmappedElementHandler:
                                     break
                     except Exception:
                         is_contact_method_group = False
+                # 追加: 『お問い合わせ項目/種別/カテゴリ/subject』系ラベルが近傍にある場合は必須群として扱う（テーマ汎用）
+                if not group_required:
+                    try:
+                        ctxs = await self.context_text_extractor.extract_context_for_element(items[0][0])
+                        best = (self.context_text_extractor.get_best_context_text(ctxs) or "").lower()
+                        # お問い合わせ + （項目|内容|カテゴリ|category|type|種別|subject）の同時出現
+                        q_tokens = ["お問い合わせ", "お問合せ", "問合せ", "inquiry", "contact"]
+                        cat_tokens = ["項目", "内容", "カテゴリ", "category", "type", "種別", "subject"]
+                        if any(t in best for t in [s.lower() for s in q_tokens]) and any(
+                            t in best for t in [s.lower() for s in cat_tokens]
+                        ):
+                            group_required = True
+                    except Exception:
+                        pass
+
                 # 追加: プライバシー/規約同意の文脈検出（name/id/classに現れないケースの補完）
                 is_privacy_group = False
                 if not group_required:
@@ -2367,6 +2397,100 @@ class UnmappedElementHandler:
 
         # Unreachable
 
+
+    async def _auto_handle_verification_code(self, text_inputs: List[Locator], mapped_element_ids: set) -> Dict[str, Dict[str, Any]]:
+        """確認コード/認証コード（画像でないプレーン文字提示）の自動投入。
+
+        汎用ルール:
+        - input[type=text] で name/id/class/placeholder/ラベルに「確認コード/認証コード/セキュリティコード/code」系が含まれる
+        - 近傍（同じ行や直前兄弟）に英数4〜10桁のコードが textContent で提示されていれば、その値を投入
+        - CAPTCHA画像やクイズ、画像認証などは対象外
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        code_like = [
+            "確認コード", "認証コード", "セキュリティコード", "security code", "verification code", "auth code", "code",
+        ]
+        blacklist_like = ["captcha", "画像認証", "quiz", "wpcf7-quiz", "画像", "image", "captcha"]
+
+        for el in text_inputs:
+            try:
+                if id(el) in mapped_element_ids:
+                    continue
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get("visible", True):
+                    continue
+                if (info.get("type", "").lower() or "") not in ("text", ""):
+                    continue
+                blob = " ".join([
+                    (info.get("name", "") or ""), (info.get("id", "") or ""),
+                    (info.get("class", "") or ""), (info.get("placeholder", "") or ""),
+                ]).lower()
+                # 画像系・captcha系の除外
+                if any(t.lower() in blob for t in [s.lower() for s in blacklist_like]):
+                    continue
+                # コンテキスト（ラベル等）
+                contexts = await self.context_text_extractor.extract_context_for_element(el)
+                best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
+                hint = any(t.lower() in blob for t in [s.lower() for s in code_like]) or any(
+                    t.lower() in best for t in [s.lower() for s in code_like]
+                )
+                if not hint:
+                    continue
+
+                # 近傍の表示コード文字列を探索（英数4〜10桁）
+                selector = await self._generate_playwright_selector(el)
+                code = None
+                try:
+                    code = await el.evaluate(
+                        """
+                        (el) => {
+                          const re = /[A-Za-z0-9]{4,10}/g;
+                          const pick = (n) => (n && (n.innerText||n.textContent||'').trim()) || '';
+                          // 同じセル/親の直前兄弟内のテキストを優先
+                          let p = el.parentElement;
+                          for (let depth=0; p && depth<4; depth++) {
+                            let sib = p.previousElementSibling;
+                            for (let sDepth=0; sib && sDepth<4; sDepth++) {
+                              const t = pick(sib);
+                              const m = t && t.match(re);
+                              if (m && m.length) return m[0];
+                              sib = sib.previousElementSibling;
+                            }
+                            // 同じ親内のスパン/ストロング等
+                            const spans = Array.from(p.querySelectorAll('span,strong,b,i,em,code'));
+                            for (const sp of spans) {
+                              const t = pick(sp);
+                              const m = t && t.match(re);
+                              if (m && m.length) return m[0];
+                            }
+                            p = p.parentElement;
+                          }
+                          return '';
+                        }
+                        """
+                    )
+                except Exception:
+                    code = None
+                code = (code or "").strip()
+                if not code:
+                    continue
+
+                handled[f"auto_verification_code_{len(handled)+1}"] = {
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": info.get("tag_name", "input") or "input",
+                    "type": info.get("type", "text") or "text",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "text",
+                    "auto_action": "fill",
+                    "default_value": code,
+                    "required": True,
+                    "auto_handled": True,
+                }
+            except Exception:
+                continue
+        return handled
 
     async def promote_email_confirmation_to_mapping(
         self,
