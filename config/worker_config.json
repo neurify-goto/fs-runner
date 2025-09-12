@@ -149,7 +149,8 @@
     "classify_cache_max_size": 256,
     "classify_cache_ttl_sec": 600,
     "requeue_interval_seconds": 60,
-    "requeue_stale_minutes": 5
+    "requeue_stale_minutes": 5,
+    "idle_exit_seconds": 900
   },
   "detectors": {
     "prohibition": {
