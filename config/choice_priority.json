@@ -2,6 +2,7 @@
   "checkbox": {
     "primary_keywords": ["営業", "提案", "メール"],
     "secondary_keywords": ["その他", "一般", "other", "該当なし"],
+    "tertiary_keywords": ["問い合わせ", "問合"],
     "privacy_keywords": [
       "プライバシー", "プライバシーポリシー", "個人情報", "個人情報保護",
       "個人情報の取り扱い", "個人情報の取扱い", "privacy", "privacy policy",
@@ -14,6 +15,7 @@
   "radio": {
     "primary_keywords": ["営業", "提案", "メール"],
     "secondary_keywords": ["その他", "一般", "other", "該当なし"],
+    "tertiary_keywords": ["問い合わせ", "問合"],
     "gender": {
       "male": ["男", "男性", "male"],
       "female": ["女", "女性", "female"],

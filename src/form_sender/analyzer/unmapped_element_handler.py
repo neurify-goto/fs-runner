@@ -1440,7 +1440,8 @@ class UnmappedElementHandler:
                 elif is_contact_method_group:
                     idx = self._choose_contact_method_index(texts)
                 else:
-                    idx = self._choose_priority_index(texts, pri1, pri2)
+                    # 第3段階の優先度: 「問い合わせ/問合」を追加
+                    idx = self._choose_priority_index(texts, pri1, pri2, ["問い合わせ", "問合"])
                 cb, info = items[idx]
                 selector = await self._generate_playwright_selector(cb)
                 field_name = f"auto_checkbox_{group_key}"
@@ -1723,7 +1724,7 @@ class UnmappedElementHandler:
                 idx = (
                     self._choose_gender_index(texts)
                     if is_gender_field
-                    else self._choose_priority_index(texts, pri1, pri2)
+                    else self._choose_priority_index(texts, pri1, pri2, ["問い合わせ", "問合"])
                 )
 
             # 『その他』回避フォールバックは撤廃（従来の選択ロジックへ復帰）
@@ -1980,17 +1981,25 @@ class UnmappedElementHandler:
                                 idx = cand[-1]
                                 break
                 elif is_inquiry_type:
-                    # 問い合わせ種別は『その他』等の中立値を優先
-                    pri = ["その他", "other"]
-                    cand = [
-                        k
-                        for k, tx in enumerate(texts)
-                        if any(p.lower() in (tx or "").lower() for p in pri)
+                    # 問い合わせ種別は『その他』を最優先、次に『問い合わせ/問合』を優先
+                    pri_other = ["その他", "other"]
+                    cand_other = [
+                        k for k, tx in enumerate(texts)
+                        if any(p.lower() in (tx or "").lower() for p in pri_other)
                     ]
-                    if cand:
-                        idx = cand[0]
+                    if cand_other:
+                        idx = cand_other[0]
+                    else:
+                        pri_inquiry = ["問い合わせ", "問合"]
+                        cand_inq = [
+                            k for k, tx in enumerate(texts)
+                            if any(p.lower() in (tx or "").lower() for p in pri_inquiry)
+                        ]
+                        if cand_inq:
+                            idx = cand_inq[0]
                 if idx is None:
-                    idx = self._choose_priority_index(texts, pri1, pri2)
+                    # 第3段階の優先度: 「問い合わせ/問合」を追加
+                    idx = self._choose_priority_index(texts, pri1, pri2, ["問い合わせ", "問合"])
 
                 selector = await self._generate_playwright_selector(select)
                 field_name = f"auto_select_{i+1}"
@@ -2015,7 +2024,7 @@ class UnmappedElementHandler:
         return handled
 
     def _choose_priority_index(
-        self, texts: List[str], pri1: List[str], pri2: List[str]
+        self, texts: List[str], pri1: List[str], pri2: List[str], pri3: Optional[List[str]] = None
     ) -> int:
         def last_match(keys: List[str]) -> Optional[int]:
             idxs = []
@@ -2032,6 +2041,10 @@ class UnmappedElementHandler:
         idx = last_match(pri2)
         if idx is not None:
             return idx
+        if pri3:
+            idx = last_match(pri3)
+            if idx is not None:
+                return idx
         return max(0, len(texts) - 1)
 
     def _choose_contact_method_index(self, texts: List[str]) -> int:
