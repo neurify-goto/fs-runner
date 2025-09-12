@@ -190,7 +190,9 @@ class BrowserManager:
                         try:
                             _ = self.context.pages  # 接続切れ時に例外が上がることがある
                         except Exception:
+                            # 破損/切断されたコンテキストは破棄し、ステルス適用フラグもリセット
                             self.context = None
+                            self._stealth_applied = False
 
                     # コンテキストが無い場合のみ作成
                     if not self.context:
@@ -315,7 +317,9 @@ class BrowserManager:
                                 await self.context.close()
                         except Exception:
                             pass
+                        # 破棄後は再適用させるためにフラグを落とす
                         self.context = None
+                        self._stealth_applied = False
                         logger.warning(f"Worker {self.worker_id}: Retrying after transient page error (attempt {i+1}/2): {e}")
                         await asyncio.sleep(0.5)
                         continue
@@ -397,6 +401,8 @@ class BrowserManager:
                     logger.error(f"Worker {self.worker_id}: Error closing context: {e}")
             finally:
                 self.context = None
+                # 次回新規context作成時に再度ステルス適用を行う
+                self._stealth_applied = False
 
         if self.browser:
             try:
