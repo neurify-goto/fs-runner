@@ -573,7 +573,7 @@ class FieldMapper:
 
         # 方式A: name/id/class に 'tel1/tel2/tel3' 等の明示番号を含むケース
         explicit_candidates = {}
-        # 方式B: 配列インデックス（[0]/[1]/[2] など）で分割されているケース（例: telnum[data][0]）
+        # 方式B: 配列インデックス（[0]/[1]/[2] または [1]/[2]/[3]）で分割されているケース（例: telnum[data][0] / tel_1_must[1]）
         grouped_by_base: dict[str, dict[int, Any]] = {}
 
         def _extract_array_index(s: str) -> list[int]:
@@ -595,9 +595,14 @@ class FieldMapper:
                     continue
 
                 # A) 明示番号（1/2/3）判定
-                m = re.search(r"(?:tel|phone)[^\d]*([123])(?!.*\d)", blob)
-                if m:
-                    idx = int(m.group(1))
+                #   - 'tel_1_must[1]' のように 'tel' 直後にも数字が含まれる場合があるため、
+                #     末尾側に現れる 1/2/3 を優先的に採用する（最も右の一致を取る）。
+                try:
+                    matches = list(re.finditer(r"(?:tel|phone)[^\n]*?([123])", blob))
+                except Exception:
+                    matches = []
+                if matches:
+                    idx = int(matches[-1].group(1))
                     if idx in (1, 2, 3):
                         explicit_candidates[idx] = el
                         continue
@@ -611,8 +616,9 @@ class FieldMapper:
                     if ("tel" in base) or ("phone" in base):
                         # 最後のインデックスだけを採用（多次元でも末尾が分割番号）
                         idx0 = indexes[-1]
-                        if idx0 in (0, 1, 2):
-                            mapped = {0: 1, 1: 2, 2: 3}[idx0]
+                        # 0/1/2 → 1/2/3, 1/2/3 → 1/2/3 の双方を許容
+                        if idx0 in (0, 1, 2, 3):
+                            mapped = {0: 1, 1: 2, 2: 3, 3: 3}[idx0]
                             grouped_by_base.setdefault(base, {})[mapped] = el
             except Exception:
                 continue
@@ -656,6 +662,22 @@ class FieldMapper:
                 candidates = None
             if not candidates:
                 return
+        # FAX系の候補であれば昇格しない（TEL優先）
+        try:
+            async def _is_fax_like(el) -> bool:
+                ei = await self.element_scorer._get_element_info(el)
+                blob = " ".join([
+                    (ei.get("name", "") or ""), (ei.get("id", "") or ""),
+                    (ei.get("class", "") or ""), (ei.get("placeholder", "") or ""),
+                ]).lower()
+                ctxs = await self.context_text_extractor.extract_context_for_element(el)
+                best = (self.context_text_extractor.get_best_context_text(ctxs) or "").lower()
+                tokens = ["fax", "ファックス", "ＦＡＸ"]
+                return any(t in blob for t in tokens) or any(t in best for t in tokens)
+            if any([await _is_fax_like(candidates[i]) for i in (1,2,3)]):
+                return
+        except Exception:
+            pass
         # 統合『電話番号』が候補のいずれかを指していれば降格
         # 統合『電話番号』は分割が確定した時点で削除（重複入力防止）
         field_mapping.pop("電話番号", None)

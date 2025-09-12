@@ -2028,13 +2028,16 @@ class FieldMappingAnalyzer:
 
 
 # 長めの動的生成フォームにも対応するため延長（単発テストのみ実行のため許容）。
-# デフォルトの単一実行タイムアウト（4分）
+# デフォルトの単一実行タイムアウト（秒）
 # 環境変数 `FM_TEST_TIMEOUT_SECONDS` で上書き可能（例: 300）
+DEFAULT_TEST_TIMEOUT_FALLBACK = 90
 import os as _os
 try:
-    DEFAULT_TEST_TIMEOUT_SECONDS = int(_os.getenv("FM_TEST_TIMEOUT_SECONDS", "60"))
+    DEFAULT_TEST_TIMEOUT_SECONDS = int(
+        _os.getenv("FM_TEST_TIMEOUT_SECONDS", str(DEFAULT_TEST_TIMEOUT_FALLBACK))
+    )
 except Exception:
-    DEFAULT_TEST_TIMEOUT_SECONDS = 60
+    DEFAULT_TEST_TIMEOUT_SECONDS = DEFAULT_TEST_TIMEOUT_FALLBACK
 
 
 async def main():

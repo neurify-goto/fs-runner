@@ -172,15 +172,21 @@ class RuleBasedAnalyzer:
                 logger.warning(f"Early prohibition detection failed; falling back to late detection: {e}")
                 early_prohibition = None
 
-            has_early_detection = (
-                early_prohibition is not None
-                and isinstance(early_prohibition, dict)
-                and (
-                    bool(early_prohibition.get('has_prohibition'))
-                    or bool(early_prohibition.get('prohibition_detected'))
-                )
-            )
-            if has_early_detection:
+            # 早期終了は『厳格(strict)』に限定（中程度は解析継続）
+            should_abort_early = False
+            if isinstance(early_prohibition, dict) and (
+                bool(early_prohibition.get("has_prohibition"))
+                or bool(early_prohibition.get("prohibition_detected"))
+            ):
+                level = str(early_prohibition.get("prohibition_level", "none") or "none").lower()
+                try:
+                    conf_score = float(early_prohibition.get("confidence_score", 0.0) or 0.0)
+                except Exception:
+                    conf_score = 0.0
+                if level == "strict":
+                    should_abort_early = True
+
+            if should_abort_early:
                 analysis_time = time.time() - analysis_start
                 # 解析を省略し、検出結果のみ返す（ワーカー側で送信回避）
                 return {

@@ -1,10 +1,14 @@
 import logging
+import re
 from typing import Dict, Any, Optional
 
 from .field_combination_manager import FieldCombinationManager
 from .split_field_detector import SplitFieldDetector
 
 logger = logging.getLogger(__name__)
+
+# Precompiled regex for lightweight email validation
+RE_EMAIL = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]{2,}$')
 
 
 class InputValueAssigner:
@@ -192,11 +196,28 @@ class InputValueAssigner:
                 blob = nm + " " + ide
                 if "tel" in blob or "phone" in blob:
                     import re
-
-                    m = re.search(r"(?:tel|phone)[^\d]*([123])(?!.*\d)", blob)
-                    if not m:
+                    # 末尾側に現れる 1/2/3 を優先（'tel_1_must[1]' 等に対応）
+                    matches = list(re.finditer(r"(?:tel|phone)[^\n]*?([123])", blob))
+                    idx = None
+                    if matches:
+                        try:
+                            idx = int(matches[-1].group(1))
+                        except Exception:
+                            idx = None
+                    # 配列添字 [1]/[2]/[3] にも対応
+                    if idx is None:
+                        arr = re.findall(r"\[(\d+)\]", blob)
+                        if arr:
+                            try:
+                                idx0 = int(arr[-1])
+                                if idx0 in (1, 2, 3):
+                                    idx = idx0
+                                elif idx0 in (0, 1, 2):
+                                    idx = {0: 1, 1: 2, 2: 3}[idx0]
+                            except Exception:
+                                idx = None
+                    if not idx:
                         continue
-                    idx = int(m.group(1))
                     if idx == 2 and p2:
                         input_assignments[f"auto_phone_part_{idx}"] = {
                             "selector": selector,
@@ -258,20 +279,11 @@ class InputValueAssigner:
             assign = input_assignments.get("メールアドレス")
             if isinstance(assign, dict):
                 v = str(assign.get("value", "") or "")
-                def _is_valid_email(addr: str) -> bool:
-                    # 依存追加なしの軽量検証（local@domain.tld の形を要求）
-                    import re
-                    if not addr or '@' not in addr:
-                        return False
-                    # かなり緩いが実運用上の誤判定を避けつつ最低限の構造を担保
-                    email_re = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]{2,}$')
-                    return bool(email_re.match(addr))
-
-                if v and not _is_valid_email(v):
+                if v and not (RE_EMAIL.match(v) is not None):
                     full = self.field_combination_manager.generate_combined_value(
                         "email", client_data
                     )
-                    if full and _is_valid_email(full):
+                    if full and (RE_EMAIL.match(full) is not None):
                         assign["value"] = full
                         logger.info("Patched incomplete email local-part to full address")
             # メール確認フィールド（copy_from）の値も最新のメールに合わせて再同期

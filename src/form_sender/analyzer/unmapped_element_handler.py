@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, List, Any, Optional, Callable, Awaitable, Tuple
 from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 
@@ -10,6 +11,13 @@ from config.manager import get_prefectures
 from ..utils.privacy_consent_handler import PrivacyConsentHandler
 
 logger = logging.getLogger(__name__)
+
+# Module-level precompiled regex and constants (perf + consistency)
+RE_VERIFICATION_CODE = re.compile(r"[A-Za-z0-9]{4,10}")
+RE_BRACKET_INDEX = re.compile(r"\[(\d)\](?!.*\d)")
+RE_TEL_SUFFIX = re.compile(r"(?:tel|phone|電話)[^\d]*([0-9])(?!.*\d)")
+RE_TAIL_DIGIT = re.compile(r"(\d)(?!.*\d)$")
+VERIFICATION_STOPWORDS = {"mail", "email", "code", "text", "input", "name", "phone", "tel"}
 
 
 class UnmappedElementHandler:
@@ -404,6 +412,23 @@ class UnmappedElementHandler:
         except Exception as e:
             logger.debug(f"Auto handle email confirmation skipped: {e}")
 
+        # 追加: 確認コード（プレーン文字提示）の自動投入
+        try:
+            ver_handled = await self._auto_handle_verification_code(
+                classified_elements.get("text_inputs", []) or [],
+                mapped_element_ids,
+            )
+            auto_handled.update(ver_handled)
+            mapped_element_ids.update(
+                {
+                    id(v.get("element"))
+                    for v in ver_handled.values()
+                    if isinstance(v, dict) and v.get("element")
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Auto verification code fill skipped: {e}")
+
         # 汎用救済: 未マッピングの必須テキスト入力に全角空白を入力
         try:
             req_texts = await self._auto_handle_required_texts(
@@ -741,16 +766,20 @@ class UnmappedElementHandler:
                 if not (("tel" in blob) or ("phone" in blob) or ("電話" in blob)):
                     return None
                 # 配列風 [d] の最終出現を優先
-                m_br = re.search(r"\[(\d)\](?!.*\d)", blob)
+                m_br = RE_BRACKET_INDEX.search(blob)
                 if m_br:
                     raw = int(m_br.group(1))
-                    return raw + 1  # 0→1, 1→2, 2→3
+                    # 0始まり/1始まり双方に対応
+                    if raw in (1, 2, 3):
+                        return raw
+                    if raw in (0,):
+                        return raw + 1  # 0→1
 
                 # 接頭辞 + 数字（tel1/phone2/電話3）
                 for s in (nm, ide, cls):
                     if not s:
                         continue
-                    m = re.search(r"(?:tel|phone|電話)[^\d]*([0-9])(?!.*\d)", s)
+                    m = RE_TEL_SUFFIX.search(s)
                     if m:
                         raw = int(m.group(1))
                         return 1 if raw == 0 else raw
@@ -766,7 +795,7 @@ class UnmappedElementHandler:
                         return 3
 
                 # フォールバック: 末尾の一桁数字
-                tail = re.search(r"(\d)(?!.*\d)$", blob)
+                tail = RE_TAIL_DIGIT.search(blob)
                 if tail:
                     raw = int(tail.group(1))
                     return 1 if raw == 0 else raw
@@ -1270,33 +1299,70 @@ class UnmappedElementHandler:
             pri1 = ["営業", "提案", "メール"]
             pri2 = ["その他"]
 
+            # 近傍コンテキストのベストテキストは重いので、グループ処理内でキャッシュ
+            context_best_cache: Dict[int, str] = {}
+
+            async def _best_text_cached(loc: Locator) -> str:
+                key = id(loc)
+                if key in context_best_cache:
+                    return context_best_cache[key]
+                try:
+                    ctxs = await self.context_text_extractor.extract_context_for_element(loc)
+                    best = (self.context_text_extractor.get_best_context_text(ctxs) or "")
+                except Exception:
+                    best = ""
+                context_best_cache[key] = best
+                return best
+
             for group_key, items in groups.items():
                 group_required = False
                 for cb, info in items:
+                    # 直接の required 属性チェック
                     if await self.element_scorer._detect_required_status(cb):
                         group_required = True
                         break
-                    name_id_class = " ".join(
-                        [
-                            info.get("name", ""),
-                            info.get("id", ""),
-                            info.get("class", ""),
-                        ]
-                    ).lower()
-                    if any(
-                        k in name_id_class
-                        for k in [
-                            "acceptance",
-                            "consent",
-                            "同意",
-                            "policy",
-                            "privacy",
-                            "個人情報",
-                            "personal",
-                        ]
-                    ):
-                        group_required = True
-                        break
+                    # コンテナ側（dt/th/親要素）に必須マーカーがあるか簡易チェック（ラジオと同様の救済）
+                    try:
+                        if await self._detect_group_required_via_container(cb):
+                            group_required = True
+                            break
+                    except Exception:
+                        pass
+                # 追加フォールバック: 近傍コンテキストに『必須』が含まれるかを簡易確認
+                if not group_required:
+                    try:
+                        best = await _best_text_cached(items[0][0])
+                        if "必須" in (best or ""):
+                            group_required = True
+                    except Exception:
+                        pass
+                    # グループ内のいずれかの要素属性に同意/ポリシー系トークンが含まれる場合は必須扱い
+                    if not group_required:
+                        try:
+                            for _cb2, _info2 in items:
+                                name_id_class = " ".join(
+                                    [
+                                        _info2.get("name", ""),
+                                        _info2.get("id", ""),
+                                        _info2.get("class", ""),
+                                    ]
+                                ).lower()
+                                if any(
+                                    k in name_id_class
+                                    for k in [
+                                        "acceptance",
+                                        "consent",
+                                        "同意",
+                                        "policy",
+                                        "privacy",
+                                        "個人情報",
+                                        "personal",
+                                    ]
+                                ):
+                                    group_required = True
+                                    break  # グループ内の探索だけ中断（外側のグループ処理は継続）
+                        except Exception:
+                            pass
                 # コンテナ側の必須マーカー検出（DT/DD, TH/TD, 見出しなど）
                 if not group_required:
                     try:
@@ -1314,28 +1380,38 @@ class UnmappedElementHandler:
                 if not group_required:
                     try:
                         tokens = [
-                            "連絡方法",
-                            "ご希望連絡",
-                            "希望連絡",
-                            "連絡手段",
-                            "contact method",
-                            "preferred contact",
+                            "連絡方法", "ご希望連絡", "希望連絡", "連絡手段",
+                            "contact method", "preferred contact",
+                            # お問い合わせ系（問い合わせカテゴリ/項目/種別/subject/category/type 相当）
+                            "お問い合わせ", "お問合せ", "問合せ", "inquiry", "contact", "subject", "category", "カテゴリ", "項目", "種別",
                         ]
                         # group_key だけでなくコンテキストも確認
                         blob_key = (group_key or "").lower()
-                        if any(t in blob_key for t in ["連絡", "contact"]):
+                        if any(t in blob_key for t in ["連絡", "contact", "inquiry", "subject", "category", "カテゴリ", "項目", "種別"]):
                             is_contact_method_group = True
                         else:
                             for cb, _info in items:
-                                contexts = await self.context_text_extractor.extract_context_for_element(cb)
-                                best = (
-                                    self.context_text_extractor.get_best_context_text(contexts) or ""
-                                ).lower()
+                                best = (await _best_text_cached(cb) or "").lower()
                                 if any(tok in best for tok in [t.lower() for t in tokens]):
                                     is_contact_method_group = True
                                     break
                     except Exception:
                         is_contact_method_group = False
+                # 追加: 『お問い合わせ項目/種別/カテゴリ/subject』系ラベルが近傍にある場合は必須群として扱う（テーマ汎用）
+                if not group_required:
+                    try:
+                        ctxs = await self.context_text_extractor.extract_context_for_element(items[0][0])
+                        best = (self.context_text_extractor.get_best_context_text(ctxs) or "").lower()
+                        # お問い合わせ + （項目|内容|カテゴリ|category|type|種別|subject）の同時出現
+                        q_tokens = ["お問い合わせ", "お問合せ", "問合せ", "inquiry", "contact"]
+                        cat_tokens = ["項目", "内容", "カテゴリ", "category", "type", "種別", "subject"]
+                        if any(t in best for t in [s.lower() for s in q_tokens]) and any(
+                            t in best for t in [s.lower() for s in cat_tokens]
+                        ):
+                            group_required = True
+                    except Exception:
+                        pass
+
                 # 追加: プライバシー/規約同意の文脈検出（name/id/classに現れないケースの補完）
                 is_privacy_group = False
                 if not group_required:
@@ -1367,19 +1443,9 @@ class UnmappedElementHandler:
                         lower_agree = [t.lower() for t in agree_tokens]
 
                         for cb, info in items:
-                            # 1) 既存の軽量コンテキスト抽出で判定
-                            contexts = await self.context_text_extractor.extract_context_for_element(cb)
-                            texts = []
-                            try:
-                                texts = [
-                                    c.text for c in (contexts or []) if getattr(c, "text", None)
-                                ]
-                            except Exception:
-                                texts = []
-                            best = (
-                                self.context_text_extractor.get_best_context_text(contexts) or ""
-                            )
-                            blob = (" ".join(texts + [best])).lower()
+                            # 1) 既存の軽量コンテキスト抽出（キャッシュ使⽤）
+                            best = await _best_text_cached(cb)
+                            blob = (best or "").lower()
                             if any(tok in blob for tok in lower_priv) and (
                                 any(tok in blob for tok in lower_agree) or len(items) == 1
                             ):
@@ -2108,6 +2174,13 @@ class UnmappedElementHandler:
             "token",
             "otp",
             "verification",
+            # 追加: 確認コード/認証コード系（メール確認欄と誤検出しやすい）
+            "chkcode",
+            "checkcode",
+            "confirmcode",
+            "authcode",
+            "securitycode",
+            "code",  # 広すぎるため後段で条件付きでも弾く
         ]
 
         # 既に確定している主メール欄（論理フィールド『メールアドレス』）の name/id を取得して、
@@ -2136,11 +2209,14 @@ class UnmappedElementHandler:
             if any(b in name_id_class for b in blacklist):
                 continue
             attr_hit = any(p in name_id_class for p in confirmation_attr_patterns)
-            # プレースホルダに『確認』『再入力』等が含まれる場合も確認欄とみなす
+            # プレースホルダに『確認』『再入力』等が含まれる場合も確認欄候補とするが、
+            # 『email/mail/メール』系の手がかりが同時に存在する場合のみ True（誤検出抑止）。
             if not attr_hit and placeholder_raw:
                 low_pl = placeholder_raw.lower()
                 if any(t.lower() in low_pl for t in confirmation_ctx_tokens):
-                    attr_hit = True
+                    email_hint = any(k in (name_id_class) for k in ["email","e-mail","mail","メール"]) or (info.get("type","email") or "").lower() == "email"
+                    if email_hint:
+                        attr_hit = True
 
             # バリアント規則:
             # - 主メール name/id に対して、"_<name>" or "<name>2" や "<id>2" を確認欄とみなす
@@ -2182,6 +2258,13 @@ class UnmappedElementHandler:
                     )
                 except Exception:
                     ctx_hit = False
+            # CAPTCHA/確認コードのさらなる除外: name/id/placeholder/label に『コード』『認証』があれば除く
+            if (attr_hit or ctx_hit):
+                blob_all = name_id_class + " " + (info.get("label_text","") or "").lower()
+                if any(k in blob_all for k in ["確認コード","認証コード","コード","security code","verification code","auth code","chkcode","checkcode"]):
+                    attr_hit = False
+                    ctx_hit = False
+
             if not (attr_hit or ctx_hit):
                 continue
             selector = await self._generate_playwright_selector(el)
@@ -2333,6 +2416,110 @@ class UnmappedElementHandler:
 
         # Unreachable
 
+
+    async def _auto_handle_verification_code(self, text_inputs: List[Locator], mapped_element_ids: set) -> Dict[str, Dict[str, Any]]:
+        """確認コード/認証コード（画像でないプレーン文字提示）の自動投入。
+
+        汎用ルール:
+        - input[type=text] で name/id/class/placeholder/ラベルに「確認コード/認証コード/セキュリティコード/code」系が含まれる
+        - 近傍（同じ行や直前兄弟）に英数4〜10桁のコードが textContent で提示されていれば、その値を投入
+        - CAPTCHA画像やクイズ、画像認証などは対象外
+        """
+        handled: Dict[str, Dict[str, Any]] = {}
+        code_like = [
+            "確認コード", "認証コード", "セキュリティコード", "security code", "verification code", "auth code", "code",
+        ]
+        blacklist_like = ["captcha", "画像認証", "quiz", "wpcf7-quiz", "画像", "image", "captcha"]
+
+        for el in text_inputs:
+            try:
+                if id(el) in mapped_element_ids:
+                    continue
+                info = await self.element_scorer._get_element_info(el)
+                if not info.get("visible", True):
+                    continue
+                if (info.get("type", "").lower() or "") not in ("text", ""):
+                    continue
+                blob = " ".join([
+                    (info.get("name", "") or ""), (info.get("id", "") or ""),
+                    (info.get("class", "") or ""), (info.get("placeholder", "") or ""),
+                ]).lower()
+                # 画像系・captcha系の除外
+                if any(t.lower() in blob for t in [s.lower() for s in blacklist_like]):
+                    continue
+                # コンテキスト（ラベル等）
+                contexts = await self.context_text_extractor.extract_context_for_element(el)
+                best = (self.context_text_extractor.get_best_context_text(contexts) or "").lower()
+                hint = any(t.lower() in blob for t in [s.lower() for s in code_like]) or any(
+                    t.lower() in best for t in [s.lower() for s in code_like]
+                )
+                if not hint:
+                    continue
+
+                # 郵便番号/住所系の『code』を除外（zip/postal/postcode/郵便）
+                postal_like = ["zip", "postal", "postcode", "zipcode", "郵便", "住所"]
+                if any(t in blob for t in postal_like) or any(t in best for t in postal_like):
+                    continue
+
+                # 近傍の表示コード文字列を探索（英数4〜10桁）
+                selector = await self._generate_playwright_selector(el)
+                code = None
+                try:
+                    code = await el.evaluate(
+                        """
+                        (el) => {
+                          const re = /[A-Za-z0-9]{4,10}/g;
+                          const pick = (n) => (n && (n.innerText||n.textContent||'').trim()) || '';
+                          // 同じセル/親の直前兄弟内のテキストを優先
+                          let p = el.parentElement;
+                          for (let depth=0; p && depth<4; depth++) {
+                            let sib = p.previousElementSibling;
+                            for (let sDepth=0; sib && sDepth<4; sDepth++) {
+                              const t = pick(sib);
+                              const m = t && t.match(re);
+                              if (m && m.length) return m[0];
+                              sib = sib.previousElementSibling;
+                            }
+                            // 同じ親内のスパン/ストロング等
+                            const spans = Array.from(p.querySelectorAll('span,strong,b,i,em,code'));
+                            for (const sp of spans) {
+                              const t = pick(sp);
+                              const m = t && t.match(re);
+                              if (m && m.length) return m[0];
+                            }
+                            p = p.parentElement;
+                          }
+                          return '';
+                        }
+                        """
+                    )
+                except Exception:
+                    code = None
+                code = (code or "").strip()
+                if not code:
+                    continue
+                # Validate: alphanumeric 4-10 and not in common stopwords
+                if not RE_VERIFICATION_CODE.fullmatch(code):
+                    continue
+                if code.lower() in VERIFICATION_STOPWORDS:
+                    continue
+
+                handled[f"auto_verification_code_{len(handled)+1}"] = {
+                    "element": el,
+                    "selector": selector,
+                    "tag_name": info.get("tag_name", "input") or "input",
+                    "type": info.get("type", "text") or "text",
+                    "name": info.get("name", ""),
+                    "id": info.get("id", ""),
+                    "input_type": "text",
+                    "auto_action": "fill",
+                    "default_value": code,
+                    "required": True,
+                    "auto_handled": True,
+                }
+            except Exception:
+                continue
+        return handled
 
     async def promote_email_confirmation_to_mapping(
         self,

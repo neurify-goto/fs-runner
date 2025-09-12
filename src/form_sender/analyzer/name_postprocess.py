@@ -24,7 +24,18 @@ def prune_suspect_name_mappings(field_mapping: Dict[str, Any], settings: Dict[st
             "部署",
             "部署名",
         ]
-        negative_attr_tokens = ["kana", "furigana", "katakana", "hiragana"]
+        negative_attr_tokens = [
+            "kana",
+            "furigana",
+            "katakana",
+            "hiragana",
+            # 氏名に割り当ててはいけない代表的な属性ヒント（汎用）
+            "tel",
+            "phone",
+            "e-mail",
+            "email",
+            "mail",
+        ]
         for k in ["姓", "名"]:
             info = field_mapping.get(k)
             if not info:
