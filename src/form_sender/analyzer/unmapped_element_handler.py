@@ -6,7 +6,7 @@ from .element_scorer import ElementScorer
 from .context_text_extractor import ContextTextExtractor
 from .field_combination_manager import FieldCombinationManager
 from .form_structure_analyzer import FormStructure
-from config.manager import get_prefectures
+from config.manager import get_prefectures, get_choice_priority_config
 from ..utils.privacy_consent_handler import PrivacyConsentHandler
 
 logger = logging.getLogger(__name__)
@@ -1266,8 +1266,8 @@ class UnmappedElementHandler:
                 key = info.get("name") or info.get("id") or f"cb_{id(cb)}"
                 groups.setdefault(key, []).append((cb, info))
 
-            # 汎用優先語（従来）
-            pri1 = ["営業", "提案", "メール"]
+            # 汎用優先語（従来+法人）
+            pri1 = ["営業", "提案", "メール", "法人"]
             pri2 = ["その他"]
 
             for group_key, items in groups.items():
@@ -1440,7 +1440,8 @@ class UnmappedElementHandler:
                 elif is_contact_method_group:
                     idx = self._choose_contact_method_index(texts)
                 else:
-                    idx = self._choose_priority_index(texts, pri1, pri2)
+                    # 第3段階の優先度: 「問い合わせ/問合」を追加
+                    idx = self._choose_priority_index(texts, pri1, pri2, ["問い合わせ", "問合"])
                 cb, info = items[idx]
                 selector = await self._generate_playwright_selector(cb)
                 field_name = f"auto_checkbox_{group_key}"
@@ -1607,7 +1608,7 @@ class UnmappedElementHandler:
             except Exception as e:
                 logger.debug(f"Error grouping radio: {e}")
 
-        pri1 = ["営業", "提案", "メール"]
+        pri1 = ["営業", "提案", "メール", "法人"]
         # 既定の優先語（従来どおり）
         pri2 = ["その他", "other", "該当なし"]
 
@@ -1723,7 +1724,7 @@ class UnmappedElementHandler:
                 idx = (
                     self._choose_gender_index(texts)
                     if is_gender_field
-                    else self._choose_priority_index(texts, pri1, pri2)
+                    else self._choose_priority_index(texts, pri1, pri2, ["問い合わせ", "問合"])
                 )
 
             # 『その他』回避フォールバックは撤廃（従来の選択ロジックへ復帰）
@@ -1756,7 +1757,7 @@ class UnmappedElementHandler:
         client_data: Optional[Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
         handled: Dict[str, Dict[str, Any]] = {}
-        pri1 = ["営業", "提案", "メール"]
+        pri1 = ["営業", "提案", "メール", "法人"]
         pri2 = ["その他"]
         client_info = (
             client_data.get("client")
@@ -1850,6 +1851,35 @@ class UnmappedElementHandler:
                 texts = [d.get("text", "") for d in opt_data]
                 values = [d.get("value", "") for d in opt_data]
 
+                # ダミー/プレースホルダー除外トークン（設定優先、未定義や空ならデフォルトにフォールバック）
+                DEFAULT_EXCLUDE_TOKENS = [
+                    "選択", "選択してください", "ご選択", "お選び", "お選びください", "選んで", "選んでください",
+                    "choose", "please choose", "select", "please select", "未選択", "---", "—", "–",
+                ]
+                exclude_tokens = []
+                try:
+                    choice_cfg = get_choice_priority_config() or {}
+                    raw = (choice_cfg.get("select", {}).get("exclude_keywords", []) or [])
+                    exclude_tokens = [str(x).lower() for x in raw if str(x).strip()]
+                except Exception:
+                    exclude_tokens = []
+                if not exclude_tokens:
+                    exclude_tokens = [s.lower() for s in DEFAULT_EXCLUDE_TOKENS]
+
+                def _is_dummy_option(idx: int) -> bool:
+                    try:
+                        t = (texts[idx] or "").strip().lower()
+                        v = (values[idx] or "").strip()
+                        if v == "":
+                            return True
+                        if any(tok in t for tok in exclude_tokens):
+                            return True
+                        if any(tok in v.lower() for tok in ["select", "choose", "---", "none"]):
+                            return True
+                    except Exception:
+                        return False
+                    return False
+
                 # 問い合わせ種別系セレクト（ご用件/お問い合わせ内容/目的/purpose/inquiry/category/subject）は
                 # 非必須でも安全側で選択（既定が特定カテゴリだと誤った送信内容になるため）。
                 try:
@@ -1896,20 +1926,9 @@ class UnmappedElementHandler:
                             if isinstance(pre_idx, int) and pre_idx >= 0
                             else ""
                         )
-                        dummy_tokens = [
-                            "選択",
-                            "お選び",
-                            "選んで",
-                            "choose",
-                            "select",
-                            "---",
-                            "未選択",
-                        ]
                         is_dummy_default = (
                             (not pre_text and not pre_val)
-                            or any(
-                                tok.lower() in pre_text.lower() for tok in dummy_tokens
-                            )
+                            or any(tok in pre_text.lower() for tok in exclude_tokens)
                             or pre_val == ""
                         )
                         if is_dummy_default:
@@ -1932,19 +1951,7 @@ class UnmappedElementHandler:
                 if isinstance(pre_idx, int) and 0 <= pre_idx < len(values):
                     pre_text = (texts[pre_idx] or "").strip()
                     pre_val = (values[pre_idx] or "").strip()
-                    dummy_tokens = [
-                        "選択",
-                        "お選び",
-                        "選んで",
-                        "choose",
-                        "select",
-                        "---",
-                        "未選択",
-                    ]
-                    is_dummy = (
-                        any(tok.lower() in pre_text.lower() for tok in dummy_tokens)
-                        or pre_val == ""
-                    )
+                    is_dummy = (any(tok in pre_text.lower() for tok in exclude_tokens) or pre_val == "")
                     if not is_dummy:
                         idx = pre_idx
                 if is_gender_select and client_gender_norm:
@@ -1980,17 +1987,27 @@ class UnmappedElementHandler:
                                 idx = cand[-1]
                                 break
                 elif is_inquiry_type:
-                    # 問い合わせ種別は『その他』等の中立値を優先
-                    pri = ["その他", "other"]
-                    cand = [
-                        k
-                        for k, tx in enumerate(texts)
-                        if any(p.lower() in (tx or "").lower() for p in pri)
+                    # 問い合わせ種別は『その他』を最優先、次に『問い合わせ/問合』を優先
+                    pri_other = ["その他", "other"]
+                    cand_other = [
+                        k for k, tx in enumerate(texts)
+                        if any(p.lower() in (tx or "").lower() for p in pri_other)
                     ]
-                    if cand:
-                        idx = cand[0]
+                    if cand_other:
+                        idx = cand_other[0]
+                    else:
+                        pri_inquiry = ["問い合わせ", "問合"]
+                        cand_inq = [
+                            k for k, tx in enumerate(texts)
+                            if (not _is_dummy_option(k)) and any(p.lower() in (tx or "").lower() for p in pri_inquiry)
+                        ]
+                        if cand_inq:
+                            idx = cand_inq[0]
                 if idx is None:
-                    idx = self._choose_priority_index(texts, pri1, pri2)
+                    # 第3段階の優先度: 「問い合わせ/問合」を追加（ダミー/空値は除外）
+                    idx = self._choose_priority_index(
+                        texts, pri1, pri2, ["問い合わせ", "問合"], exclude_tokens, values
+                    )
 
                 selector = await self._generate_playwright_selector(select)
                 field_name = f"auto_select_{i+1}"
@@ -2015,15 +2032,38 @@ class UnmappedElementHandler:
         return handled
 
     def _choose_priority_index(
-        self, texts: List[str], pri1: List[str], pri2: List[str]
+        self,
+        texts: List[str],
+        pri1: List[str],
+        pri2: List[str],
+        pri3: Optional[List[str]] = None,
+        exclude_text_tokens: Optional[List[str]] = None,
+        values: Optional[List[str]] = None,
     ) -> int:
+        def is_excluded(i: int) -> bool:
+            try:
+                if values is not None:
+                    v = (values[i] or "").strip()
+                    if v == "":
+                        return True
+                    if any(tok in v.lower() for tok in ["select", "choose", "---", "none"]):
+                        return True
+                if exclude_text_tokens:
+                    tl = (texts[i] or "").lower()
+                    if any(tok in tl for tok in exclude_text_tokens):
+                        return True
+            except Exception:
+                return False
+            return False
+
         def last_match(keys: List[str]) -> Optional[int]:
-            idxs = []
-            low_keys = [k.lower() for k in keys]
+            idxs: List[int] = []
+            low_keys = [k.lower() for k in (keys or [])]
             for i, t in enumerate(texts):
                 tl = (t or "").lower()
                 if any(k in tl for k in low_keys):
-                    idxs.append(i)
+                    if not is_excluded(i):
+                        idxs.append(i)
             return idxs[-1] if idxs else None
 
         idx = last_match(pri1)
@@ -2032,6 +2072,14 @@ class UnmappedElementHandler:
         idx = last_match(pri2)
         if idx is not None:
             return idx
+        if pri3:
+            idx = last_match(pri3)
+            if idx is not None:
+                return idx
+        # 最後のフォールバック: 除外されていない最後の選択肢
+        for i in range(len(texts) - 1, -1, -1):
+            if not is_excluded(i):
+                return i
         return max(0, len(texts) - 1)
 
     def _choose_contact_method_index(self, texts: List[str]) -> int:

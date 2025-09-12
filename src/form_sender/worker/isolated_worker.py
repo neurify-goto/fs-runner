@@ -1345,14 +1345,17 @@ class IsolatedFormWorker:
                             }
                         }
 
-                    def _choose_priority_index(texts: list, pri1: list, pri2: list) -> int:
+                    def _choose_priority_index(texts: list, pri1: list, pri2: list, pri3: list = None) -> int:
                         def last_match(keys):
-                            cand = [i for i, t in enumerate(texts) if any(str(k).lower() in (t or '').lower() for k in keys)]
+                            cand = [i for i, t in enumerate(texts) if any(str(k).lower() in (t or '').lower() for k in (keys or []))]
                             return cand[-1] if cand else None
                         idx = last_match(pri1)
                         if idx is not None:
                             return idx
                         idx = last_match(pri2)
+                        if idx is not None:
+                            return idx
+                        idx = last_match(pri3 or [])
                         if idx is not None:
                             return idx
                         return max(0, len(texts) - 1)
@@ -1386,6 +1389,7 @@ class IsolatedFormWorker:
 
                         pri1 = choice_cfg.get('checkbox', {}).get('primary_keywords', [])
                         pri2 = choice_cfg.get('checkbox', {}).get('secondary_keywords', [])
+                        pri3 = choice_cfg.get('checkbox', {}).get('tertiary_keywords', ['問い合わせ','問合'])
 
                         # privacy negative tokens (skip selecting marketing/newsletter)
                         try:
@@ -1424,9 +1428,9 @@ class IsolatedFormWorker:
                                     if agree_hits:
                                         target_indices = [agree_hits[0]]
                                     else:
-                                        target_indices = [_choose_priority_index(texts, pri1, pri2)]
+                                        target_indices = [_choose_priority_index(texts, pri1, pri2, pri3)]
                                 else:
-                                    target_indices = [_choose_priority_index(texts, pri1, pri2)]
+                                    target_indices = [_choose_priority_index(texts, pri1, pri2, pri3)]
 
                             # 上限と重複排除
                             target_indices = list(dict.fromkeys(target_indices))[:max(1, max_sel)]
