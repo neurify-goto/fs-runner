@@ -169,25 +169,25 @@ async def install_cookie_routes(
                 should_strip = False
 
             if should_strip:
-            try:
-                resp = await route.fetch()
-                # ヘッダから Set-Cookie を除去
-                headers = {k: v for k, v in resp.headers.items() if k.lower() != "set-cookie"}
-                body = await resp.body()
-                await route.fulfill(
-                    status=resp.status,
-                    headers=headers,
-                    body=body,
-                    content_type=resp.headers.get("content-type")
-                )
-                return
-            except Exception:
-                # フェッチ/フィルフィル失敗時は通常継続
                 try:
-                    await route.continue_()
+                    resp = await route.fetch()
+                    # ヘッダから Set-Cookie を除去
+                    headers = {k: v for k, v in resp.headers.items() if k.lower() != "set-cookie"}
+                    body = await resp.body()
+                    await route.fulfill(
+                        status=resp.status,
+                        headers=headers,
+                        body=body,
+                        content_type=resp.headers.get("content-type")
+                    )
                     return
                 except Exception:
-                    pass
+                    # フェッチ/フィルフィル失敗時は通常継続
+                    try:
+                        await route.continue_()
+                        return
+                    except Exception:
+                        pass
 
         # 4) それ以外はそのまま
         try:
