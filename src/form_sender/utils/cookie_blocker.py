@@ -16,7 +16,7 @@ import re
 from typing import Iterable, Dict, Any, Optional, Tuple, List
 from urllib.parse import urlparse
 
-from playwright.async_api import BrowserContext, Page, Route
+from playwright.async_api import BrowserContext, Page, Route, Frame
 
 
 # 主要CMPドメイン（過剰ブロックを避けつつ高頻度なもの中心）
@@ -53,10 +53,17 @@ CMP_HOST_PATTERNS: Tuple[str, ...] = (
     "axeptio.eu",
 )
 
+# lower-cased cache for faster substring checks
+_CMP_PATTERNS_LC: Tuple[str, ...] = tuple(p.lower() for p in CMP_HOST_PATTERNS)
+
 
 def _url_matches_any(url: str, patterns: Iterable[str]) -> bool:
     u = (url or "").lower()
-    return any(p in u for p in patterns)
+    # patterns is expected lower-cased; fall back if not
+    try:
+        return any(p in u for p in patterns)
+    except Exception:
+        return any((p or '').lower() in u for p in patterns)
 
 
 def _hostname(url: str) -> str:
@@ -340,7 +347,7 @@ async def _try_role_regex(scope: Page, regex, search_timeout_ms: int, click_time
     return False
 
 
-def _prioritize_frames(frames: List[Page]):  # type: ignore[name-defined]
+def _prioritize_frames(frames: List[Frame]):
     # URLにCMP/consent/cookieキーワードを含むものを優先
     def score(f) -> int:
         try:
@@ -348,7 +355,7 @@ def _prioritize_frames(frames: List[Page]):  # type: ignore[name-defined]
         except Exception:
             u = ""
         s = 0
-        if _url_matches_any(u, CMP_HOST_PATTERNS):
+        if _url_matches_any(u, _CMP_PATTERNS_LC):
             s += 2
         if any(k in u for k in ["consent", "cookie", "privacy", "gdpr"]):
             s += 1

@@ -36,6 +36,12 @@ class BrowserManager:
         self._stealth_applied: bool = False
         self._stealth_cm = None  # async context manager returned by Stealth().use_async(async_playwright())
         self._stealth_enabled: bool = True
+        # コンテキストのライフサイクル用ロック（並行呼び出し安全化）
+        try:
+            import asyncio as _asyncio
+            self._context_lock = _asyncio.Lock()
+        except Exception:
+            self._context_lock = None
 
         # 設定値
         # デフォルトはやや長め（初回読み込みの安定性重視）
@@ -185,6 +191,16 @@ class BrowserManager:
             for i in range(2):
                 page = None
                 try:
+                    # 原子的な健全性チェック（並行競合を抑止）
+                    try:
+                        if self._context_lock is not None:
+                            async with self._context_lock:
+                                await self._ensure_context_health()
+                        else:
+                            await self._ensure_context_health()
+                    except Exception:
+                        # 健全性検査失敗は続行（下で再生成）
+                        pass
                     # 既存コンテキストの健全性を事前チェック（切断済みなら再生成させる）
                     if self.context:
                         try:
@@ -195,6 +211,7 @@ class BrowserManager:
                             self._stealth_applied = False
 
                     # コンテキストが無い場合のみ作成
+                    context_created_here = False
                     if not self.context:
                         # どの環境でもロケール/タイムゾーン/Accept-Language を固定（JST運用要件 + 自然な言語ヘッダ）
                         context_common = dict(
@@ -204,18 +221,36 @@ class BrowserManager:
                                 "Accept-Language": "ja, en-US;q=0.8, en;q=0.7",
                             },
                         )
-                        if platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None):
-                            self.context = await self.browser.new_context(**context_common)
+                        # 作成はロック下で二重生成を回避
+                        if self._context_lock is not None:
+                            async with self._context_lock:
+                                if not self.context:
+                                    if platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None):
+                                        self.context = await self.browser.new_context(**context_common)
+                                    else:
+                                        # UAはページヘッダと整合するフル文字列を利用（検出回避のため一致させる）
+                                        self.context = await self.browser.new_context(
+                                            user_agent=(
+                                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                                "Chrome/120.0.0.0 Safari/537.36"
+                                            ),
+                                            **context_common,
+                                        )
+                                    context_created_here = True
                         else:
-                            # UAはページヘッダと整合するフル文字列を利用（検出回避のため一致させる）
-                            self.context = await self.browser.new_context(
-                                user_agent=(
-                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                    "Chrome/120.0.0.0 Safari/537.36"
-                                ),
-                                **context_common,
-                            )
+                            if platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None):
+                                self.context = await self.browser.new_context(**context_common)
+                            else:
+                                self.context = await self.browser.new_context(
+                                    user_agent=(
+                                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                        "Chrome/120.0.0.0 Safari/537.36"
+                                    ),
+                                    **context_common,
+                                )
+                            context_created_here = True
                     # Cookie ブラックホール（任意）を context に注入（new_page より前）
                     try:
                         cookie_cfg = (self.config.get("worker_config", {}).get("browser", {}).get("cookie_control", {}) if isinstance(self.config, dict) else {})
@@ -301,6 +336,14 @@ class BrowserManager:
                             await page.close()
                     except Exception:
                         pass
+                    # 当回で作成したcontextがあればクリーンアップ（リーク抑止）
+                    try:
+                        if context_created_here and self.context:
+                            await self.context.close()
+                            self.context = None
+                            self._stealth_applied = False
+                    except Exception:
+                        pass
                     logger.error(f"Worker {self.worker_id}: Page load timeout for ***URL_REDACTED*** (attempt {i+1}/2)")
                 except Exception as e:
                     last_err = e
@@ -345,6 +388,26 @@ class BrowserManager:
             logger.error(f"Worker {self.worker_id}: Page access error for ***URL_REDACTED*** {e}")
             raise e
 
+    async def _ensure_context_health(self) -> None:
+        """コンテキストの健全性を検査し、壊れていれば再生成する。"""
+        if not self.context:
+            return
+        try:
+            _ = self.context.pages
+        except Exception:
+            await self._recreate_context()
+
+    async def _recreate_context(self) -> None:
+        """安全にコンテキストを破棄し、次回作成に備える。"""
+        old = self.context
+        self.context = None
+        self._stealth_applied = False
+        if old:
+            try:
+                await old.close()
+            except Exception:
+                pass
+
     async def _ensure_stealth(self, context: BrowserContext) -> None:
         """playwright-stealth の回避スクリプトを適用（1回のみ）。
 
@@ -384,6 +447,17 @@ class BrowserManager:
                         await p.close()
                     except Exception:
                         pass
+                # ページを全て閉じてもコンテキストに異常がある場合は安全に破棄
+                try:
+                    _ = self.context.pages
+                except Exception:
+                    try:
+                        await self.context.close()
+                    except Exception:
+                        pass
+                    finally:
+                        self.context = None
+                        self._stealth_applied = False
         except Exception:
             pass
 
