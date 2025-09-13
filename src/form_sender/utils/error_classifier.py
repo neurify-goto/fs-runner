@@ -720,6 +720,7 @@ class ErrorClassifier:
             'FORM_VALIDATION_ERROR': 'VALIDATION',
             'DUPLICATE_SUBMISSION': 'BUSINESS',
             'PROHIBITION_DETECTED': 'BUSINESS',
+            'NO_MESSAGE_AREA': 'FORM_STRUCTURE',
         }
         category = category_map.get(code, 'GENERAL')
 
