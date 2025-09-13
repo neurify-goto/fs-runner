@@ -108,6 +108,7 @@ function getNextPendingBatch(taskType, batchSize = 20, limit = null, options = {
     console.log(`Supabaseクエリ実行: ${query}`);
     
     // HTTPリクエスト実行
+    // 注意: GASのUrlFetchAppには明示的なtimeout指定はありません（既定タイムアウトに依存）
     const response = UrlFetchApp.fetch(query, {
       method: 'GET',
       headers: {
@@ -195,6 +196,7 @@ function updateFormFinderQueued(recordIds, status = true, companyTable = CONFIG.
     
     console.log(`更新クエリ実行: ${updateQuery}`);
     
+    // 注意: UrlFetchApp は timeout オプション非対応。リトライは呼び出し元で実施。
     const response = UrlFetchApp.fetch(updateQuery, {
       method: 'PATCH',
       headers: supabase.headers,
