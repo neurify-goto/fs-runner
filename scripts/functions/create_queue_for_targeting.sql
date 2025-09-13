@@ -99,14 +99,15 @@ begin
   v_sql := v_sql || ' and ( $3::text[] is null or array_length($3::text[],1) is null or not (c.company_name = any($3::text[])) )';
 
   -- 追加の名称ポリシー除外: 次の語を含む企業名は対象外
-  --   「医療法人」「病院」「法律事務所」「弁護士」「税理士」「弁理士」
+  --   「医療法人」「病院」「法律事務所」「弁護士」「税理士」「弁理士」「学校」
   -- 要件: send_queue 作成段階で除外し、後続処理に乗せない
   v_sql := v_sql || ' and (c.company_name not like ''%医療法人%''
                              and c.company_name not like ''%病院%''
                              and c.company_name not like ''%法律事務所%''
                              and c.company_name not like ''%弁護士%''
                              and c.company_name not like ''%税理士%''
-                             and c.company_name not like ''%弁理士%'')';
+                             and c.company_name not like ''%弁理士%''
+                             and c.company_name not like ''%学校%'')';
 
   v_sql := v_sql || ' order by c.id asc limit $4 )
     insert into public.send_queue(
@@ -184,7 +185,8 @@ begin
                                and c.company_name not like ''%法律事務所%''
                                and c.company_name not like ''%弁護士%''
                                and c.company_name not like ''%税理士%''
-                               and c.company_name not like ''%弁理士%'')';
+                               and c.company_name not like ''%弁理士%''
+                               and c.company_name not like ''%学校%'')';
 
     v_sql := v_sql || ' order by c.id asc limit $4 )
       insert into public.send_queue(

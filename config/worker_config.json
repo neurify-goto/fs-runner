@@ -169,7 +169,17 @@
     "classify_cache_ttl_sec": 600,
     "requeue_interval_seconds": 60,
     "requeue_stale_minutes": 5,
-    "idle_exit_seconds": 900
+    "idle_exit_seconds": 900,
+    "_comment_name_policy": "企業名にこれらの語を含む場合は送信対象外（Form-Senderで二重確認）",
+    "name_policy_exclude_keywords": [
+      "医療法人",
+      "病院",
+      "法律事務所",
+      "弁護士",
+      "税理士",
+      "弁理士",
+      "学校"
+    ]
   },
   "detectors": {
     "prohibition": {

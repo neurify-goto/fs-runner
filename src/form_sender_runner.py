@@ -39,6 +39,30 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = setup_sanitized_logging(__name__)
 
 
+def _get_name_policy_exclude_keywords() -> List[str]:
+    """企業名による除外ワード一覧を設定から取得（フォールバックあり）。
+
+    - 既定: 医療/法律系に加え「学校」を含める
+    - 設定: config/worker_config.json の runner.name_policy_exclude_keywords
+    """
+    default_words = ['医療法人', '病院', '法律事務所', '弁護士', '税理士', '弁理士', '学校']
+    try:
+        cfg = get_worker_config().get('runner', {})
+        words = cfg.get('name_policy_exclude_keywords')
+        if isinstance(words, list):
+            cleaned: List[str] = []
+            for w in words:
+                if isinstance(w, str):
+                    s = w.strip()
+                    if s:
+                        cleaned.append(s)
+            # 設定が空配列なら既定にフォールバック
+            return cleaned or default_words
+    except Exception:
+        pass
+    return default_words
+
+
 def _sanitize_field_mapping_for_storage(field_mapping: Dict[str, Any]) -> Dict[str, Any]:
     """submissions.field_mapping に『マッピング結果全体』を保存できるようJSON安全化する。
 
@@ -321,7 +345,6 @@ def _prune_classify_cache(now_ts: float) -> None:
     try:
         max_size, ttl = _get_classify_cache_limits()
         # TTL 期限切れを最大16件だけ掃除（安全のためキーを一度リスト化）
-        import itertools
         removed = 0
         keys_snapshot = list(_CLASSIFY_CACHE.keys())[:64]
         for k in keys_snapshot:
@@ -729,6 +752,53 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         if not comp.data:
             raise RuntimeError('company not found')
         company = comp.data[0]
+        # まず企業名ポリシーでの除外判定を先行させ、後続の重複チェック(追加クエリ)を省略して負荷を下げる
+        try:
+            cname = company.get('company_name') or ''
+            policy_words = _get_name_policy_exclude_keywords()
+            matched = [w for w in policy_words if isinstance(cname, str) and (w in cname)]
+            if matched:
+                classify_detail = {
+                    'code': 'SKIPPED_BY_NAME_POLICY',
+                    'category': 'POLICY',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 1.0,
+                    'evidence': {
+                        'name_policy_keywords': matched
+                    }
+                }
+                _md_args = {
+                    'p_target_date': str(target_date),
+                    'p_targeting_id': targeting_id,
+                    'p_company_id': company_id,
+                    'p_success': False,
+                    'p_error_type': 'SKIPPED_BY_NAME_POLICY',
+                    'p_classify_detail': classify_detail,
+                    'p_field_mapping': None,
+                    'p_bot_protection': False,
+                    'p_submitted_at': jst_now().isoformat(),
+                    'p_run_id': run_id,
+                }
+                try:
+                    supabase.rpc('mark_done', _md_args).execute()
+                except Exception as e_mdnp:
+                    if _should_fallback_on_rpc_error(e_mdnp, 'mark_done', ['p_run_id']):
+                        _md_args.pop('p_run_id', None)
+                        supabase.rpc('mark_done', _md_args).execute()
+                    else:
+                        raise
+                try:
+                    wid = getattr(worker, 'worker_id', 0)
+                    _get_lifecycle_logger().info(
+                        f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=SKIPPED_BY_NAME_POLICY"
+                    )
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            # 判定エラー時は通常処理を継続（安全側）
+            pass
         # 当日すでに submissions 記録がある場合はスキップ（DB側JOINを外したため、ここで一意性を担保）
         try:
             start_utc, end_utc = jst_utc_bounds(target_date)
@@ -816,57 +886,6 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
         if company.get('black') is not None:
             raise RuntimeError('company blacklisted')
-        # 追加ポリシー: 企業名に以下の語を含む場合は送信対象外（send_queue時点で除外するが二重化）
-        # - 医療法人 / 病院
-        # - 法律事務所 / 弁護士 / 税理士 / 弁理士
-        try:
-            cname = company.get('company_name') or ''
-            policy_words = ['医療法人', '病院', '法律事務所', '弁護士', '税理士', '弁理士']
-            matched = [w for w in policy_words if isinstance(cname, str) and (w in cname)]
-            if matched:
-                classify_detail = {
-                    'code': 'SKIPPED_BY_NAME_POLICY',
-                    'category': 'POLICY',
-                    'retryable': False,
-                    'cooldown_seconds': 0,
-                    'confidence': 1.0,
-                    'evidence': {
-                        # トリガーになった語のみを保存（全ポリシー語ではなく）
-                        'name_policy_keywords': matched
-                    }
-                }
-                _md_args = {
-                    'p_target_date': str(target_date),
-                    'p_targeting_id': targeting_id,
-                    'p_company_id': company_id,
-                    'p_success': False,
-                    'p_error_type': 'SKIPPED_BY_NAME_POLICY',
-                    'p_classify_detail': classify_detail,
-                    'p_field_mapping': None,
-                    'p_bot_protection': False,
-                    'p_submitted_at': jst_now().isoformat(),
-                    'p_run_id': run_id,
-                }
-                try:
-                    supabase.rpc('mark_done', _md_args).execute()
-                except Exception as e_mdnp:
-                    if _should_fallback_on_rpc_error(e_mdnp, 'mark_done', ['p_run_id']):
-                        _md_args.pop('p_run_id', None)
-                        supabase.rpc('mark_done', _md_args).execute()
-                    else:
-                        raise
-                # 完了ログ（企業名は出さない）
-                try:
-                    wid = getattr(worker, 'worker_id', 0)
-                    _get_lifecycle_logger().info(
-                        f"process_done: company_id={company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=SKIPPED_BY_NAME_POLICY"
-                    )
-                except Exception:
-                    pass
-                return True
-        except Exception:
-            # 判定エラー時は通常処理を継続（安全側）
-            pass
     except Exception as e:
         logger.error(f"fetch company error ({company_id}): {e}")
         # mark failed quickly（代表コードで詳細分類を付与）
