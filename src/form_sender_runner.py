@@ -44,7 +44,7 @@ COMPANY_TABLE = os.environ.get('COMPANY_TABLE', 'companies').strip() or 'compani
 SEND_QUEUE_TABLE = os.environ.get('SEND_QUEUE_TABLE', 'send_queue').strip() or 'send_queue'
 USE_EXTRA_TABLE = (COMPANY_TABLE == 'companies_extra') or (SEND_QUEUE_TABLE == 'send_queue_extra')
 
-# RPC名の切替（*_extra が存在しない環境でも、後続のフォールバックがシグネチャ不一致を安全に処理）
+# RPC名の切替（*_extra 未デプロイ環境では、後段のフォールバックがシグネチャ不一致のみを許容）
 FN_CLAIM = 'claim_next_batch_extra' if USE_EXTRA_TABLE else 'claim_next_batch'
 FN_MARK_DONE = 'mark_done_extra' if USE_EXTRA_TABLE else 'mark_done'
 FN_REQUEUE = 'requeue_stale_assigned_extra' if USE_EXTRA_TABLE else 'requeue_stale_assigned'
