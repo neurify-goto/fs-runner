@@ -53,14 +53,37 @@ src AS (
     END AS host
   FROM public.extra_companies ec
 ),
-to_insert AS (
+ to_insert AS (
+  -- 既存 companies に存在しないホストのみ抽出（サブドメインは区別）
   SELECT s.*
   FROM src s
   LEFT JOIN existing_hosts e
     ON s.host IS NOT NULL AND e.host = s.host
   WHERE e.host IS NULL
 ),
-numbered AS (
+ dedup AS (
+  -- P1: extra_companies 内で同一ホストが複数ある場合は 1 件に絞る
+  -- host が NULL の行はドメイン重複判定不可のため除外せず全て残す
+  SELECT *
+  FROM (
+    SELECT
+      t.*,
+      CASE
+        WHEN t.host IS NULL THEN NULL
+        ELSE ROW_NUMBER() OVER (
+               PARTITION BY t.host
+               ORDER BY COALESCE(t.company_name, '') ASC,
+                        COALESCE(t.company_url_norm, '') ASC,
+                        COALESCE(t.postal_code, '') ASC,
+                        COALESCE(t.tel, '') ASC,
+                        COALESCE(t.location, '') ASC
+             )
+      END AS host_rank
+    FROM to_insert t
+  ) x
+  WHERE x.host_rank IS NULL OR x.host_rank = 1
+),
+ numbered AS (
   SELECT
     (SELECT max_id FROM base)
       + ROW_NUMBER() OVER (
@@ -71,7 +94,7 @@ numbered AS (
                    COALESCE(location, '')
         ) AS new_id,
     *
-  FROM to_insert
+  FROM dedup
 )
 INSERT INTO public.companies (
   id,
@@ -154,4 +177,3 @@ SELECT
   NULL::boolean AS black;
 
 -- End of script.
-
