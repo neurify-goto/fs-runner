@@ -25,13 +25,18 @@ src AS (
     ec.tel,
     ec.company_url,
     NULLIF(TRIM(ec.company_url), '') AS company_url_norm,
+    -- Host normalization:
+    -- 1) Strip scheme (RFC3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )) + '://' OR protocol-relative '//'
+    -- 2) Cut off path/query/fragment
+    -- 3) Drop port by splitting at ':'
+    -- 4) Lowercase
     CASE
       WHEN NULLIF(TRIM(ec.company_url), '') IS NULL THEN NULL
       ELSE NULLIF(
         LOWER(
           split_part(
             regexp_replace(
-              regexp_replace(TRIM(ec.company_url), '^[a-zA-Z]+://', ''),
+              regexp_replace(TRIM(ec.company_url), '^([A-Za-z][A-Za-z0-9+.-]*://|//)', ''),
               '[/?#].*$', ''
             ),
             ':', 1
@@ -76,7 +81,7 @@ to_insert AS (
       AND LOWER(
             split_part(
               regexp_replace(
-                regexp_replace(TRIM(c.company_url), '^[a-zA-Z]+://', ''),
+                regexp_replace(TRIM(c.company_url), '^([A-Za-z][A-Za-z0-9+.-]*://|//)', ''),
                 '[/?#].*$', ''
               ),
               ':', 1
@@ -88,6 +93,8 @@ to_insert AS (
   SELECT
     (SELECT max_id FROM base)
       + ROW_NUMBER() OVER (
+          -- ORDER KEY (keep in sync with dedup_src):
+          -- company_name, company_url_norm, postal_code, tel, location
           ORDER BY COALESCE(company_name, ''),
                    COALESCE(company_url_norm, ''),
                    COALESCE(postal_code, ''),

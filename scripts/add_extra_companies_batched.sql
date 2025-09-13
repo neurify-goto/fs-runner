@@ -30,7 +30,7 @@ src AS (
         LOWER(
           split_part(
             regexp_replace(
-              regexp_replace(TRIM(ec.company_url), '^[a-zA-Z]+://', ''),
+              regexp_replace(TRIM(ec.company_url), '^([A-Za-z][A-Za-z0-9+.-]*://|//)', ''),
               '[/?#].*$', ''
             ),
             ':', 1
@@ -72,7 +72,7 @@ to_insert AS (
       AND LOWER(
             split_part(
               regexp_replace(
-                regexp_replace(TRIM(c.company_url), '^[a-zA-Z]+://', ''),
+                regexp_replace(TRIM(c.company_url), '^([A-Za-z][A-Za-z0-9+.-]*://|//)', ''),
                 '[/?#].*$', ''
               ),
               ':', 1
@@ -84,6 +84,8 @@ numbered AS (
   SELECT
     (SELECT max_id FROM base)
       + ROW_NUMBER() OVER (
+          -- ORDER KEY (keep in sync with dedup_src):
+          -- company_name, company_url_norm, postal_code, tel, location
           ORDER BY COALESCE(company_name, ''),
                    COALESCE(company_url_norm, ''),
                    COALESCE(postal_code, ''),
@@ -176,4 +178,3 @@ FROM numbered
 WHERE new_id <= (SELECT max_id FROM base) + 500;  -- バッチサイズ（必要に応じて変更）
 
 -- End of script.
-
