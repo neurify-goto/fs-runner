@@ -19,9 +19,9 @@ existing_hosts AS (
   SELECT DISTINCT
     LOWER(
       split_part(
-        split_part(
+        regexp_replace(
           regexp_replace(TRIM(company_url), '^[a-zA-Z]+://', ''),
-          '/', 1
+          '[/?#].*$', ''
         ),
         ':', 1
       )
@@ -41,14 +41,17 @@ src AS (
     NULLIF(TRIM(ec.company_url), '') AS company_url_norm,
     CASE
       WHEN NULLIF(TRIM(ec.company_url), '') IS NULL THEN NULL
-      ELSE LOWER(
-        split_part(
+      ELSE NULLIF(
+        LOWER(
           split_part(
-            regexp_replace(TRIM(ec.company_url), '^[a-zA-Z]+://', ''),
-            '/', 1
-          ),
-          ':', 1
-        )
+            regexp_replace(
+              regexp_replace(TRIM(ec.company_url), '^[a-zA-Z]+://', ''),
+              '[/?#].*$', ''
+            ),
+            ':', 1
+          )
+        ),
+        ''
       )
     END AS host
   FROM public.extra_companies ec
