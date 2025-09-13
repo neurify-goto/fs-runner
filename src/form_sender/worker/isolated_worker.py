@@ -866,6 +866,40 @@ class IsolatedFormWorker:
             except Exception as _e:
                 logger.debug(f"Worker {self.worker_id}: sales prohibition early-check skipped: {_e}")
 
+            # 送信前バリデーション: 『お問い合わせ本文（message）』がマッピングされていない場合は送信回避
+            try:
+                vr = analysis_result.get('validation_result') if isinstance(analysis_result, dict) else None
+                fm = analysis_result.get('field_mapping', {}) if isinstance(analysis_result, dict) else {}
+                issues = (vr or {}).get('issues', []) if isinstance(vr, dict) else []
+                # AnalysisValidator は contact_form で 'お問い合わせ本文' 欠落を issues に追加する
+                message_missing = any("Required field 'お問い合わせ本文' is missing" in str(i) for i in (issues or []))
+                # contact_form の厳格判定は AnalysisValidator に委譲する
+                if message_missing:
+                    logger.warning(
+                        f"Worker {self.worker_id}: Message field not mapped; skip submission for record_id {record_id}"
+                    )
+                    return {
+                        "error": True,
+                        "record_id": record_id,
+                        "status": "failed",
+                        # ランナーの分類器と整合する代表コードを採用（詳細はadditional_dataに格納）
+                        "error_type": "MAPPING",
+                        "error_message": "Required field 'お問い合わせ本文' is missing",
+                        "additional_data": {
+                            "classify_context": {
+                                "stage": "pre_submission_validation",
+                                "primary_error_type": "MAPPING",
+                                "is_bot_detected": False,
+                            },
+                            # 解析時点の簡易コンテキスト（安全な範囲のみ）
+                            "validation_issues": issues[:10] if isinstance(issues, list) else [],
+                            "field_mapping_keys": list((fm or {}).keys())[:30],
+                        },
+                    }
+            except Exception as _val_e:
+                # バリデーションで問題があっても送信強行はしない方針のため、ここで例外は握りつぶし
+                logger.debug(f"Worker {self.worker_id}: pre-submission validation skipped due to error: {_val_e}")
+
             # 1) まずは Analyzer の input_assignments（自動処理含む）を優先して入力
             input_assignments = analysis_result.get('input_assignments', {})
             form_mapping = analysis_result.get('field_mapping', {})
