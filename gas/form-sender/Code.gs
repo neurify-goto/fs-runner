@@ -806,14 +806,21 @@ function buildSendQueueForAllTargetingsExtra() {
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     for (const t of activeTargetings) {
       const targetingId = t.targeting_id || t.id || t;
+      // フォールバックでも参照できるようスコープを外出し
+      let cfg = null;
+      let targetingSql = '';
+      let ngCompaniesCsv = '';
       try {
-        const cfg = getTargetingConfig(targetingId);
+        cfg = getTargetingConfig(targetingId);
         if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
+        targetingSql = cfg.targeting.targeting_sql || '';
+        ngCompaniesCsv = cfg.targeting.ng_companies || '';
+
         const inserted = createQueueForTargeting(
           targetingId,
           dateJst,
-          cfg.targeting.targeting_sql || '',
-          (cfg.targeting.ng_companies || ''),
+          targetingSql,
+          ngCompaniesCsv,
           10000,
           8,
           { useExtra: true }
@@ -824,7 +831,7 @@ function buildSendQueueForAllTargetingsExtra() {
         const msg = String(e || '');
         const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
         if (isStmtTimeout) {
-          const res = buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, (cfg && cfg.targeting && (cfg.targeting.targeting_sql || '')) || '', (cfg && cfg.targeting && (cfg.targeting.ng_companies || '')) || '');
+          const res = buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targetingSql, ngCompaniesCsv);
           if (res && res.success) {
             processed++; totalInserted += Number(res.inserted_total || 0);
             details.push({ targeting_id: targetingId, success: true, inserted: Number(res.inserted_total || 0), mode: 'chunked' });
