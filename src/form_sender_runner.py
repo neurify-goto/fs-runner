@@ -38,6 +38,17 @@ from config.manager import get_worker_config
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = setup_sanitized_logging(__name__)
 
+# ============ Table / RPC Switching (companies vs companies_extra) ============
+# GitHub Actions から渡される環境変数で切替。既定は従来テーブル。
+COMPANY_TABLE = os.environ.get('COMPANY_TABLE', 'companies').strip() or 'companies'
+SEND_QUEUE_TABLE = os.environ.get('SEND_QUEUE_TABLE', 'send_queue').strip() or 'send_queue'
+USE_EXTRA_TABLE = (COMPANY_TABLE == 'companies_extra') or (SEND_QUEUE_TABLE == 'send_queue_extra')
+
+# RPC名の切替（*_extra が存在しない環境でも、後続のフォールバックがシグネチャ不一致を安全に処理）
+FN_CLAIM = 'claim_next_batch_extra' if USE_EXTRA_TABLE else 'claim_next_batch'
+FN_MARK_DONE = 'mark_done_extra' if USE_EXTRA_TABLE else 'mark_done'
+FN_REQUEUE = 'requeue_stale_assigned_extra' if USE_EXTRA_TABLE else 'requeue_stale_assigned'
+
 
 def _get_name_policy_exclude_keywords() -> List[str]:
     """企業名による除外ワード一覧を設定から取得（フォールバックあり）。
@@ -803,11 +814,11 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                     'p_run_id': run_id,
                 }
                 try:
-                    supabase.rpc('mark_done', _md_args).execute()
+                    supabase.rpc(FN_MARK_DONE, _md_args).execute()
                 except Exception as e_mdnp:
-                    if _should_fallback_on_rpc_error(e_mdnp, 'mark_done', ['p_run_id']):
+                    if _should_fallback_on_rpc_error(e_mdnp, FN_MARK_DONE, ['p_run_id']):
                         _md_args.pop('p_run_id', None)
-                        supabase.rpc('mark_done', _md_args).execute()
+                        supabase.rpc(FN_MARK_DONE, _md_args).execute()
                     else:
                         raise
                 try:
