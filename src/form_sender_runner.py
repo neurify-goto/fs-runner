@@ -255,6 +255,15 @@ def _build_failure_classify_detail(error_type: Optional[str], base_detail: Optio
                     'cooldown_seconds': 0,
                     'confidence': 1.0,
                 })
+            # 新設: NO_MESSAGE_AREA を明示分類（フォーム構造上の欠落）
+            if isinstance(error_type, str) and error_type == 'NO_MESSAGE_AREA':
+                bd.update({
+                    'code': 'NO_MESSAGE_AREA',
+                    'category': 'FORM_STRUCTURE',
+                    'retryable': False,
+                    'cooldown_seconds': 0,
+                    'confidence': 1.0,
+                })
             if evidence:
                 bd['evidence'] = evidence
             return bd
@@ -263,6 +272,16 @@ def _build_failure_classify_detail(error_type: Optional[str], base_detail: Optio
             return {
                 'code': 'PROHIBITION_DETECTED',
                 'category': 'BUSINESS',
+                'retryable': False,
+                'cooldown_seconds': 0,
+                'confidence': 1.0,
+                'evidence': evidence,
+            }
+        # base_detail が無い場合: NO_MESSAGE_AREA の明示分類
+        if isinstance(error_type, str) and error_type == 'NO_MESSAGE_AREA':
+            return {
+                'code': 'NO_MESSAGE_AREA',
+                'category': 'FORM_STRUCTURE',
                 'retryable': False,
                 'cooldown_seconds': 0,
                 'confidence': 1.0,
@@ -581,6 +600,9 @@ def _extract_evidence_from_additional(add_data: Optional[Dict[str, Any]]) -> Dic
             'stage': stage,
             'stage_name': stage_name,
             'judge_confidence': confidence,
+            # 追加: バリデーション/構造系のヒント（機微情報は含めない）
+            'validation_issues': (add_data.get('validation_issues') or [])[:5] if isinstance(add_data.get('validation_issues'), list) else [],
+            'dom_textareas_count': int(add_data.get('detected_dom_textareas_count') or 0) if isinstance(add_data.get('detected_dom_textareas_count'), (int, float)) else 0,
             # 営業禁止件数など（存在時のみ利用側で参照）
             'prohibition_phrases_count': prohibition_phrases_count,
             'prohibition_detection_level': prohibition_detection_level,

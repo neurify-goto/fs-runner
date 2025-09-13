@@ -866,6 +866,56 @@ class IsolatedFormWorker:
             except Exception as _e:
                 logger.debug(f"Worker {self.worker_id}: sales prohibition early-check skipped: {_e}")
 
+            # 送信前バリデーション: 『お問い合わせ本文（message）』がマッピングされていない場合は送信回避
+            try:
+                vr = analysis_result.get('validation_result') if isinstance(analysis_result, dict) else None
+                fm = analysis_result.get('field_mapping', {}) if isinstance(analysis_result, dict) else {}
+                se = analysis_result.get('special_elements') if isinstance(analysis_result, dict) else None
+                # DOMにtextareaが存在するか（粗いヒューリスティクス）
+                dom_textareas_count = 0
+                try:
+                    if isinstance(se, dict) and isinstance(se.get('textareas'), list):
+                        dom_textareas_count = len(se.get('textareas') or [])
+                except Exception:
+                    dom_textareas_count = 0
+                issues = (vr or {}).get('issues', []) if isinstance(vr, dict) else []
+                # AnalysisValidator は contact_form で 'お問い合わせ本文' 欠落を issues に追加する
+                message_missing = any("Required field 'お問い合わせ本文' is missing" in str(i) for i in (issues or []))
+                # contact_form の厳格判定は AnalysisValidator に委譲する
+                if message_missing:
+                    # 分岐: DOMにメッセージ欄が無い（textarea不在）→ NO_MESSAGE_AREA
+                    #      DOMに何らかのtextareaがあるのに未マッピング → MAPPING（アルゴリズム起因の可能性）
+                    detected_type = 'NO_MESSAGE_AREA' if dom_textareas_count == 0 else 'MAPPING'
+                    logger.warning(
+                        f"Worker {self.worker_id}: Message field missing/not mapped; type={detected_type}, skip submission for record_id {record_id}"
+                    )
+                    return {
+                        "error": True,
+                        "record_id": record_id,
+                        "status": "failed",
+                        # ランナーの分類器と整合する代表コードを採用（詳細はadditional_dataに格納）
+                        "error_type": detected_type,
+                        "error_message": (
+                            "No message area (textarea) found in form"
+                            if detected_type == 'NO_MESSAGE_AREA'
+                            else "Required field 'お問い合わせ本文' is missing"
+                        ),
+                        "additional_data": {
+                            "classify_context": {
+                                "stage": "pre_submission_validation",
+                                "primary_error_type": detected_type,
+                                "is_bot_detected": False,
+                            },
+                            # 解析時点の簡易コンテキスト（安全な範囲のみ）
+                            "validation_issues": issues[:10] if isinstance(issues, list) else [],
+                            "field_mapping_keys": list((fm or {}).keys())[:30],
+                            "detected_dom_textareas_count": dom_textareas_count,
+                        },
+                    }
+            except Exception as _val_e:
+                # バリデーションで問題があっても送信強行はしない方針のため、ここで例外は握りつぶし
+                logger.debug(f"Worker {self.worker_id}: pre-submission validation skipped due to error: {_val_e}")
+
             # 1) まずは Analyzer の input_assignments（自動処理含む）を優先して入力
             input_assignments = analysis_result.get('input_assignments', {})
             form_mapping = analysis_result.get('field_mapping', {})
