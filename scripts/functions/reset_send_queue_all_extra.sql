@@ -21,7 +21,8 @@ begin
     begin
       execute 'alter table public.send_queue_extra alter column id restart with 1';
     exception when others then
-      perform setval(pg_get_serial_sequence(''public.send_queue_extra'',''id''), 1, false);
+      -- SERIAL/SEQUENCE カラム向けにシーケンスをリセット
+      perform setval(pg_get_serial_sequence('public.send_queue_extra','id'), 1, false);
     end;
   end;
   return v_deleted;
@@ -29,4 +30,3 @@ end;
 $$;
 
 grant execute on function public.reset_send_queue_all_extra() to authenticated, service_role;
-
