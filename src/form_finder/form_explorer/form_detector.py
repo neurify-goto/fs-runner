@@ -1099,8 +1099,38 @@ class FormDetector:
                     'shadow': 200
                 }.get(source, 300)
                 
-                # 最終優先度スコア
-                priority_score = absolute_y + source_priority + (dom_order * 0.1)
+                # 追加の意味論スコア（問い合わせを優先、資料請求/採用は減点）
+                try:
+                    BONUS_CONTACT = 2000  # 問い合わせ系の強い優先
+                    PENALTY_NON_CONTACT = 1200  # 問い合わせ以外（資料請求/採用等）の減点
+
+                    texts: List[str] = []
+                    texts.append(form.get('surroundingText') or form.get('surrounding_text') or '')
+                    texts.extend([(btn.get('text') or '') for btn in form.get('buttons', [])])
+                    haystack = ' '.join(texts)
+                    norm_haystack = haystack.lower()
+
+                    # 正のキーワード（設定ファイル準拠）
+                    pos_kws = [str(k).lower() for k in getattr(self, 'general_contact_whitelist_keywords', []) if k]
+                    has_contact_kw = any(k in norm_haystack for k in pos_kws)
+
+                    # 負のキーワード（資料請求/見積/採用/エントリー等）
+                    neg_kws = [
+                        '資料請求', '見積', 'お見積', 'ダウンロード', 'catalog', 'カタログ', 'price', '料金',
+                        'エントリー', 'entry', '採用', '求人', 'recruit', 'recruitment', 'career', 'careers', 'job', 'jobs'
+                    ]
+                    has_non_contact_kw = any(k in norm_haystack for k in neg_kws)
+
+                    semantic_adjust = 0
+                    if has_contact_kw:
+                        semantic_adjust -= BONUS_CONTACT
+                    elif has_non_contact_kw:
+                        semantic_adjust += PENALTY_NON_CONTACT
+                except Exception:
+                    semantic_adjust = 0
+
+                # 最終優先度スコア（小さいほど優先）
+                priority_score = absolute_y + source_priority + (dom_order * 0.1) + semantic_adjust
                 
                 forms_with_priority.append((form, priority_score, absolute_y, dom_order, source))
             
