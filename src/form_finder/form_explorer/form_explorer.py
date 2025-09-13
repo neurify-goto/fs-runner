@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from .form_detector import FormDetector
 from .link_scorer import LinkScorer
+from ..utils import is_valid_form_url, get_robust_page_url
 from config.manager import get_form_explorer_config
 
 logger = logging.getLogger(__name__)
