@@ -1,15 +1,14 @@
--- scripts/add_extra_companies.sql
+-- scripts/add_extra_companies_batched.sql
 -- Purpose:
---   Insert records from public.extra_companies into public.companies,
---   avoiding duplicates by matching the hostname (domain incl. subdomain)
---   of company_url. Columns not present in extra_companies are set to NULL.
---   The primary key id is assigned sequentially as (max(id) + row_number).
+--   extra_companies → companies への移送をバッチ実行（既定500件/回）。
+--   company_url の正規化ホストで重複を回避し、extra_companies 内の
+--   同一ホストは1件に絞る（host NULL は全件）。
+--   ID は (MAX(id) + ROW_NUMBER) で採番。
 --
--- Notes:
---   - Hostname comparison distinguishes subdomains (e.g., www.example.com != example.com).
---   - Hostnames are compared in lowercase and after stripping scheme/port.
---   - Rows with NULL/empty company_url in extra_companies are treated as having
---     unknown host and are inserted (no duplicate check possible by host).
+-- Note:
+--   - バッチ件数は末尾の WHERE で new_id を制限して実現。
+--   - スキーマ変更なし。性能改善のため scripts/indexes/companies_host_normalized.sql
+--     の関数インデックス作成を推奨。
 
 WITH base AS (
   SELECT COALESCE(MAX(id), 0) AS max_id
@@ -43,8 +42,6 @@ src AS (
   FROM public.extra_companies ec
 ),
 dedup_src AS (
-  -- extra_companies 内で同一ホストが複数ある場合は 1 件に絞る
-  -- host が NULL の行は重複判定不可のため全て残す
   SELECT *
   FROM (
     SELECT
@@ -65,7 +62,6 @@ dedup_src AS (
   WHERE x.host_rank IS NULL OR x.host_rank = 1
 ),
 to_insert AS (
-  -- companies に同一ホストが存在しない行のみ残す（サブドメインは区別）
   SELECT ds.*
   FROM dedup_src ds
   WHERE NOT EXISTS (
@@ -84,7 +80,7 @@ to_insert AS (
           ) = ds.host
   )
 ),
- numbered AS (
+numbered AS (
   SELECT
     (SELECT max_id FROM base)
       + ROW_NUMBER() OVER (
@@ -176,6 +172,8 @@ SELECT
   NULL::boolean AS fetch_detail_queued,
   NULL::boolean AS duplication,
   NULL::boolean AS black
-FROM numbered;
+FROM numbered
+WHERE new_id <= (SELECT max_id FROM base) + 500;  -- バッチサイズ（必要に応じて変更）
 
 -- End of script.
+
