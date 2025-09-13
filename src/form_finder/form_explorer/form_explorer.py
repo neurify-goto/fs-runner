@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from .form_detector import FormDetector
 from .link_scorer import LinkScorer
+from ..utils import is_valid_form_url, get_robust_page_url
 from config.manager import get_form_explorer_config
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,94 @@ class FormExplorer:
         except Exception as e:
             logger.error(f"FormExplorer初期化エラー: {e}")
             raise
+
+    async def _dismiss_overlays(self, page: Page):
+        """ページ表示時のオーバーレイ/同意バナー/モーダルをできる範囲で閉じる。
+
+        - 代表的なCookie/同意/ポリシー/ニュースレター系を対象
+        - 失敗は無視（安全側）
+        """
+        try:
+            # 既に実施済みならスキップ（ページ単位フラグ）
+            try:
+                already = await page.evaluate("window.__overlayDismissed === true")
+                if already:
+                    return
+            except Exception:
+                pass
+            # 代表的なボタンテキスト/ラベル
+            btn_texts = [
+                '同意', '同意する', '許可', '承諾', 'OK', 'Ok', 'ok', 'はい', '閉じる', '閉じる', '閉', 'Dismiss',
+                'Accept', 'I Agree', 'Agree', 'Allow', 'Continue', 'Got it', 'Close'
+            ]
+            # 代表的なセレクタ（Cookie/Consent/Modal）
+            candidates = [
+                '[id*="cookie" i]', '[class*="cookie" i]', '[id*="consent" i]', '[class*="consent" i]',
+                '[id*="gdpr" i]', '[class*="gdpr" i]', '[id*="policy" i]', '[class*="policy" i]',
+                '[role="dialog"]', '.modal', '.overlay', '.backdrop', '.cookie-consent'
+            ]
+
+            # ボタンテキストでクリック
+            click_timeout = getattr(self.config, 'POPUP_WAIT', 500)
+            for t in btn_texts:
+                try:
+                    loc = page.get_by_role('button', name=t)
+                    if await loc.count() > 0:
+                        await loc.first.click(timeout=click_timeout)
+                except Exception:
+                    pass
+                try:
+                    loc2 = page.get_by_text(t, exact=False)
+                    if await loc2.count() > 0:
+                        await loc2.first.click(timeout=click_timeout)
+                except Exception:
+                    pass
+
+            # 代表セレクタ内の閉じる/同意ボタン
+            for sel in candidates:
+                try:
+                    box = page.locator(sel)
+                    if await box.count() == 0:
+                        continue
+                    # 近傍の閉じる/同意ボタンをクリック
+                    btn = box.locator('button, [role="button"], .close, .btn, .accept, .agree, .ok')
+                    if await btn.count() > 0:
+                        await btn.first.click(timeout=click_timeout)
+                except Exception:
+                    pass
+
+            # Escで閉じれるモーダル対策
+            try:
+                await page.keyboard.press('Escape')
+            except Exception:
+                pass
+            # フラグ設定
+            try:
+                await page.evaluate("window.__overlayDismissed = true")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    async def _open_hamburger_if_present(self, page: Page):
+        """ハンバーガーメニューを開いた上でリンクを再収集しやすくする。"""
+        try:
+            selectors = [
+                '[aria-controls][aria-expanded="false"]',
+                '.hamburger', '.hamburger-button', '.menu-toggle', '.navbar-toggle', '.nav-toggle',
+                '.drawer-toggle', '.sp-menu', '.mobile-menu-button', '.global-nav-toggle'
+            ]
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel)
+                    if await loc.count() > 0:
+                        await loc.first.click(timeout=getattr(self.config, 'POPUP_WAIT', 500))
+                        await page.wait_for_timeout(max(100, int(getattr(self.config, 'POPUP_WAIT', 500) * 0.4)))
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
     
     
     async def explore_site_for_forms(
@@ -204,11 +293,17 @@ class FormExplorer:
             # 動的コンテンツ展開待機
             await page.wait_for_timeout(self.config.POPUP_WAIT)
             
+            # オーバーレイ/同意バナーのクローズ試行
+            await self._dismiss_overlays(page)
+
             # フルスクロール実行（動的コンテンツ読み込み促進）
             await self._perform_full_scroll(page)
             
+            # モバイルナビを開いてリンク露出を促す
+            await self._open_hamburger_if_present(page)
+
             # フォーム検出前の最終確認待機（JavaScript実行環境の安定化）
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(self.config.POPUP_WAIT)
             
             # ページコンテンツを取得
             page_content = await self._get_page_content(page)
@@ -278,7 +373,25 @@ class FormExplorer:
                     return form_url
                 else:
                     logger.debug(f"Company[{record_id}]: STEP2 - 有効なform_URLが取得できませんでした")
-            
+
+            # 追試: 同一ページ内 #contact などのアンカーにクリック/スクロールして再検出
+            try:
+                jumped = await self._try_inpage_contact_jump(page)
+                if jumped:
+                    html2 = await page.content()
+                    forms2 = await self.form_detector.find_and_validate_forms(page, html2)
+                    if forms2 and len(forms2) > 0:
+                        best_form = forms2[0]
+                        form_url2 = best_form.get('form_url', '')
+                        if not is_valid_form_url(form_url2):
+                            robust2 = await get_robust_page_url(page, company_url)
+                            form_url2 = robust2 if is_valid_form_url(robust2) else (company_url if is_valid_form_url(company_url) else None)
+                        if form_url2 and is_valid_form_url(form_url2):
+                            logger.debug(f"Company[{record_id}]: STEP2 - #contact ジャンプ後にフォーム検出: {form_url2[:50]}...")
+                            return form_url2
+            except Exception:
+                pass
+
             logger.debug(f"Company[{record_id}]: STEP2 - トップページフォーム未発見")
             return None
             
@@ -538,12 +651,15 @@ class FormExplorer:
                 # ページ訪問（タイミング最適化）
                 link_page = await context_obj.new_page()
                 await link_page.goto(link_url, wait_until='domcontentloaded', timeout=self.config.PAGE_LOAD_TIMEOUT)
-                
+
                 # 追加の安定化待機（JavaScript実行完了の確保）
                 await link_page.wait_for_load_state('domcontentloaded')
                 await link_page.wait_for_load_state('networkidle')
-                await link_page.wait_for_timeout(1000)
+                await link_page.wait_for_timeout(getattr(self.config, 'NETWORK_IDLE_TIMEOUT', 1000))
                 
+                # オーバーレイ/同意バナーのクローズ試行
+                await self._dismiss_overlays(link_page)
+
                 # フォーム検出前の最終確認待機
                 await link_page.wait_for_timeout(300)
                 
@@ -627,6 +743,49 @@ class FormExplorer:
         
         logger.debug(f"Company[{context.record_id}]: 統合探索完了 - {pages_visited}ページ探索、フォーム未発見")
         return None, pages_visited
+
+    async def _try_inpage_contact_jump(self, page: Page) -> bool:
+        """同一ページ内アンカー（#contact/#inquiry 等）に軽くジャンプ/クリックする。
+
+        Returns: 成功してページ内移動/表示変化が起きたと推定できれば True
+        """
+        try:
+            # キーワードは設定/既存規則から供給（なければ既定値）
+            try:
+                from config.manager import get_form_finder_rules
+                rules = get_form_finder_rules()
+                rec = rules.get('recruitment_only_exclusion', {}) if isinstance(rules, dict) else {}
+                kw = rec.get('allow_if_general_contact_keywords_any', ['お問い合わせ','お問合せ','問い合わせ','contact','inquiry','ご相談','連絡'])
+            except Exception:
+                kw = ['お問い合わせ','お問合せ','問い合わせ','contact','inquiry','toiawase']
+
+            return await page.evaluate("""
+                (KEYS) => {
+                    const keys = (KEYS || []).map(s => String(s || '').toLowerCase());
+                    const isContactText = (s) => keys.some(k => (s||'').toLowerCase().includes(k));
+                    const anchors = Array.from(document.querySelectorAll('a[href^="#"], [role="button"][href^="#"]'));
+                    let tried = 0;
+                    for (const a of anchors) {
+                        const href = (a.getAttribute('href')||'').toLowerCase();
+                        const txt = (a.textContent||'') + ' ' + (a.getAttribute('aria-label')||'') + ' ' + (a.getAttribute('title')||'');
+                        if (!href) continue;
+                        if (!isContactText(txt) && !isContactText(href)) continue;
+                        tried++;
+                        try { a.click(); } catch(e) { /* noop */ }
+                        const id = href.replace('#','');
+                        if (id) {
+                            const target = document.getElementById(id);
+                            if (target) {
+                                target.scrollIntoView({behavior: 'instant', block: 'start'});
+                            }
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+            """, kw)
+        except Exception:
+            return False
 
     def _add_contact_candidates_fallback(
         self,
@@ -791,12 +950,14 @@ class FormExplorer:
             links = await page.evaluate("""
                 () => {
                     const results = [];
-
+                    const seen = new Set();
+                    
                     // 1) 標準アンカー
                     document.querySelectorAll('a[href]').forEach((link, index) => {
                         try {
                             const href = link.href || '';
                             if (!href || !(href.startsWith('http://') || href.startsWith('https://'))) return;
+                            if (seen.has(href)) return;
 
                             const text = (link.textContent || '').trim();
                             const ariaLabel = link.getAttribute('aria-label') || '';
@@ -823,6 +984,7 @@ class FormExplorer:
                                 parentClass: String(parentClass).toLowerCase(),
                                 _dom_index: index
                             });
+                            seen.add(href);
                         } catch (_) {}
                     });
 
@@ -848,6 +1010,7 @@ class FormExplorer:
                             let href = '';
                             try { href = new URL(target, document.baseURI).href; } catch(e) { href = ''; }
                             if (!href || !(href.startsWith('http://') || href.startsWith('https://'))) return;
+                            if (seen.has(href)) return;
 
                             const text = (el.textContent || '').trim();
                             const ariaLabel = el.getAttribute('aria-label') || '';
@@ -873,18 +1036,20 @@ class FormExplorer:
                                 parentClass: String(parentClass).toLowerCase(),
                                 _dom_index: 100000 + idx // 後からでも安定
                             });
+                            seen.add(href);
                         } catch(_) {}
                     });
 
-                    // 3) data-* に URL を持つクリック可能要素（contact系の拾い漏れ救済）
-                    const dataCandidates = Array.from(document.querySelectorAll('[data-href], [data-url], [data-target]'));
+                    // 3) data-* / SPAルータ属性に URL を持つクリック可能要素（contact系の拾い漏れ救済）
+                    const dataCandidates = Array.from(document.querySelectorAll('[data-href], [data-url], [data-target], [data-route], [data-path], [routerlink], [to]'));
                     dataCandidates.forEach((el, idx) => {
                         try {
-                            const cand = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-target') || '';
+                            const cand = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-target') || el.getAttribute('data-route') || el.getAttribute('data-path') || el.getAttribute('routerlink') || el.getAttribute('to') || '';
                             if (!cand) return;
                             let href = '';
                             try { href = new URL(cand, document.baseURI).href; } catch(e) { href = ''; }
                             if (!href || !(href.startsWith('http://') || href.startsWith('https://'))) return;
+                            if (seen.has(href)) return;
 
                             const text = (el.textContent || '').trim();
                             const ariaLabel = el.getAttribute('aria-label') || '';
@@ -910,6 +1075,7 @@ class FormExplorer:
                                 parentClass: String(parentClass).toLowerCase(),
                                 _dom_index: 200000 + idx
                             });
+                            seen.add(href);
                         } catch(_) {}
                     });
 
