@@ -32,10 +32,12 @@ def main():
     # 環境変数から設定取得
     supabase_url = os.getenv('SUPABASE_URL')
     supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+    company_table = os.getenv('COMPANY_TABLE', 'companies')
     
     # 設定確認
     logger.info("=== Supabase Form Finder Writer 設定確認 ===")
     logger.info(f"ステータス: {args.status}")
+    logger.info(f"書き込み先テーブル: {company_table}")
     
     if not supabase_url or not supabase_key:
         logger.error("必要な環境変数が設定されていません")
@@ -51,7 +53,7 @@ def main():
         
         # Supabase書き込み実行
         logger.info("SupabaseFormFinderWriter初期化開始...")
-        writer = SupabaseFormFinderWriter(supabase_url, supabase_key)
+        writer = SupabaseFormFinderWriter(supabase_url, supabase_key, target_table=company_table)
         logger.info("SupabaseFormFinderWriter初期化完了")
         
         # 個別結果の保存

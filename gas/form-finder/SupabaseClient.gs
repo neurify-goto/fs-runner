@@ -34,14 +34,14 @@ function getSupabaseClient() {
  * @param {number} maxRetries 最大リトライ回数
  * @returns {Array} バッチデータ配列
  */
-function getNextPendingBatchWithRetry(taskType, batchSize = 20, limit = null, maxRetries = 3) {
+function getNextPendingBatchWithRetry(taskType, batchSize = 20, limit = null, maxRetries = 3, options = {}) {
   let lastError = null;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`バッチデータ取得試行 ${attempt}/${maxRetries}: taskType=${taskType}, batchSize=${batchSize}`);
+      console.log(`バッチデータ取得試行 ${attempt}/${maxRetries}: taskType=${taskType}, batchSize=${batchSize}, options=${JSON.stringify(options)}`);
       
-      const result = getNextPendingBatch(taskType, batchSize, limit);
+      const result = getNextPendingBatch(taskType, batchSize, limit, options);
       
       if (attempt > 1) {
         console.log(`バッチデータ取得成功 (${attempt}回目で成功): ${result.length}件取得`);
@@ -79,7 +79,7 @@ function getNextPendingBatchWithRetry(taskType, batchSize = 20, limit = null, ma
  * @param {number} limit 最大取得件数制限（オプション）
  * @returns {Array} バッチデータ配列
  */
-function getNextPendingBatch(taskType, batchSize = 20, limit = null) {
+function getNextPendingBatch(taskType, batchSize = 20, limit = null, options = {}) {
   try {
     const supabase = getSupabaseClient();
     
@@ -88,13 +88,17 @@ function getNextPendingBatch(taskType, batchSize = 20, limit = null) {
     let params = {
       limit: limit ? Math.min(batchSize, limit) : batchSize
     };
-    
+    // 使用するテーブル名
+    const companyTable = getCompanyTableFromOptions(taskType, options);
+
     switch (taskType) {
       case 'form_finder':
-        // form_found is null and company_url is not null and form_finder_queued is null
-        // form_finder_queuedフラグで重複防止
-        // company_name除去、ORDER BY除去でパフォーマンス最適化
-        query = `${supabase.url}/rest/v1/companies?select=id,company_url&form_found=is.null&company_url=not.is.null&form_finder_queued=is.null&limit=${params.limit}`;
+        // companiesテーブル（既定）
+        query = `${supabase.url}/rest/v1/${companyTable}?select=id,company_url&form_found=is.null&company_url=not.is.null&form_finder_queued=is.null&limit=${params.limit}`;
+        break;
+      case 'form_finder_extra':
+        // companies_extraテーブル
+        query = `${supabase.url}/rest/v1/${companyTable}?select=id,company_url&form_found=is.null&company_url=not.is.null&form_finder_queued=is.null&limit=${params.limit}`;
         break;
         
       default:
@@ -141,7 +145,7 @@ function getNextPendingBatch(taskType, batchSize = 20, limit = null) {
     // 重複防止：取得したレコードのform_finder_queuedをtrueに更新
     if (batchData.length > 0) {
       const recordIds = batchData.map(item => item.record_id);
-      const updateResult = updateFormFinderQueued(recordIds, true);
+      const updateResult = updateFormFinderQueued(recordIds, true, companyTable);
       
       if (updateResult.success) {
         console.log(`重複防止処理完了: ${updateResult.updated_count}件をqueued状態に更新`);
@@ -166,7 +170,7 @@ function getNextPendingBatch(taskType, batchSize = 20, limit = null) {
  * @param {boolean|null} status 設定するステータス（true: キュー済み, null: 未処理）
  * @returns {Object} 更新結果
  */
-function updateFormFinderQueued(recordIds, status = true) {
+function updateFormFinderQueued(recordIds, status = true, companyTable = CONFIG.COMPANY_TABLES.PRIMARY) {
   try {
     if (!Array.isArray(recordIds) || recordIds.length === 0) {
       console.log('更新対象のレコードIDがありません');
@@ -185,7 +189,7 @@ function updateFormFinderQueued(recordIds, status = true) {
     }
     
     // IN句を使用した効率的な一括更新
-    const updateQuery = `${supabase.url}/rest/v1/companies?id=in.(${idList.join(',')})`;
+    const updateQuery = `${supabase.url}/rest/v1/${companyTable}?id=in.(${idList.join(',')})`;
     const updateData = { form_finder_queued: status };
     
     console.log(`更新クエリ実行: ${updateQuery}`);
@@ -202,12 +206,13 @@ function updateFormFinderQueued(recordIds, status = true) {
     const responseText = response.getContentText();
     
     if (responseCode === 204) {
-      console.log(`form_finder_queuedステータス更新成功: ${idList.length}件`);
+      console.log(`form_finder_queuedステータス更新成功: ${idList.length}件 (table=${companyTable})`);
       return { 
         success: true, 
         message: 'ステータス更新完了', 
         updated_count: idList.length,
-        status: status
+        status: status,
+        table: companyTable
       };
     } else {
       console.error(`form_finder_queuedステータス更新失敗: ${responseCode} - ${responseText}`);
@@ -234,9 +239,14 @@ function updateFormFinderQueued(recordIds, status = true) {
  * @param {string} taskType タスクタイプ
  * @returns {Object} 統計情報
  */
-function getProcessingStats(taskType = 'form_finder') {
+function getProcessingStats(taskType = 'form_finder', options = {}) {
   try {
     const supabase = getSupabaseClient();
+    const companyTable = getCompanyTableFromOptions(taskType, options);
+    if (companyTable !== CONFIG.COMPANY_TABLES.PRIMARY) {
+      // extraテーブルはRPCがcompanies固定なためフォールバック使用
+      return getProcessingStatsFallback(companyTable);
+    }
     
     // RPC関数で効率的な統計取得
     const rpcQuery = `${supabase.url}/rest/v1/rpc/get_form_finder_stats`;
@@ -284,7 +294,7 @@ function getProcessingStats(taskType = 'form_finder') {
     
   } catch (error) {
     console.error('RPC統計取得エラー、フォールバック処理実行:', error);
-    return getProcessingStatsFallback();
+    return getProcessingStatsFallback(getCompanyTableFromOptions(taskType, options));
   }
 }
 
@@ -293,14 +303,14 @@ function getProcessingStats(taskType = 'form_finder') {
  * RPC関数が利用できない場合の代替処理
  * @returns {Object} 統計情報
  */
-function getProcessingStatsFallback() {
+function getProcessingStatsFallback(companyTable = CONFIG.COMPANY_TABLES.PRIMARY) {
   try {
     const supabase = getSupabaseClient();
     
     console.log('フォールバック統計処理開始');
     
     // 簡略化された統計取得（企業URL存在企業のみ対象）
-    const baseQuery = `${supabase.url}/rest/v1/companies?select=id,form_found&company_url=not.is.null&limit=10000`;
+    const baseQuery = `${supabase.url}/rest/v1/${companyTable}?select=id,form_found&company_url=not.is.null&limit=10000`;
     
     const response = UrlFetchApp.fetch(baseQuery, {
       method: 'GET',
@@ -355,7 +365,8 @@ function getProcessingStatsFallback() {
       not_queued: 0,
       progress_rate: 0,
       queued_rate: 0,
-      error: error.toString()
+      error: error.toString(),
+      table: companyTable
     };
   }
 }
@@ -413,7 +424,7 @@ function testSupabaseConnection() {
  * @param {string} confirmationToken 確認トークン
  * @returns {Object} リセット結果
  */
-function resetFormFinderStatus(confirmationToken) {
+function resetFormFinderStatus(confirmationToken, companyTable = CONFIG.COMPANY_TABLES.PRIMARY) {
   if (confirmationToken !== 'RESET_FORM_FINDER_STATUS') {
     throw new Error('不正な確認トークンです');
   }
@@ -424,7 +435,7 @@ function resetFormFinderStatus(confirmationToken) {
     const supabase = getSupabaseClient();
     
     // 全レコードのform_finder_queued、form_found、form_urlをクリア
-    const resetQuery = `${supabase.url}/rest/v1/companies`;
+    const resetQuery = `${supabase.url}/rest/v1/${companyTable}`;
     const resetData = {
       form_finder_queued: null,
       form_found: null,
@@ -441,7 +452,7 @@ function resetFormFinderStatus(confirmationToken) {
     const responseCode = response.getResponseCode();
     
     if (responseCode === 204) {
-      console.log('Form Finder処理状況リセット完了');
+      console.log(`Form Finder処理状況リセット完了 (table=${companyTable})`);
       return { success: true, message: 'リセット完了' };
     } else {
       const errorText = response.getContentText();
@@ -459,14 +470,14 @@ function resetFormFinderStatus(confirmationToken) {
  * デバッグ用：実際のSupabaseデータ確認（Form Finder用）
  * @returns {Array} サンプルデータ配列
  */
-function debugSupabaseData() {
+function debugSupabaseData(companyTable = CONFIG.COMPANY_TABLES.PRIMARY) {
   try {
     console.log('=== Supabase Form Finderデータ確認デバッグ ===');
     
     const supabase = getSupabaseClient();
     
     // 基本的なデータ取得テスト
-    const query = `${supabase.url}/rest/v1/companies?select=id,company_name,company_url,form_finder_queued,form_found,form_url&limit=10`;
+    const query = `${supabase.url}/rest/v1/${companyTable}?select=id,company_name,company_url,form_finder_queued,form_found,form_url&limit=10`;
     console.log(`デバッグクエリ実行: ${query}`);
     
     const response = UrlFetchApp.fetch(query, {
@@ -563,7 +574,7 @@ function debugSupabaseData() {
  * @param {string} confirmationToken 確認トークン
  * @returns {Object} リセット結果
  */
-function resetFormFinderQueuedStatus(confirmationToken) {
+function resetFormFinderQueuedStatus(confirmationToken, companyTable = CONFIG.COMPANY_TABLES.PRIMARY) {
   if (confirmationToken !== 'RESET_FORM_FINDER_QUEUED_ONLY') {
     throw new Error('不正な確認トークンです');
   }
@@ -574,7 +585,7 @@ function resetFormFinderQueuedStatus(confirmationToken) {
     const supabase = getSupabaseClient();
     
     // 全レコードのform_finder_queuedのみをクリア
-    const resetQuery = `${supabase.url}/rest/v1/companies`;
+    const resetQuery = `${supabase.url}/rest/v1/${companyTable}`;
     const resetData = {
       form_finder_queued: null
     };
@@ -589,7 +600,7 @@ function resetFormFinderQueuedStatus(confirmationToken) {
     const responseCode = response.getResponseCode();
     
     if (responseCode === 204) {
-      console.log('form_finder_queuedステータスのみリセット完了');
+      console.log(`form_finder_queuedステータスのみリセット完了 (table=${companyTable})`);
       return { success: true, message: 'form_finder_queuedリセット完了' };
     } else {
       const errorText = response.getContentText();

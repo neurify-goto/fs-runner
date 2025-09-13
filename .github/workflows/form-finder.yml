@@ -103,6 +103,7 @@ jobs:
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        COMPANY_TABLE: ${{ github.event.client_payload.company_table || 'companies' }}
       run: |
         if [ -f "artifacts/form_finder_results.json" ]; then
           # ワーカーの実際の実行結果に基づいてステータスを判定
