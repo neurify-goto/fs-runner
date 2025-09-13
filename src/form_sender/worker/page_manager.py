@@ -9,6 +9,9 @@ import logging
 import time
 from typing import Dict, Any, Optional, List
 from playwright.async_api import Page, Browser, TimeoutError as PlaywrightTimeoutError
+from playwright_stealth import Stealth
+from ..utils.cookie_blocker import install_init_script, install_cookie_routes, try_reject_banners
+from config.manager import get_worker_config
 
 from ..security.logger import SecurityLogger
 from ..utils.secure_logger import get_secure_logger
@@ -34,15 +37,83 @@ class PageManager:
             raise RuntimeError("ブラウザが初期化されていません")
 
         try:
+            # 設定の読込（存在しない場合は既定値でフェイルセーフ）
+            try:
+                worker_cfg = get_worker_config()
+            except Exception:
+                worker_cfg = {}
+            browser_cfg = (worker_cfg.get("browser") or {}) if isinstance(worker_cfg, dict) else {}
+            rb_cfg = (browser_cfg.get("resource_blocking") or {}) if isinstance(browser_cfg, dict) else {}
+            stealth_cfg = (browser_cfg.get("stealth") or {}) if isinstance(browser_cfg, dict) else {}
+            cookie_cfg = (browser_cfg.get("cookie_control") or {}) if isinstance(browser_cfg, dict) else {}
+
+            # フラグ（デフォルトはON）
+            stealth_enabled = bool(stealth_cfg.get("enabled", True))
+            # 既定は安全側（OFF）。設定で明示有効化時のみON。
+            cookie_blackhole = bool(cookie_cfg.get("override_document_cookie", False))
+            cookie_block_cmp = bool(cookie_cfg.get("block_cmp_scripts", True))
+            # 既定は安全側（OFF）。設定で明示有効化時のみON。
+            cookie_strip_set = bool(cookie_cfg.get("strip_set_cookie", False))
+            ui_reject_enabled = bool(cookie_cfg.get("ui_reject_banners", True))
+
+            # RB 既定（PageManagerは保守的：ここではOFF既定、RBはBrowserManager側が本筋）
+            rb_images = bool(rb_cfg.get("block_images", False))
+            rb_fonts = bool(rb_cfg.get("block_fonts", False))
+            rb_styles = bool(rb_cfg.get("block_stylesheets", False))
+
             # 新しいコンテキストとページを作成
             context = await self.browser.new_context(
                 viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
                 locale="ja-JP",
                 timezone_id="Asia/Tokyo",
+                extra_http_headers={
+                    "Accept-Language": "ja, en-US;q=0.8, en;q=0.7",
+                },
             )
-
+            # cookie ブラックホール（設定尊重）
+            try:
+                await install_init_script(context, cookie_blackhole)
+            except Exception:
+                pass
+            # playwright-stealth を適用（設定尊重）: 言語をBrowserManagerと同一に上書き
+            try:
+                if stealth_enabled:
+                    langs = None
+                    try:
+                        # worker_config.browser.stealth.languages を尊重（無ければ ja-JP/ja）
+                        langs = (worker_cfg.get("browser", {}).get("stealth", {}).get("languages") if isinstance(worker_cfg, dict) else None)
+                    except Exception:
+                        langs = None
+                    if not isinstance(langs, (list, tuple)) or not langs:
+                        langs = ["ja-JP", "ja"]
+                    await Stealth(navigator_languages_override=tuple(langs)).apply_stealth_async(context)
+            except Exception:
+                pass
             self.page = await context.new_page()
+            try:
+                await self.page.set_extra_http_headers({
+                    "Accept-Language": "ja, en-US;q=0.8, en;q=0.7",
+                })
+            except Exception:
+                pass
+            # ネットワーク層（設定尊重: CMP/Set-Cookie）
+            try:
+                await install_cookie_routes(
+                    self.page,
+                    block_cmp_scripts=cookie_block_cmp,
+                    strip_set_cookie=cookie_strip_set,
+                    resource_block_rules={"images": rb_images, "fonts": rb_fonts, "stylesheets": rb_styles},
+                    strip_set_cookie_third_party_only=bool(cookie_cfg.get("strip_set_cookie_third_party_only", True)),
+                    strip_set_cookie_domains=list(cookie_cfg.get("strip_set_cookie_domains", []) or []),
+                    strip_set_cookie_exclude_domains=list(cookie_cfg.get("strip_set_cookie_exclude_domains", []) or []),
+                )
+            except Exception:
+                pass
             
             # タイムアウト設定
             self.page.set_default_timeout(30000)
@@ -86,6 +157,19 @@ class PageManager:
 
             # ページロード完了待機
             await self.wait_for_page_load()
+
+            # コンフィグに基づき、ナビゲーション後にクッキーバナーを拒否（UI層）
+            try:
+                from config.manager import get_worker_config
+                worker_cfg = get_worker_config()
+                cookie_cfg = (worker_cfg.get("browser", {}).get("cookie_control", {}) if isinstance(worker_cfg, dict) else {})
+                ui_reject_enabled = bool(cookie_cfg.get("ui_reject_banners", True))
+            except Exception:
+                ui_reject_enabled = True
+            try:
+                await try_reject_banners(self.page, enabled=ui_reject_enabled, timeout_ms=2000)
+            except Exception:
+                pass
 
             logger.info("ページアクセス成功")
             return {"success": True}
