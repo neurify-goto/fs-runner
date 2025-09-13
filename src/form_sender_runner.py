@@ -722,13 +722,27 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 try:
                     resp = supabase.rpc(FN_CLAIM, cap_params).execute()
                 except Exception as e_cap:
-                    # フォールバックはシグネチャ不一致/未デプロイに限定
+                    # 1st: 引数不一致（p_max_daily 未対応）へのフォールバック
                     if _should_fallback_on_rpc_error(e_cap, FN_CLAIM, ['p_max_daily']):
-                        resp = supabase.rpc(FN_CLAIM, params).execute()
+                        try:
+                            resp = supabase.rpc(FN_CLAIM, params).execute()
+                        except Exception as e_cap2:
+                            # 2nd: 関数未存在など → extra指定時は非対応（安全側: companies に触れない）
+                            if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e_cap2, FN_CLAIM, []):
+                                resp = supabase.rpc('claim_next_batch', params).execute()
+                            else:
+                                raise
                     else:
+                        # その他エラーはそのまま伝播
                         raise
             else:
-                resp = supabase.rpc(FN_CLAIM, params).execute()
+                try:
+                    resp = supabase.rpc(FN_CLAIM, params).execute()
+                except Exception as e_nc:
+                    if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e_nc, FN_CLAIM, []):
+                        resp = supabase.rpc('claim_next_batch', params).execute()
+                    else:
+                        raise
             rows = resp.data or []
         except Exception as e:
             logger.error(f"claim_next_batch RPC error: {e}")
@@ -818,7 +832,13 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 except Exception as e_mdnp:
                     if _should_fallback_on_rpc_error(e_mdnp, FN_MARK_DONE, ['p_run_id']):
                         _md_args.pop('p_run_id', None)
-                        supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                        try:
+                            supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                        except Exception as e_mdnp2:
+                            if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e_mdnp2, FN_MARK_DONE, []):
+                                supabase.rpc('mark_done', _md_args).execute()
+                            else:
+                                raise
                     else:
                         raise
                 try:
@@ -873,7 +893,13 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 except Exception as e_mdsk:
                     if _should_fallback_on_rpc_error(e_mdsk, FN_MARK_DONE, ['p_run_id']):
                         _md_args.pop('p_run_id', None)
-                        supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                        try:
+                            supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                        except Exception as e_mdsk2:
+                            if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e_mdsk2, FN_MARK_DONE, []):
+                                supabase.rpc('mark_done', _md_args).execute()
+                            else:
+                                raise
                     else:
                         raise
                 try:
@@ -948,7 +974,13 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             # フォールバックはシグネチャ不一致のみ（安全弁）。それ以外は中断。
             if _should_fallback_on_rpc_error(e_md, FN_MARK_DONE, ['p_run_id']):
                 _md_args.pop('p_run_id', None)
-                supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                try:
+                    supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                except Exception as e_md_f:
+                    if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e_md_f, FN_MARK_DONE, []):
+                        supabase.rpc('mark_done', _md_args).execute()
+                    else:
+                        raise
             else:
                 raise
         # 失敗完了ログ
@@ -988,7 +1020,13 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         except Exception as e_md2:
             if _should_fallback_on_rpc_error(e_md2, FN_MARK_DONE, ['p_run_id']):
                 _md_args.pop('p_run_id', None)
-                supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                try:
+                    supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                except Exception as e_md2_f:
+                    if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e_md2_f, FN_MARK_DONE, []):
+                        supabase.rpc('mark_done', _md_args).execute()
+                    else:
+                        raise
             else:
                 raise
         # 失敗完了ログ
@@ -1125,7 +1163,13 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         except Exception as e_md3:
             if _should_fallback_on_rpc_error(e_md3, FN_MARK_DONE, ['p_run_id']):
                 _md_args.pop('p_run_id', None)
-                supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                try:
+                    supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                except Exception as e_md3_f:
+                    if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e_md3_f, FN_MARK_DONE, []):
+                        supabase.rpc('mark_done', _md_args).execute()
+                    else:
+                        raise
             else:
                 raise
         # 成功時は当日成功数キャッシュを無効化（最新値を反映させる）
@@ -1224,7 +1268,18 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                             except Exception:
                                 pass
                         except Exception as e:
-                            logger.warning(f"requeue_stale_assigned error (suppressed): {e}")
+                            # 関数未存在等 → extra 指定時はフォールバック禁止（send_queue を触らない）
+                            if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e, FN_REQUEUE, []):
+                                try:
+                                    resp = supabase.rpc('requeue_stale_assigned', {
+                                        'p_target_date': str(target_date),
+                                        'p_targeting_id': targeting_id,
+                                        'p_stale_minutes': requeue_stale_minutes,
+                                    }).execute()
+                                except Exception as e2:
+                                    logger.warning(f"requeue_stale_assigned fallback error (suppressed): {e2}")
+                            else:
+                                logger.warning(f"requeue_stale_assigned error (suppressed): {e}")
                         finally:
                             last_requeue_ts = now_ts
                 except Exception:
