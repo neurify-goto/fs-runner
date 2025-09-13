@@ -12,6 +12,11 @@ const CONFIG = {
   MIN_BATCH_SIZE: 10, // フォールバック時の最小バッチサイズ
   GITHUB_API_BASE: 'https://api.github.com',
   DEFAULT_TASK_TYPE: 'form_finder',
+  // 企業テーブル設定（デフォルトはcompanies）
+  COMPANY_TABLES: {
+    PRIMARY: 'companies',
+    EXTRA: 'companies_extra'
+  },
   
   
   // 並列実行制限設定
@@ -82,16 +87,44 @@ function startProcessingFromTrigger() {
 }
 
 /**
+ * ★時間ベースのトリガー（companies_extra 用）
+ * 並列実行数の上限を確認したうえで、companies_extra を対象に処理を開始
+ */
+function startProcessingFromTriggerExtra() {
+  console.log('時間ベースのトリガーにより処理を開始します（extra）');
+  try {
+    const workflowCheckResult = checkRunningFormFinderWorkflows();
+    if (!workflowCheckResult.success) {
+      console.error('並列実行数チェック失敗:', workflowCheckResult.error);
+      return { success: false, skipped: true, reason: '並列実行数チェック失敗', error: workflowCheckResult.error };
+    }
+    const runningCount = workflowCheckResult.runningCount;
+    console.log(`現在の並列実行数: ${runningCount}個 (上限: ${CONFIG.MAX_CONCURRENT_WORKFLOWS}個)`);
+    if (runningCount >= CONFIG.MAX_CONCURRENT_WORKFLOWS) {
+      console.log(`並列実行数が上限 (${CONFIG.MAX_CONCURRENT_WORKFLOWS}個) に達しているため、処理をスキップします`);
+      return { success: true, skipped: true, reason: '並列実行数上限到達', runningCount };
+    }
+    console.log(`並列実行数が上限未満のため、extraテーブル処理を実行します (${runningCount}/${CONFIG.MAX_CONCURRENT_WORKFLOWS})`);
+    const result = startProcessing('form_finder_extra', null, { companyTable: CONFIG.COMPANY_TABLES.EXTRA });
+    console.log('メイン処理完了(extra):', result);
+    return result;
+  } catch (error) {
+    console.error('startProcessingFromTriggerExtra エラー:', error);
+    return { success: false, error: error.toString() };
+  }
+}
+
+/**
  * 初回実行エントリーポイント
  * @param {string} taskType タスクタイプ（'form_finder' など）
  * @param {number} limit 処理件数制限（オプション）
  */
-function startProcessing(taskType = CONFIG.DEFAULT_TASK_TYPE, limit = null) {
+function startProcessing(taskType = CONFIG.DEFAULT_TASK_TYPE, limit = null, options = {}) {
   try {
-    console.log(`処理開始: taskType=${taskType}, limit=${limit}`);
+    console.log(`処理開始: taskType=${taskType}, limit=${limit}, options=${JSON.stringify(options)}`);
     
     // 最初のバッチデータを取得（リトライ機構付き）
-    const batchData = getNextPendingBatchWithRetry(taskType, CONFIG.BATCH_SIZE, limit, CONFIG.MAX_RETRIES);
+    const batchData = getNextPendingBatchWithRetry(taskType, CONFIG.BATCH_SIZE, limit, CONFIG.MAX_RETRIES, options);
     
     if (!batchData || batchData.length === 0) {
       console.log('処理対象のデータが見つかりません');
@@ -99,7 +132,7 @@ function startProcessing(taskType = CONFIG.DEFAULT_TASK_TYPE, limit = null) {
     }
     
     // GitHub Actions ワークフローを開始
-    const result = triggerWorkflow(batchData, taskType);
+    const result = triggerWorkflow(batchData, taskType, options);
     
     if (result.success) {
       console.log(`初回ワークフロー開始成功: batch_id=${result.batch_id}, 件数=${batchData.length}`);
@@ -125,13 +158,16 @@ function startProcessing(taskType = CONFIG.DEFAULT_TASK_TYPE, limit = null) {
  * @param {Array} batchData バッチデータ
  * @param {string} taskType タスクタイプ
  */
-function triggerWorkflow(batchData, taskType) {
+function triggerWorkflow(batchData, taskType, options = {}) {
   try {
     // バッチID生成
     const batch_id = generateBatchId(taskType);
     
     // Repository Dispatch イベント送信（リトライ機構付き）
-    const dispatchResult = sendRepositoryDispatchWithRetry(taskType, batch_id, batchData, CONFIG.MAX_RETRIES);
+    // 使用テーブル名を決定
+    const companyTable = getCompanyTableFromOptions(taskType, options);
+    // Repository Dispatch（使用テーブル情報を付与）
+    const dispatchResult = sendRepositoryDispatchWithRetry(taskType, batch_id, batchData, CONFIG.MAX_RETRIES, { companyTable });
     
     if (dispatchResult.success) {
       return { success: true, batch_id: batch_id };
@@ -157,6 +193,28 @@ function generateBatchId(taskType) {
 }
 
 /**
+ * オプションから使用する企業テーブル名を決定
+ * @param {string} taskType
+ * @param {Object} options
+ * @returns {string} companyTable
+ */
+function getCompanyTableFromOptions(taskType, options = {}) {
+  try {
+    if (options && typeof options.companyTable === 'string' && options.companyTable.trim()) {
+      return options.companyTable.trim();
+    }
+    // taskTypeに'_extra'が含まれる場合はextraを使用
+    if (String(taskType).toLowerCase().indexOf('extra') >= 0) {
+      return CONFIG.COMPANY_TABLES.EXTRA;
+    }
+    return CONFIG.COMPANY_TABLES.PRIMARY;
+  } catch (e) {
+    console.warn('テーブル決定ロジックでエラー。デフォルトcompaniesを使用します:', e);
+    return CONFIG.COMPANY_TABLES.PRIMARY;
+  }
+}
+
+/**
  * batch_idからタスクタイプを抽出
  * @param {string} batchId バッチID
  */
@@ -176,6 +234,15 @@ function extractTaskTypeFromBatchId(batchId) {
 function manualTriggerTest() {
   const result = startProcessing('form_finder', 2);
   console.log('手動トリガー結果:', result);
+  return result;
+}
+
+/**
+ * 手動バッチトリガー（companies_extraを使用）
+ */
+function manualTriggerTestExtra() {
+  const result = startProcessing('form_finder_extra', 2, { companyTable: CONFIG.COMPANY_TABLES.EXTRA });
+  console.log('手動トリガー（extra）結果:', result);
   return result;
 }
 
@@ -360,4 +427,3 @@ function testTriggerFlowWithoutRecursive() {
     return { success: false, error: error.toString() };
   }
 }
-

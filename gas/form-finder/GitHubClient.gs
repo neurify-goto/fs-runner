@@ -16,7 +16,7 @@ const GITHUB_CONFIG = {
  * @param {Array} batchData バッチデータ
  * @returns {Object} 送信結果
  */
-function sendRepositoryDispatch(taskType, batchId, batchData) {
+function sendRepositoryDispatch(taskType, batchId, batchData, options = {}) {
   try {
     const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
     if (!githubToken) {
@@ -27,12 +27,15 @@ function sendRepositoryDispatch(taskType, batchId, batchData) {
     const eventType = getEventTypeFromTaskType(taskType);
     
     // ペイロード構築
+    const companyTable = (options && options.companyTable) ? options.companyTable : CONFIG.COMPANY_TABLES.PRIMARY;
     const payload = {
       event_type: eventType,
       client_payload: {
         batch_id: batchId,
         task_type: taskType,
         batch_data: batchData,
+        company_table: companyTable,
+        use_extra_table: companyTable === CONFIG.COMPANY_TABLES.EXTRA,
         triggered_at: new Date().toISOString(),
         gas_version: '1.0.0'
       }
@@ -271,13 +274,13 @@ function testGitHubConnection() {
  * @param {number} maxRetries 最大リトライ回数
  * @returns {Object} 送信結果
  */
-function sendRepositoryDispatchWithRetry(taskType, batchId, batchData, maxRetries = CONFIG.MAX_RETRIES) {
+function sendRepositoryDispatchWithRetry(taskType, batchId, batchData, maxRetries = CONFIG.MAX_RETRIES, options = {}) {
   let lastError = null;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     console.log(`Repository Dispatch送信試行 ${attempt}/${maxRetries}: batch_id=${batchId}`);
     
-    const result = sendRepositoryDispatch(taskType, batchId, batchData);
+    const result = sendRepositoryDispatch(taskType, batchId, batchData, options);
     
     if (result.success) {
       if (attempt > 1) {

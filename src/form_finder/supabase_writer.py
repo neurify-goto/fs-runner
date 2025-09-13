@@ -6,7 +6,7 @@ Form Finder処理結果をSupabaseに書き込むためのユーティリティ
 import json
 import logging
 import os
-from datetime import datetime
+# datetime 未使用：不要インポートを削除
 from typing import Dict, List, Any
 
 from supabase import create_client, Client
@@ -28,7 +28,7 @@ class SupabaseFormFinderWriter:
         return sanitized
 
     
-    def __init__(self, supabase_url: str, supabase_key: str):
+    def __init__(self, supabase_url: str, supabase_key: str, target_table: str = 'companies'):
         """
         Supabaseクライアント初期化
         
@@ -40,6 +40,10 @@ class SupabaseFormFinderWriter:
             # シンプルな初期化（余計なオプションを避ける）
             logger.info("Supabase初期化開始")
             self.supabase: Client = create_client(supabase_url, supabase_key)
+            self.target_table: str = (target_table or 'companies').strip()
+            if self.target_table not in ('companies', 'companies_extra'):
+                logger.warning(f"Unknown target_table '{self.target_table}', fallback to 'companies'")
+                self.target_table = 'companies'
             logger.info("Supabaseクライアント初期化完了")
         except Exception as e:
             # セキュリティ: エラーメッセージから機密情報を除去
@@ -126,6 +130,10 @@ class SupabaseFormFinderWriter:
     def _batch_update_success_results(self, successful_results: List[Dict[str, Any]]) -> int:
         """成功結果の効率的なバッチ更新（整合性強化版）"""
         try:
+            # companies以外（例: companies_extra）はRPC未対応のためフォールバックを使用
+            if self.target_table != 'companies':
+                logger.info(f"RPC未対応テーブルのためフォールバック更新を使用 (table={self.target_table})")
+                return self._fallback_update_success_results(successful_results)
             # レコードIDリストを構築（整数のみを許可）
             record_ids = []
             form_url_mapping = {}
@@ -196,6 +204,9 @@ class SupabaseFormFinderWriter:
     def _batch_update_failure_results(self, failed_results: List[Dict[str, Any]]) -> int:
         """失敗結果の効率的なバッチ更新"""
         try:
+            if self.target_table != 'companies':
+                logger.info(f"RPC未対応テーブルのためフォールバック更新を使用 (table={self.target_table})")
+                return self._fallback_update_failure_results(failed_results)
             # レコードIDリスト作成（整数のみを許可）
             record_ids = []
             
@@ -247,7 +258,7 @@ class SupabaseFormFinderWriter:
                     'form_url': primary_form_url
                 })
             
-            response = self.supabase.table('companies').upsert(
+            response = self.supabase.table(self.target_table).upsert(
                 batch_updates,
                 on_conflict='id'
             ).execute()
@@ -270,7 +281,7 @@ class SupabaseFormFinderWriter:
                     'form_url': None
                 })
             
-            response = self.supabase.table('companies').upsert(
+            response = self.supabase.table(self.target_table).upsert(
                 batch_updates,
                 on_conflict='id'
             ).execute()
