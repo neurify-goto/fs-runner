@@ -20,6 +20,9 @@ import signal
 import sys
 from datetime import datetime
 
+# サニタイズ付きロギングを有効化（CIでの機微情報露出防止）
+from form_sender.security.log_sanitizer import setup_sanitized_logging
+
 # マルチプロセス対応コンポーネントをインポート
 from form_finder.orchestrator.manager import ConfigurableFormFinderOrchestrator
 
@@ -28,6 +31,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# 既存ハンドラにサニタイザーをかける
+setup_sanitized_logging()
 
 # HTTPXのHTTPリクエストログを無効化（URL情報削除のため）
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -113,15 +118,18 @@ def save_error_results(batch_id: str, error_message: str):
 
 async def main():
     """メイン処理（マルチプロセス・アーキテクチャ版）"""
-    # 一時的にデバッグログを有効化してデータフローを完全追跡
-    logging.getLogger('form_finder.orchestrator.manager').setLevel(logging.DEBUG)
-    logging.getLogger('form_finder.worker.isolated_worker').setLevel(logging.DEBUG)
-    logging.getLogger().setLevel(logging.DEBUG)  # ルートロガーもデバッグレベルに
-    
+    # ログレベルの方針: 既定はINFO。ローカルでのみ明示的にデバッグを許可
+    is_ci = os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
+    debug_enabled = (os.getenv('FORM_FINDER_DEBUG', '').lower() == 'true') and not is_ci
+    if debug_enabled:
+        logging.getLogger('form_finder.orchestrator.manager').setLevel(logging.DEBUG)
+        logging.getLogger('form_finder.worker.isolated_worker').setLevel(logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.info("DEBUG LOGGING ENABLED (local only)")
+
     logger.info(f"=== Form Finder Multi-Process Processing Started ===")
     logger.info(f"Processing Mode: Multi-Process with Worker Pool")
-    logger.info(f"Environment: {'GitHub Actions' if os.getenv('GITHUB_ACTIONS') == 'true' else 'Local'}")
-    logger.info("DEBUG LOGGING ENABLED FOR DATA FLOW ANALYSIS")
+    logger.info(f"Environment: {'GitHub Actions' if is_ci else 'Local'}")
     
     # マルチプロセス環境設定（既存設定を確認してから適用）
     if mp.get_start_method(allow_none=True) is None:

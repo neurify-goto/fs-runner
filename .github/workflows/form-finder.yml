@@ -51,6 +51,8 @@ jobs:
         TZ: Asia/Tokyo
         # マルチプロセス環境設定
         GITHUB_ACTIONS: true
+        # ログ方針: 既定はINFO。必要時のみ手動で上書きする
+        FORM_FINDER_DEBUG: "false"
         # プロセス管理最適化
         PYTHONFAULTHANDLER: 1
         PYTHONUNBUFFERED: 1
