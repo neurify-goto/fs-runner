@@ -94,11 +94,11 @@ function getNextPendingBatch(taskType, batchSize = 20, limit = null, options = {
     switch (taskType) {
       case 'form_finder':
         // companiesテーブル（既定）
-        query = `${supabase.url}/rest/v1/${companyTable}?select=id,company_url&form_found=is.null&company_url=not.is.null&form_finder_queued=is.null&limit=${params.limit}`;
+        query = `${supabase.url}/rest/v1/${companyTable}?select=id,company_url&form_found=is.null&company_url=not.is.null&form_finder_queued=is.null&order=id.asc&limit=${params.limit}`;
         break;
       case 'form_finder_extra':
         // companies_extraテーブル
-        query = `${supabase.url}/rest/v1/${companyTable}?select=id,company_url&form_found=is.null&company_url=not.is.null&form_finder_queued=is.null&limit=${params.limit}`;
+        query = `${supabase.url}/rest/v1/${companyTable}?select=id,company_url&form_found=is.null&company_url=not.is.null&form_finder_queued=is.null&order=id.asc&limit=${params.limit}`;
         break;
         
       default:
@@ -107,15 +107,14 @@ function getNextPendingBatch(taskType, batchSize = 20, limit = null, options = {
     
     console.log(`Supabaseクエリ実行: ${query}`);
     
-    // HTTPリクエスト実行（タイムアウト設定付き）
+    // HTTPリクエスト実行
     const response = UrlFetchApp.fetch(query, {
       method: 'GET',
       headers: {
         ...supabase.headers,
         'Prefer': 'count=none'  // カウント処理をスキップして負荷軽減
       },
-      muteHttpExceptions: true,
-      timeout: 25000  // 25秒でタイムアウト（デフォルトより短縮）
+      muteHttpExceptions: true
     });
     
     const responseCode = response.getResponseCode();
@@ -182,7 +181,9 @@ function updateFormFinderQueued(recordIds, status = true, companyTable = CONFIG.
     const supabase = getSupabaseClient();
     
     // レコードIDリストを文字列に変換（IN句用）
-    const idList = recordIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+    const idList = recordIds
+      .map(id => parseInt(String(id), 10))
+      .filter(id => !isNaN(id) && id > 0);
     
     if (idList.length === 0) {
       throw new Error('有効なレコードIDがありません');
@@ -198,8 +199,7 @@ function updateFormFinderQueued(recordIds, status = true, companyTable = CONFIG.
       method: 'PATCH',
       headers: supabase.headers,
       payload: JSON.stringify(updateData),
-      muteHttpExceptions: true,
-      timeout: 25000
+      muteHttpExceptions: true
     });
     
     const responseCode = response.getResponseCode();
