@@ -548,6 +548,20 @@ function resetSendQueueAllDaily() {
 }
 
 /**
+ * 当日用キューの完全リセット（send_queue_extra 対応）
+ */
+function resetSendQueueAllDailyExtra() {
+  try {
+    const res = resetSendQueueAll({ useExtra: true });
+    console.log('send_queue_extra truncated');
+    return { success: true, result: res };
+  } catch (e) {
+    console.error('resetSendQueueAllExtra error:', e);
+    return { success: false, error: String(e) };
+  }
+}
+
+/**
  * targeting毎に当日キューを生成
  */
 function buildSendQueueForTargeting(targetingId = null) {
@@ -715,6 +729,126 @@ function buildSendQueueForAllTargetings() {
   }
 }
 
+/** companies_extra/send_queue_extra を対象に当日キューを生成 */
+function buildSendQueueForTargetingExtra(targetingId = null) {
+  try {
+    if (targetingId === null || typeof targetingId === 'undefined') {
+      const ids = Array.isArray(CONFIG.QUEUE_TARGETING_IDS) ? CONFIG.QUEUE_TARGETING_IDS : [];
+      if (ids.length > 0) {
+        console.log(JSON.stringify({ level: 'info', event: 'queue_build_configured_list_start_extra', ids }));
+        let total = 0;
+        const details = [];
+        for (const id of ids) {
+          const r = buildSendQueueForTargetingExtra(id);
+          if (r && r.success) total += Number(r.inserted || r.inserted_total || 0);
+          details.push(Object.assign({ targeting_id: id }, r));
+        }
+        console.log(JSON.stringify({ level: 'info', event: 'queue_build_configured_list_done_extra', total, count: ids.length }));
+        return { success: details.every(d => d && d.success), inserted_total: total, details };
+      } else {
+        targetingId = CONFIG.DEFAULT_TARGETING_ID;
+      }
+    }
+
+    const cfg = getTargetingConfig(targetingId);
+    if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
+    const t = cfg.targeting;
+    const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
+    console.log(JSON.stringify({
+      level: 'info', event: 'queue_build_start_extra', targeting_id: targetingId, date_jst: dateJst,
+      param_summary: { shards: 8, limit: 10000, targeting_sql_len: (t.targeting_sql || '').length, ng_companies_tokens: ngTokens.length }
+    }));
+
+    const startedMs = Date.now();
+    try {
+      const inserted = createQueueForTargeting(
+        targetingId,
+        dateJst,
+        t.targeting_sql || '',
+        (t.ng_companies || ''),
+        10000,
+        8,
+        { useExtra: true }
+      );
+      const elapsedMs = Date.now() - startedMs;
+      console.log(JSON.stringify({ level: 'info', event: 'queue_build_done_extra', targeting_id: targetingId, inserted: Number(inserted) || 0, elapsed_ms: elapsedMs }));
+      return { success: true, inserted: Number(inserted) || 0, targeting_id: targetingId };
+    } catch (e) {
+      const msg = String(e || '');
+      const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
+      if (!isStmtTimeout) throw e;
+      console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked_extra', targeting_id: targetingId, reason: 'statement_timeout' }));
+      const result = buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''));
+      if (result && result.success) {
+        return { success: true, inserted_total: Number(result.inserted_total || 0), targeting_id: targetingId, mode: 'chunked' };
+      }
+      throw new Error(result && result.error ? result.error : 'chunked_fallback_failed');
+    }
+  } catch (e) {
+    console.error('buildSendQueueForTargetingExtra error:', e);
+    return { success: false, error: String(e) };
+  }
+}
+
+/**
+ * アクティブ全targetingについて当日キューを一括生成（extra テーブル版）
+ */
+function buildSendQueueForAllTargetingsExtra() {
+  console.log('=== 当日キュー一括生成開始（extra） ===');
+  try {
+    const activeTargetings = getActiveTargetingIdsFromSheet();
+    if (!activeTargetings || activeTargetings.length === 0) {
+      console.log('アクティブなターゲティング設定が見つかりません');
+      return { success: false, message: 'アクティブtargetingなし', processed: 0 };
+    }
+    let processed = 0, failed = 0, totalInserted = 0; const details = [];
+    const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    for (const t of activeTargetings) {
+      const targetingId = t.targeting_id || t.id || t;
+      // フォールバックでも参照できるようスコープを外出し
+      let cfg = null;
+      let targetingSql = '';
+      let ngCompaniesCsv = '';
+      try {
+        cfg = getTargetingConfig(targetingId);
+        if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
+        targetingSql = cfg.targeting.targeting_sql || '';
+        ngCompaniesCsv = cfg.targeting.ng_companies || '';
+
+        const inserted = createQueueForTargeting(
+          targetingId,
+          dateJst,
+          targetingSql,
+          ngCompaniesCsv,
+          10000,
+          8,
+          { useExtra: true }
+        );
+        processed++; totalInserted += Number(inserted) || 0;
+        details.push({ targeting_id: targetingId, success: true, inserted: Number(inserted) || 0 });
+      } catch (e) {
+        const msg = String(e || '');
+        const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
+        if (isStmtTimeout) {
+          const res = buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targetingSql, ngCompaniesCsv);
+          if (res && res.success) {
+            processed++; totalInserted += Number(res.inserted_total || 0);
+            details.push({ targeting_id: targetingId, success: true, inserted: Number(res.inserted_total || 0), mode: 'chunked' });
+            continue;
+          }
+        }
+        failed++; details.push({ targeting_id: targetingId, success: false, error: msg });
+      }
+    }
+    console.log(`=== 当日キュー一括生成完了（extra）: 成功=${processed - failed} / 失敗=${failed} / 合計投入=${totalInserted}件 ===`);
+    return { success: failed === 0, date_jst: dateJst, processed, failed, total_inserted: totalInserted, details };
+  } catch (e) {
+    console.error('当日キュー一括生成エラー（extra）:', e);
+    return { success: false, error: String(e) };
+  }
+}
+
 
 
 /**
@@ -777,6 +911,53 @@ function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, 
           }
         }
         // リトライ不能ならステージを断念
+        return { success: false, error: msg, inserted_total: total, targeting_id: targetingId };
+      }
+    }
+  }
+  return { success: true, inserted_total: total, targeting_id: targetingId };
+}
+
+// extra 版のチャンク投入
+function buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targetingSql, ngCompaniesCsv) {
+  const MAX_TOTAL = 10000;
+  let total = 0;
+  const shards = 8;
+  let limit = CONFIG.CHUNK_LIMIT_INITIAL;
+  const minLimit = CONFIG.CHUNK_LIMIT_MIN;
+  let idWindow = CONFIG.CHUNK_ID_WINDOW_INITIAL;
+  const minIdWindow = CONFIG.CHUNK_ID_WINDOW_MIN;
+  const startedAll = Date.now();
+  for (let stage = 1; stage <= 2; stage++) {
+    let afterId = 0; let guard = 0;
+    while (total < MAX_TOTAL && guard < 100) {
+      if (Date.now() - startedAll > CONFIG.CHUNK_TIME_BUDGET_MS) {
+        console.warn(JSON.stringify({ level: 'warning', event: 'queue_chunk_time_budget_exceeded_extra', targeting_id: targetingId, stage, total, limit, idWindow }));
+        return { success: true, inserted_total: total, targeting_id: targetingId, time_budget_exceeded: true };
+      }
+      guard++;
+      const started = Date.now();
+      try {
+        const windowStart = afterId;
+        const res = createQueueForTargetingStep(targetingId, dateJst, targetingSql, ngCompaniesCsv, shards, limit, windowStart, stage, idWindow, { useExtra: true });
+        const elapsed = Date.now() - started;
+        const inserted = Number((res && res[0] && res[0].inserted) || 0);
+        const lastId = Number((res && res[0] && res[0].last_id) || windowStart);
+        const hasMore = !!(res && res[0] && res[0].has_more);
+        afterId = hasMore ? Math.max(lastId, windowStart) : (windowStart + idWindow);
+        total += inserted;
+        console.log(JSON.stringify({ level: 'info', event: 'queue_chunk_step_extra', targeting_id: targetingId, stage, limit, after_id: afterId, inserted, total, elapsed_ms: elapsed, has_more: hasMore }));
+        if (total >= MAX_TOTAL) break;
+        if (!hasMore) { continue; }
+        if (elapsed < 3000 && limit < 4000) limit = Math.min(4000, Math.floor(limit * 1.25));
+      } catch (e) {
+        const msg = String(e || '');
+        const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
+        console.warn(JSON.stringify({ level: 'warning', event: 'queue_chunk_step_failed_extra', targeting_id: targetingId, stage, limit, after_id: afterId, error: msg }));
+        if (isStmtTimeout) {
+          if (limit > minLimit) { limit = Math.max(minLimit, Math.floor(limit / 2)); Utilities.sleep(500); continue; }
+          if (idWindow > minIdWindow) { idWindow = Math.max(minIdWindow, Math.floor(idWindow / 2)); Utilities.sleep(500); continue; }
+        }
         return { success: false, error: msg, inserted_total: total, targeting_id: targetingId };
       }
     }
@@ -936,7 +1117,7 @@ function hasTargetCompaniesBasic(targetingId) {
  * @param {number} targetingId ターゲティングID
  * @returns {Object} ワークフロートリガー結果
  */
-function triggerFormSenderWorkflow(targetingId) {
+function triggerFormSenderWorkflow(targetingId, options) {
   try {
     console.log(`GitHub Actions 連続処理ワークフローをトリガー: targetingId=${targetingId}`);
     
@@ -958,7 +1139,7 @@ function triggerFormSenderWorkflow(targetingId) {
     let ok = 0;
     let fail = 0;
     for (let i = 1; i <= cw; i++) {
-      const result = sendRepositoryDispatch('form_sender_task', targetingId, clientConfig, i, cw);
+      const result = sendRepositoryDispatch('form_sender_task', targetingId, clientConfig, i, cw, options || {});
       if (result && result.success) {
         ok++;
       } else {
@@ -986,6 +1167,36 @@ function triggerFormSenderWorkflow(targetingId) {
   } catch (error) {
     console.error(`ワークフロートリガーエラー: ${error.message}`);
     return { success: false, message: error.message };
+  }
+}
+
+/** extra テーブルでの送信ワークフローをトリガー */
+function triggerFormSenderWorkflowExtra(targetingId) {
+  return triggerFormSenderWorkflow(targetingId, { useExtra: true });
+}
+
+/** extra テーブルを使って単一ターゲティングの処理を実行 */
+function processTargetingExtra(targetingId) {
+  try {
+    console.log(`ターゲティング ${targetingId} の処理を開始（extraテーブル）`);
+    const targetingConfig = getTargetingConfig(targetingId);
+    if (!targetingConfig) {
+      console.log(`ターゲティング ${targetingId} が見つかりません`);
+      return { success: false, message: 'ターゲティング設定が見つからない' };
+    }
+    console.log('条件チェック完了。GitHub Actions 連続処理ワークフローを開始します（extra）');
+    const workflowResult = triggerFormSenderWorkflow(targetingId, { useExtra: true });
+    if (workflowResult && workflowResult.success) {
+      console.log('GitHub Actions 連続処理ワークフロー（extra）が正常に開始されました');
+      return { success: true, message: '連続処理ワークフロー開始完了(extra)', targetingId };
+    } else {
+      console.error('GitHub Actions ワークフローの開始に失敗しました（extra）');
+      return { success: false, message: 'ワークフロー開始失敗(extra)' };
+    }
+  } catch (error) {
+    const errorType = getErrorType(error.message);
+    console.error(`ターゲティング ${targetingId} の処理で${errorType}エラー: ${error.message}`);
+    return { success: false, message: error.message, error_type: errorType, targeting_id: targetingId };
   }
 }
 

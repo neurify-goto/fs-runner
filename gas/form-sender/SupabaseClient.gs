@@ -99,13 +99,18 @@ function callRpc_(fnName, payload) {
 }
 
 /** リセット */
-function resetSendQueueAll() {
-  return callRpc_('reset_send_queue_all', {});
+function resetSendQueueAll(options) {
+  // 後方互換: 引数なしは従来テーブル（send_queue）
+  const useExtra = options && options.useExtra === true;
+  const fn = useExtra ? 'reset_send_queue_all_extra' : 'reset_send_queue_all';
+  return callRpc_(fn, {});
 }
 
 /** targeting用の当日キュー作成 */
-function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, maxDailySends, shards) {
-  return callRpc_('create_queue_for_targeting', {
+function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, maxDailySends, shards, options) {
+  const useExtra = options && options.useExtra === true;
+  const fn = useExtra ? 'create_queue_for_targeting_extra' : 'create_queue_for_targeting';
+  return callRpc_(fn, {
     p_target_date: targetDateJst,
     p_targeting_id: Number(targetingId),
     p_targeting_sql: targetingSql || '',
@@ -116,8 +121,10 @@ function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCom
 }
 
 /** チャンク投入: 単一ステージ(1/2)を after_id 以降 p_limit 件だけ投入 */
-function createQueueForTargetingStep(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, shards, limitPerCall, afterId, stage, idWindow) {
-  return callRpc_('create_queue_for_targeting_step', {
+function createQueueForTargetingStep(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, shards, limitPerCall, afterId, stage, idWindow, options) {
+  const useExtra = options && options.useExtra === true;
+  const fn = useExtra ? 'create_queue_for_targeting_step_extra' : 'create_queue_for_targeting_step';
+  return callRpc_(fn, {
     p_target_date: targetDateJst,
     p_targeting_id: Number(targetingId),
     p_targeting_sql: targetingSql || '',

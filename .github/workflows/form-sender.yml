@@ -19,6 +19,11 @@ on:
         description: 'Client configuration JSON'
         required: true
         type: string
+      use_extra_table:
+        description: 'Use companies_extra/send_queue_extra instead of defaults'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   form-sender:
@@ -77,16 +82,39 @@ jobs:
           # workflow_dispatchではNUM_WORKERSは未指定のため既定値4を使用
           RAW_NUM_WORKERS="4"
           echo "Running via WORKFLOW DISPATCH: targeting_id=${{ github.event.inputs.targeting_id }}, test_mode=${{ github.event.inputs.test_mode }}"
+          # Table selection (workflow_dispatch)
+          if [ "${{ github.event.inputs.use_extra_table }}" = "true" ]; then
+            echo "COMPANY_TABLE=companies_extra" >> $GITHUB_ENV
+            echo "SEND_QUEUE_TABLE=send_queue_extra" >> $GITHUB_ENV
+          else
+            echo "COMPANY_TABLE=companies" >> $GITHUB_ENV
+            echo "SEND_QUEUE_TABLE=send_queue" >> $GITHUB_ENV
+          fi
         elif [ "${{ github.event.action }}" = "form_sender_test" ]; then
           echo "TEST_MODE=true" >> $GITHUB_ENV
           echo "TARGETING_ID=1" >> $GITHUB_ENV
           RAW_NUM_WORKERS="${{ github.event.client_payload.workers_per_workflow || 4 }}"
           echo "Running in TEST MODE with targeting_id=1"
+          # From payload if present
+          if [ "${{ github.event.client_payload.use_extra_table || false }}" = "true" ]; then
+            echo "COMPANY_TABLE=companies_extra" >> $GITHUB_ENV
+            echo "SEND_QUEUE_TABLE=send_queue_extra" >> $GITHUB_ENV
+          else
+            echo "COMPANY_TABLE=${{ github.event.client_payload.company_table || 'companies' }}" >> $GITHUB_ENV
+            echo "SEND_QUEUE_TABLE=${{ github.event.client_payload.send_queue_table || 'send_queue' }}" >> $GITHUB_ENV
+          fi
         else
           echo "TEST_MODE=false" >> $GITHUB_ENV
           echo "TARGETING_ID=${{ github.event.client_payload.targeting_id }}" >> $GITHUB_ENV
           RAW_NUM_WORKERS="${{ github.event.client_payload.workers_per_workflow || 4 }}"
           echo "Running in PRODUCTION MODE"
+          if [ "${{ github.event.client_payload.use_extra_table || false }}" = "true" ]; then
+            echo "COMPANY_TABLE=companies_extra" >> $GITHUB_ENV
+            echo "SEND_QUEUE_TABLE=send_queue_extra" >> $GITHUB_ENV
+          else
+            echo "COMPANY_TABLE=${{ github.event.client_payload.company_table || 'companies' }}" >> $GITHUB_ENV
+            echo "SEND_QUEUE_TABLE=${{ github.event.client_payload.send_queue_table || 'send_queue' }}" >> $GITHUB_ENV
+          fi
         fi
 
         # 1〜4 にクランプ（非数値・範囲外は安全側で4）
@@ -136,6 +164,8 @@ jobs:
         PYTHONPATH: ${{ github.workspace }}/src
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        COMPANY_TABLE: ${{ env.COMPANY_TABLE }}
+        SEND_QUEUE_TABLE: ${{ env.SEND_QUEUE_TABLE }}
         TZ: Asia/Tokyo
         # マルチプロセス環境設定
         GITHUB_ACTIONS: true
