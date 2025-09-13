@@ -308,9 +308,16 @@ class FormExplorer:
                 page_data, company_url, min_score, record_id
             )
             
+            # 1.5 初期リンクが0件なら、ここでcontact系フォールバックを試す（早期returnしない）
             if not initial_links:
-                logger.debug(f"Company[{record_id}]: 統合探索終了 - 有効リンクなし")
-                return None, 0
+                logger.debug(f"Company[{record_id}]: 初期リンク0件 -> contact候補フォールバックを試行")
+                fb_added = self._add_contact_candidates_fallback(
+                    initial_links,
+                    page_data['content'].get('links', []),
+                    company_url,
+                    min_score,
+                )
+                logger.debug(f"Company[{record_id}]: contact候補フォールバック 追加={fb_added}")
             
             logger.debug(f"Company[{record_id}]: 統合探索用初期リスト準備完了 - {len(initial_links)}個のリンク")
             
@@ -326,17 +333,6 @@ class FormExplorer:
             )
             
         # 2. 統合探索実行（深度無関係スコア優先）
-            if not initial_links:
-                # 連絡先優先フォールバック（簡易版）
-                logger.debug(f"Company[{record_id}]: 初期リンク空のためcontact候補を直接検証")
-                cand_added = self._add_contact_candidates_fallback(
-                    initial_links,
-                    page_data['content'].get('links', []),
-                    company_url,
-                    min_score,
-                )
-                if cand_added > 0:
-                    logger.debug(f"Company[{record_id}]: contact候補{cand_added}件を直接検証に使用")
             form_url, pages_visited = await self._execute_unified_exploration(context, page_data, initial_links)
             
             if form_url:
