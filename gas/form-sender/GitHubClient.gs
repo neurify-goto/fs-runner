@@ -26,7 +26,7 @@ function getGitHubConfig() {
  * @param {Object} clientConfig スプレッドシートから取得したクライアント設定
  * @returns {Object} 送信結果
  */
-function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = null, runTotal = null) {
+function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = null, runTotal = null, options = {}) {
   try {
     const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
     if (!githubToken) {
@@ -57,6 +57,7 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = 
       throw new Error(`clientConfig.targeting に必須フィールドが不足: ${missingTargetingFields.join(', ')}`);
     }
     
+    const useExtra = options && options.useExtra === true;
     const payload = {
       event_type: eventType,
       client_payload: {
@@ -64,7 +65,7 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = 
         client_config: clientConfig, // 検証済み2シート構造
         task_type: taskType,
         triggered_at: new Date().toISOString(),
-        gas_version: '2.1.0-2sheet-validated-cw' // 並列実行対応
+        gas_version: '2.2.0-2sheet-validated-cw-extra' // 並列実行 + extra対応
       }
     };
 
@@ -78,6 +79,15 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = 
       const rawWorkers = (typeof CONFIG?.WORKERS_PER_WORKFLOW !== 'undefined') ? CONFIG.WORKERS_PER_WORKFLOW : 1;
       const w = Math.min(4, Math.max(1, parseInt(rawWorkers) || 1));
       payload.client_payload.workers_per_workflow = w;
+      // extraテーブル使用フラグ
+      payload.client_payload.use_extra_table = useExtra;
+      if (useExtra) {
+        payload.client_payload.company_table = 'companies_extra';
+        payload.client_payload.send_queue_table = 'send_queue_extra';
+      } else {
+        payload.client_payload.company_table = 'companies';
+        payload.client_payload.send_queue_table = 'send_queue';
+      }
     } catch (e) {
       // 解析失敗時は無視（後方互換）
     }

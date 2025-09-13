@@ -709,15 +709,15 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 cap_params = dict(params)
                 cap_params['p_max_daily'] = max_daily
                 try:
-                    resp = supabase.rpc('claim_next_batch', cap_params).execute()
+                    resp = supabase.rpc(FN_CLAIM, cap_params).execute()
                 except Exception as e_cap:
                     # フォールバックはシグネチャ不一致/未デプロイに限定
-                    if _should_fallback_on_rpc_error(e_cap, 'claim_next_batch', ['p_max_daily']):
-                        resp = supabase.rpc('claim_next_batch', params).execute()
+                    if _should_fallback_on_rpc_error(e_cap, FN_CLAIM, ['p_max_daily']):
+                        resp = supabase.rpc(FN_CLAIM, params).execute()
                     else:
                         raise
             else:
-                resp = supabase.rpc('claim_next_batch', params).execute()
+                resp = supabase.rpc(FN_CLAIM, params).execute()
             rows = resp.data or []
         except Exception as e:
             logger.error(f"claim_next_batch RPC error: {e}")
@@ -765,7 +765,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     try:
         # ブラックリスト回避: companies.black が NULL のもののみ処理対象
         comp = (
-            supabase.table('companies')
+            supabase.table(COMPANY_TABLE)
             .select('id, form_url, black, company_name')
             .eq('id', company_id)
             .limit(1)
@@ -858,11 +858,11 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                     'p_run_id': run_id,
                 }
                 try:
-                    supabase.rpc('mark_done', _md_args).execute()
+                    supabase.rpc(FN_MARK_DONE, _md_args).execute()
                 except Exception as e_mdsk:
-                    if _should_fallback_on_rpc_error(e_mdsk, 'mark_done', ['p_run_id']):
+                    if _should_fallback_on_rpc_error(e_mdsk, FN_MARK_DONE, ['p_run_id']):
                         _md_args.pop('p_run_id', None)
-                        supabase.rpc('mark_done', _md_args).execute()
+                        supabase.rpc(FN_MARK_DONE, _md_args).execute()
                     else:
                         raise
                 try:
@@ -879,7 +879,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             try:
                 # 自分が割り当てた行のみ pending に戻す（競合安全）
                 q = (
-                    supabase.table('send_queue')
+                    supabase.table(SEND_QUEUE_TABLE)
                     .update({'status': 'pending', 'assigned_by': None, 'assigned_at': None})
                     .eq('target_date_jst', str(target_date))
                     .eq('targeting_id', targeting_id)
@@ -932,12 +932,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_run_id': run_id,
         }
         try:
-            supabase.rpc('mark_done', _md_args).execute()
+            supabase.rpc(FN_MARK_DONE, _md_args).execute()
         except Exception as e_md:
             # フォールバックはシグネチャ不一致のみ（安全弁）。それ以外は中断。
-            if _should_fallback_on_rpc_error(e_md, 'mark_done', ['p_run_id']):
+            if _should_fallback_on_rpc_error(e_md, FN_MARK_DONE, ['p_run_id']):
                 _md_args.pop('p_run_id', None)
-                supabase.rpc('mark_done', _md_args).execute()
+                supabase.rpc(FN_MARK_DONE, _md_args).execute()
             else:
                 raise
         # 失敗完了ログ
@@ -973,11 +973,11 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_run_id': run_id,
         }
         try:
-            supabase.rpc('mark_done', _md_args).execute()
+            supabase.rpc(FN_MARK_DONE, _md_args).execute()
         except Exception as e_md2:
-            if _should_fallback_on_rpc_error(e_md2, 'mark_done', ['p_run_id']):
+            if _should_fallback_on_rpc_error(e_md2, FN_MARK_DONE, ['p_run_id']):
                 _md_args.pop('p_run_id', None)
-                supabase.rpc('mark_done', _md_args).execute()
+                supabase.rpc(FN_MARK_DONE, _md_args).execute()
             else:
                 raise
         # 失敗完了ログ
@@ -1065,7 +1065,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         try:
             if (not is_success) and isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
                 try:
-                    supabase.table('companies').update({'prohibition_detected': True}).eq('id', company_id).execute()
+                    supabase.table(COMPANY_TABLE).update({'prohibition_detected': True}).eq('id', company_id).execute()
                 except Exception as ue:
                     logger.warning(f"companies.prohibition_detected update failed (company_id={company_id}, suppressed): {ue}")
         except Exception:
@@ -1110,11 +1110,11 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             'p_run_id': run_id,
         }
         try:
-            supabase.rpc('mark_done', _md_args).execute()
+            supabase.rpc(FN_MARK_DONE, _md_args).execute()
         except Exception as e_md3:
-            if _should_fallback_on_rpc_error(e_md3, 'mark_done', ['p_run_id']):
+            if _should_fallback_on_rpc_error(e_md3, FN_MARK_DONE, ['p_run_id']):
                 _md_args.pop('p_run_id', None)
-                supabase.rpc('mark_done', _md_args).execute()
+                supabase.rpc(FN_MARK_DONE, _md_args).execute()
             else:
                 raise
         # 成功時は当日成功数キャッシュを無効化（最新値を反映させる）
@@ -1198,7 +1198,7 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                     now_ts = _time.time()
                     if worker_id == 0 and (now_ts - last_requeue_ts >= requeue_interval):
                         try:
-                            resp = supabase.rpc('requeue_stale_assigned', {
+                            resp = supabase.rpc(FN_REQUEUE, {
                                 'p_target_date': str(target_date),
                                 'p_targeting_id': targeting_id,
                                 'p_stale_minutes': requeue_stale_minutes,
