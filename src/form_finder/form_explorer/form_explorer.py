@@ -308,9 +308,16 @@ class FormExplorer:
                 page_data, company_url, min_score, record_id
             )
             
+            # 1.5 初期リンクが0件なら、ここでcontact系フォールバックを試す（早期returnしない）
             if not initial_links:
-                logger.debug(f"Company[{record_id}]: 統合探索終了 - 有効リンクなし")
-                return None, 0
+                logger.debug(f"Company[{record_id}]: 初期リンク0件 -> contact候補フォールバックを試行")
+                fb_added = self._add_contact_candidates_fallback(
+                    initial_links,
+                    page_data['content'].get('links', []),
+                    company_url,
+                    min_score,
+                )
+                logger.debug(f"Company[{record_id}]: contact候補フォールバック 追加={fb_added}")
             
             logger.debug(f"Company[{record_id}]: 統合探索用初期リスト準備完了 - {len(initial_links)}個のリンク")
             
@@ -325,16 +332,57 @@ class FormExplorer:
                 record_id=record_id
             )
             
-            # 2. 統合探索実行（深度無関係スコア優先）
-            form_url, pages_visited = await self._execute_unified_exploration(
-                context, page_data, initial_links
-            )
+        # 2. 統合探索実行（深度無関係スコア優先）
+            form_url, pages_visited = await self._execute_unified_exploration(context, page_data, initial_links)
             
             if form_url:
                 logger.info(f"Company[{record_id}]: 統合探索成功")
                 return form_url, pages_visited
             
             logger.debug(f"Company[{record_id}]: 統合探索完了 - {pages_visited}ページ探索, フォーム未発見")
+            # 最終フォールバック: contact候補へ直接遷移してフォーム検出
+            try:
+                raw_links = page_data['content'].get('links', [])
+                cand_url = None
+                keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
+                neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー']
+                for link in raw_links:
+                    hay = ' '.join([
+                        str(link.get('text','')),
+                        str(link.get('title','')),
+                        str(link.get('ariaLabel','')),
+                        str(link.get('alt','')),
+                        str(link.get('href','')),
+                    ]).lower()
+                    if any(k.lower() in hay for k in keywords) and not any(k.lower() in hay for k in neg_kw):
+                        cand_url = link.get('href')
+                        break
+                if cand_url:
+                    logger.debug(f"Company[{record_id}]: 最終フォールバックで {cand_url} を直接検証")
+                    link_page = await page_data['context'].new_page()
+                    try:
+                        await link_page.goto(cand_url, wait_until='domcontentloaded', timeout=self.config.PAGE_LOAD_TIMEOUT)
+                        await link_page.wait_for_load_state('domcontentloaded')
+                        await link_page.wait_for_timeout(500)
+                        page_content2 = await self._get_page_content(link_page)
+                        forms = await self.form_detector.find_and_validate_forms(link_page, page_content2['html_content'])
+                        if forms:
+                            from ..utils import is_valid_form_url, get_robust_page_url
+                            form_url2 = forms[0].get('form_url')
+                            if not form_url2 or not is_valid_form_url(form_url2):
+                                robust = await get_robust_page_url(link_page, cand_url)
+                                form_url2 = robust or (cand_url if is_valid_form_url(cand_url) else None)
+                            if form_url2:
+                                return form_url2, pages_visited + 1
+                        # フォーム未発見でも候補URL自体を返す
+                        return cand_url, pages_visited + 1
+                    finally:
+                        try:
+                            await link_page.close()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             return None, pages_visited
             
         except Exception as e:
@@ -371,9 +419,35 @@ class FormExplorer:
             if score_int >= min_score:
                 link_data['_source_depth'] = 0  # トップページ由来
                 all_links.append((link_data, score_int))
-        
+
         valid_top_links_count = len([l for l in scored_top_links if l[1] >= min_score])
         logger.debug(f"Company[{record_id}]: トップページリンク - {len(scored_top_links)}個中{valid_top_links_count}個が条件満たす（{min_score}点以上）")
+
+        # フォールバック: contact/inquiry系キーワードを強制優先リンクとして追加
+        if not all_links:
+            keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
+            neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー']
+            fallback_added = 0
+            for link in valid_top_links:
+                # text/attrs/href すべてを対象に包含判定
+                hay_raw = ' '.join([
+                    str(link.get('text','')),
+                    str(link.get('title','')),
+                    str(link.get('ariaLabel','')),
+                    str(link.get('alt','')),
+                    str(link.get('href','')),
+                ])
+                hay = hay_raw.lower()
+                has_pos = any(k.lower() in hay for k in keywords)
+                has_neg = any(k.lower() in hay for k in neg_kw)
+                if has_pos and not has_neg:
+                    score_boost = max(min_score + 500, 600)
+                    lcopy = link.copy()
+                    lcopy['_source_depth'] = 0
+                    all_links.append((lcopy, score_boost))
+                    fallback_added += 1
+            if fallback_added > 0:
+                logger.debug(f"Company[{record_id}]: フォールバックでcontact系リンクを{fallback_added}件追加")
         
         # スコア優先ソート（深度に関係なく最もスコアの高いリンクから探索）
         all_links.sort(key=lambda x: (
@@ -415,6 +489,17 @@ class FormExplorer:
         context_obj = page_data['context']
         
         logger.debug(f"Company[{context.record_id}]: 統合探索開始 - {len(pending_links)}個の初期リンク")
+
+        # 初期リンクが空ならフォールバックでcontact候補を投入
+        if not pending_links:
+            added_fb = self._add_contact_candidates_fallback(
+                pending_links,
+                page_data['content'].get('links', []),
+                context.base_url,
+                context.min_score,
+            )
+            if added_fb > 0:
+                logger.debug(f"Company[{context.record_id}]: 初期リンク空のためフォールバックで{added_fb}件投入")
         
         while pending_links and pages_visited < context.max_pages:
             # 1. スコア順でソート（毎回実行）
@@ -452,7 +537,7 @@ class FormExplorer:
                 
                 # ページ訪問（タイミング最適化）
                 link_page = await context_obj.new_page()
-                await link_page.goto(link_url, wait_until='networkidle', timeout=self.config.PAGE_LOAD_TIMEOUT)
+                await link_page.goto(link_url, wait_until='domcontentloaded', timeout=self.config.PAGE_LOAD_TIMEOUT)
                 
                 # 追加の安定化待機（JavaScript実行完了の確保）
                 await link_page.wait_for_load_state('domcontentloaded')
@@ -522,6 +607,13 @@ class FormExplorer:
                     
                     if new_links_added > 0:
                         logger.debug(f"Company[{context.record_id}]: 新規リンク {new_links_added}個を探索リストに統合")
+                # 追加フォールバック: 依然としてpendingが空のときcontact候補を投入
+                if not pending_links:
+                    added_fb2 = self._add_contact_candidates_fallback(
+                        pending_links, new_links, context.base_url, context.min_score
+                    )
+                    if added_fb2 > 0:
+                        logger.debug(f"Company[{context.record_id}]: フォールバックで{added_fb2}件のcontact候補を投入")
                 
             except Exception as link_error:
                 logger.warning(f"Company[{context.record_id}]: ページ探索エラー（継続） - {str(link_error)[:100]}")
@@ -535,6 +627,50 @@ class FormExplorer:
         
         logger.debug(f"Company[{context.record_id}]: 統合探索完了 - {pages_visited}ページ探索、フォーム未発見")
         return None, pages_visited
+
+    def _add_contact_candidates_fallback(
+        self,
+        pending_links: List[Tuple[Dict[str, Any], int]],
+        raw_links: List[Dict[str, Any]],
+        base_url: str,
+        min_score: int,
+    ) -> int:
+        """contact/inquiry系の候補リンクを単純規則で抽出してpendingに投入"""
+        if not raw_links:
+            return 0
+        try:
+            keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
+            neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー']
+
+            added = 0
+            for link in raw_links:
+                hay = ' '.join([
+                    str(link.get('text','')),
+                    str(link.get('title','')),
+                    str(link.get('ariaLabel','')),
+                    str(link.get('alt','')),
+                    str(link.get('href','')),
+                ]).lower()
+                if any(k.lower() in hay for k in keywords) and not any(k.lower() in hay for k in neg_kw):
+                    href = link.get('href')
+                    if not href:
+                        continue
+                    # 重複チェック（正規化）
+                    normalized = self.link_scorer._normalize_url_for_cache(href)
+                    if not normalized:
+                        continue
+                    if any(self.link_scorer._normalize_url_for_cache(l[0].get('href','')) == normalized for l in pending_links):
+                        continue
+                    score_boost = max(min_score + 500, 600)
+                    lcopy = link.copy()
+                    lcopy['_source_depth'] = 0
+                    pending_links.append((lcopy, score_boost))
+                    added += 1
+            # スコア順に
+            pending_links.sort(key=lambda x: (-x[1], x[0].get('_dom_index', self.config.DEFAULT_DOM_INDEX)))
+            return added
+        except Exception:
+            return 0
     
     async def _merge_new_links_to_pending(
         self,
@@ -654,19 +790,130 @@ class FormExplorer:
             # リンク抽出
             links = await page.evaluate("""
                 () => {
-                    const links = [];
+                    const results = [];
+
+                    // 1) 標準アンカー
                     document.querySelectorAll('a[href]').forEach((link, index) => {
-                        const href = link.href;
-                        const text = link.textContent ? link.textContent.trim() : '';
-                        if (href && text && href.startsWith('http')) {
-                            links.push({
-                                href: href,
-                                text: text,
-                                dom_index: index
+                        try {
+                            const href = link.href || '';
+                            if (!href || !(href.startsWith('http://') || href.startsWith('https://'))) return;
+
+                            const text = (link.textContent || '').trim();
+                            const ariaLabel = link.getAttribute('aria-label') || '';
+                            const title = link.getAttribute('title') || '';
+                            let alt = '';
+                            try {
+                                const img = link.querySelector('img[alt]');
+                                if (img && img.getAttribute('alt')) alt = img.getAttribute('alt');
+                            } catch (_) {}
+
+                            const structural = link.closest('header, footer, nav, main');
+                            const parentTag = (structural ? structural.tagName : (link.parentElement ? link.parentElement.tagName : '')).toLowerCase();
+                            const parentClass = (structural ? structural.className : (link.parentElement ? link.parentElement.className : '')) || '';
+
+                            results.push({
+                                href,
+                                text,
+                                alt,
+                                ariaLabel,
+                                title,
+                                id: link.id || '',
+                                className: link.className || '',
+                                parentTag,
+                                parentClass: String(parentClass).toLowerCase(),
+                                _dom_index: index
                             });
-                        }
+                        } catch (_) {}
                     });
-                    return links;
+
+                    // 2) onclick で location.href や window.open を使う要素（a/button/role=button）
+                    const clickables = Array.from(document.querySelectorAll('a[onclick], button[onclick], [role="button"][onclick]'));
+                    clickables.forEach((el, idx) => {
+                        try {
+                            const onclick = el.getAttribute('onclick') || '';
+                            if (!onclick) return;
+                            const patterns = [
+                                /location\.href\s*=\s*['\"]([^'\"]+)['\"]/i,
+                                /window\.location\s*=\s*['\"]([^'\"]+)['\"]/i,
+                                /window\.open\(\s*['\"]([^'\"]+)['\"]/i
+                            ];
+                            let target = '';
+                            for (const re of patterns) {
+                                const m = onclick.match(re);
+                                if (m && m[1]) { target = m[1]; break; }
+                            }
+                            if (!target) return;
+
+                            // 絶対URL化
+                            let href = '';
+                            try { href = new URL(target, document.baseURI).href; } catch(e) { href = ''; }
+                            if (!href || !(href.startsWith('http://') || href.startsWith('https://'))) return;
+
+                            const text = (el.textContent || '').trim();
+                            const ariaLabel = el.getAttribute('aria-label') || '';
+                            const title = el.getAttribute('title') || '';
+                            let alt = '';
+                            try {
+                                const img = el.querySelector('img[alt]');
+                                if (img && img.getAttribute('alt')) alt = img.getAttribute('alt');
+                            } catch (_) {}
+                            const structural = el.closest('header, footer, nav, main');
+                            const parentTag = (structural ? structural.tagName : (el.parentElement ? el.parentElement.tagName : '')).toLowerCase();
+                            const parentClass = (structural ? structural.className : (el.parentElement ? el.parentElement.className : '')) || '';
+
+                            results.push({
+                                href,
+                                text,
+                                alt,
+                                ariaLabel,
+                                title,
+                                id: el.id || '',
+                                className: el.className || '',
+                                parentTag,
+                                parentClass: String(parentClass).toLowerCase(),
+                                _dom_index: 100000 + idx // 後からでも安定
+                            });
+                        } catch(_) {}
+                    });
+
+                    // 3) data-* に URL を持つクリック可能要素（contact系の拾い漏れ救済）
+                    const dataCandidates = Array.from(document.querySelectorAll('[data-href], [data-url], [data-target]'));
+                    dataCandidates.forEach((el, idx) => {
+                        try {
+                            const cand = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-target') || '';
+                            if (!cand) return;
+                            let href = '';
+                            try { href = new URL(cand, document.baseURI).href; } catch(e) { href = ''; }
+                            if (!href || !(href.startsWith('http://') || href.startsWith('https://'))) return;
+
+                            const text = (el.textContent || '').trim();
+                            const ariaLabel = el.getAttribute('aria-label') || '';
+                            const title = el.getAttribute('title') || '';
+                            let alt = '';
+                            try {
+                                const img = el.querySelector('img[alt]');
+                                if (img && img.getAttribute('alt')) alt = img.getAttribute('alt');
+                            } catch (_) {}
+                            const structural = el.closest('header, footer, nav, main');
+                            const parentTag = (structural ? structural.tagName : (el.parentElement ? el.parentElement.tagName : '')).toLowerCase();
+                            const parentClass = (structural ? structural.className : (el.parentElement ? el.parentElement.className : '')) || '';
+
+                            results.push({
+                                href,
+                                text,
+                                alt,
+                                ariaLabel,
+                                title,
+                                id: el.id || '',
+                                className: el.className || '',
+                                parentTag,
+                                parentClass: String(parentClass).toLowerCase(),
+                                _dom_index: 200000 + idx
+                            });
+                        } catch(_) {}
+                    });
+
+                    return results;
                 }
             """)
             

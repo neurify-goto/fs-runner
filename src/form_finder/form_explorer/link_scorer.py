@@ -42,12 +42,23 @@ class LinkScorer:
             ]
             # 事前正規化（高速化）
             self._excluded_kw_norm: List[str] = [s.lower() for s in self.excluded_link_keywords if s]
+
+            # 問い合わせ系ホワイトリスト（URLやテキストにrecruit等を含んでも許可）
+            rec = rules.get("recruitment_only_exclusion", {}) if isinstance(rules, dict) else {}
+            self.general_contact_whitelist_keywords: List[str] = [
+                str(k) for k in rec.get(
+                    "allow_if_general_contact_keywords_any",
+                    ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"],
+                ) if k
+            ]
+            self._general_kw_norm: List[str] = [s.lower() for s in self.general_contact_whitelist_keywords if s]
         except Exception:
             # フォールバック（安全側）
             self.excluded_link_keywords = [
                 "採用", "求人", "応募", "募集", "エントリー", "recruit", "careers", "job",
             ]
             self._excluded_kw_norm = [s.lower() for s in self.excluded_link_keywords]
+            self._general_kw_norm = [s.lower() for s in ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry"]]
         
         # スコア設定値（ハードコード）
         self.score_premium_text = 300
@@ -168,9 +179,17 @@ class LinkScorer:
         テキストとURLの双方を対象に大小文字無視で部分一致判定を行う。
         """
         try:
-            text = (link.get("text") or link.get("title") or "").lower()
+            text = (link.get("text") or "").lower()
+            title = (link.get("title") or "").lower()
+            aria = (link.get("ariaLabel") or "").lower()
+            alt = (link.get("alt") or "").lower()
             href = (link.get("href") or "").lower()
-            haystack_norm = text + " " + href
+            haystack_norm = " ".join([text, title, aria, alt, href])
+
+            # 一般的な問い合わせキーワードが含まれていればホワイトリストで許可
+            if any(k in haystack_norm for k in self._general_kw_norm):
+                return False
+
             return any(kw in haystack_norm for kw in self._excluded_kw_norm)
         except Exception:
             # 例外時は保守的に除外しない
@@ -188,15 +207,15 @@ class LinkScorer:
             text = link.get('text', '')
             
             # URL正規化してキャッシュをチェック
-            normalized_url = self._normalize_url_for_cache(href)
-            if normalized_url and normalized_url in self._score_cache:
-                score = self._score_cache[normalized_url]
+            cache_key = self._make_cache_key(link)
+            if cache_key and cache_key in self._score_cache:
+                score = self._score_cache[cache_key]
                 cache_hits += 1
                 logger.debug(f"キャッシュからスコア取得: [{i+1}] {score}点 - '{text}' -> {href}")
             else:
                 score = self._calculate_link_score(link, base_url)
-                if normalized_url:
-                    self._score_cache[normalized_url] = score
+                if cache_key:
+                    self._score_cache[cache_key] = score
             
             if score >= self.min_link_score:
                 # DOM順序を保持するためインデックスを追加
@@ -443,8 +462,9 @@ class LinkScorer:
                         logger.debug("除外リンク（採用/応募系）をスキップ")
                     continue
 
-                # 既に訪問済みかチェック
-                if href not in self.visited_urls:
+                # 既に訪問済みかチェック（正規化して比較）
+                normalized_href = self._normalize_url_for_cache(href)
+                if normalized_href and normalized_href not in self.visited_urls:
                     link['href'] = href.strip()
                     valid_links.append(link)
                 else:
@@ -456,14 +476,22 @@ class LinkScorer:
     def _is_external_link_basic(self, url: str, base_url: str) -> bool:
         """基本的な外部リンクチェック"""
         try:
-            url_domain = urlparse(url).netloc.lower() 
+            url_domain = urlparse(url).netloc.lower()
             base_domain = urlparse(base_url).netloc.lower()
-            
-            # wwwの有無を無視した比較
+
+            # www の有無を無視
             url_clean = url_domain.replace('www.', '')
             base_clean = base_domain.replace('www.', '')
-            
-            return url_clean != base_clean and url_domain != base_domain
+
+            # 同一ドメイン or サブドメインは内部扱い
+            if not url_clean or not base_clean:
+                return False
+            if url_clean == base_clean:
+                return False
+            if url_clean.endswith('.' + base_clean):
+                return False
+
+            return True
         except Exception:
             return False
 
@@ -484,6 +512,26 @@ class LinkScorer:
             normalized = normalized.split('?')[0]
         
         return normalized.lower()
+
+    def _make_cache_key(self, link: Dict[str, Any]) -> str:
+        """リンクキャッシュキー生成（URLだけでなくテキスト/属性も考慮）"""
+        try:
+            url_key = self._normalize_url_for_cache(link.get('href', ''))
+            if not url_key:
+                return ''
+            parts = [
+                url_key,
+                (link.get('text') or '').strip().lower(),
+                (link.get('title') or '').strip().lower(),
+                (link.get('ariaLabel') or '').strip().lower(),
+                (link.get('alt') or '').strip().lower(),
+                (link.get('className') or '').strip().lower(),
+                (link.get('id') or '').strip().lower(),
+                (link.get('parentClass') or '').strip().lower(),
+            ]
+            return '|'.join(parts)
+        except Exception:
+            return url_key
     
     def clear_cache(self):
         """スコアキャッシュをクリア（新しいサイト探索時に使用）"""
@@ -493,7 +541,9 @@ class LinkScorer:
     
     def mark_url_visited(self, url: str):
         """URLを訪問済みとしてマーク"""
-        self.visited_urls.add(url)
+        normalized_url = self._normalize_url_for_cache(url)
+        if normalized_url:
+            self.visited_urls.add(normalized_url)
     
     def filter_and_score_links(self, raw_links: List[Dict[str, Any]], base_url: str, min_score: int = None) -> List[tuple]:
         """リンクのフィルタリングとスコアリングを一括処理
