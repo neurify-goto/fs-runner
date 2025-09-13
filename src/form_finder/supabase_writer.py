@@ -255,7 +255,9 @@ class SupabaseFormFinderWriter:
                 batch_updates.append({
                     'id': record_id,
                     'form_found': True,
-                    'form_url': primary_form_url
+                    'form_url': primary_form_url,
+                    # RPC 経路と同等に、処理完了時はキュー解除
+                    'form_finder_queued': None
                 })
             
             response = self.supabase.table(self.target_table).upsert(
@@ -278,7 +280,9 @@ class SupabaseFormFinderWriter:
                 batch_updates.append({
                     'id': record_id,
                     'form_found': False,
-                    'form_url': None
+                    'form_url': None,
+                    # RPC 経路と同等に、処理完了時はキュー解除
+                    'form_finder_queued': None
                 })
             
             response = self.supabase.table(self.target_table).upsert(
