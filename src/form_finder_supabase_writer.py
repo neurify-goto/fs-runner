@@ -9,6 +9,9 @@ import logging
 import os
 import sys
 
+# CIログの機微情報を防ぐためサニタイズロギングを適用
+from form_sender.security.log_sanitizer import setup_sanitized_logging
+
 # form_finderから必要なクラスとユーティリティ関数をインポート
 from form_finder.supabase_writer import SupabaseFormFinderWriter, load_results_file
 
@@ -44,6 +47,8 @@ def main():
         sys.exit(1)
     
     try:
+        # 既存ハンドラにサニタイザーを適用
+        setup_sanitized_logging()
         # 結果ファイル読み込み
         results_data = load_results_file(args.results_file)
         
