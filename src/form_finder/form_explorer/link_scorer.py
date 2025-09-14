@@ -264,8 +264,11 @@ class LinkScorer:
             frag = (parsed.fragment or "").lower()
             path = (parsed.path or "").lower()
 
-            # #comment / #respond などのフラグメント（厳密一致）
+            # #comment / #respond などのフラグメント（厳密一致 + 一般的なサフィックス形式）
+            # 例: #comment-5, #comments-123, #respond-42 など
             if frag in {"comment", "comments", "respond"}:
+                return True
+            if re.match(r"^(comment|comments|respond)([-_].+|\d.*)$", frag):
                 return True
 
             # /comment/ /comments/ などのパスセグメント（単語境界扱い）

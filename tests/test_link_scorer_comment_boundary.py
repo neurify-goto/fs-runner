@@ -17,6 +17,9 @@ def test_comment_fragment_and_path_should_be_excluded():
     scorer = LinkScorer()
     assert scorer._is_excluded_link({"href": "https://example.com/post#comment", "text": "Go"}) is True
     assert scorer._is_excluded_link({"href": "https://example.com/comments/", "text": "Comments"}) is True
+    # サフィックス付アンカーも除外（WordPress等の一般的形式）
+    assert scorer._is_excluded_link({"href": "https://example.com/post#comment-5", "text": "Go"}) is True
+    assert scorer._is_excluded_link({"href": "https://example.com/post#respond-123", "text": "Reply"}) is True
 
 
 def test_comment_phrases_should_be_excluded():
