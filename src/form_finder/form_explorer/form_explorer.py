@@ -110,7 +110,7 @@ class FormExplorer:
                 str(k).lower() for k in link_ex.get("exclude_if_text_or_url_contains_any", []) if k
             ]
             # セーフティ: 既知のgenericは混入していない想定だが、入っていても無害化
-            generic = {"comment", "comments", "/comment/", "/comments/"}
+            generic = {"comment", "comments", "/comment/", "/comments/", "コメント"}
             self._neg_keywords_cache = [k for k in kws if k not in generic]
         except Exception:
             # フォールバック（安全側に限定的）

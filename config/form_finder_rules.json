@@ -30,7 +30,6 @@
       "job",
       "jobs",
       "employment",
-      "コメント",
       "comment-form",
       "commentform",
       "#comment",
@@ -65,7 +64,6 @@
       "comment-textarea",
       "comment-author",
       "comment-url",
-      "reply",
       "reply-form",
       "respond"
     ]

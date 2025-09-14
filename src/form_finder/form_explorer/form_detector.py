@@ -95,7 +95,7 @@ class FormDetector:
                 str(k) for k in cmt.get("exclude_if_form_attributes_contains_any", []) if k
             ] or [
                 "commentform", "comment-form", "comment-submit", "commenttextarea", "comment-textarea",
-                "comment-author", "comment-url", "reply", "reply-form", "respond"
+                "comment-author", "comment-url", "reply-form", "respond"
             ]
             # 属性判定は単語境界/ハイフン/アンダースコアでの区切りを要求（誤検出対策: document など）
             self._comment_attr_patterns = [
@@ -114,7 +114,7 @@ class FormDetector:
             ]
             self.comment_attr_keywords = [
                 "commentform", "comment-form", "comment-submit", "commenttextarea", "comment-textarea",
-                "comment-author", "comment-url", "reply", "reply-form", "respond"
+                "comment-author", "comment-url", "reply-form", "respond"
             ]
             self._comment_attr_patterns = [
                 re.compile(rf"(^|[\s\-_]){re.escape(tok.lower())}($|[\s\-_])") for tok in self.comment_attr_keywords
@@ -986,20 +986,15 @@ class FormDetector:
                 general_kws_norm = ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"]
             has_general_contact_kw = any(k in haystack_norm for k in general_kws_norm)
 
-            # コメント系に該当する語のマッチ集合
-            matched = [
-                str(k).lower() for k in self.comment_exclusion_keywords if str(k).lower() in haystack_norm
-            ]
-            if not matched:
-                return False
-
-            # 汎用語だけ（comment/comments/コメント）のみのヒットは除外判定しない
+            # コメント系に該当する語から generic を除外して強いシグナルのみで判定
             generic_tokens = {"comment", "comments", "コメント"}
-            if all(tok in generic_tokens for tok in matched):
-                return False
-
-            # 問い合わせ語と共存していても、強いコメント語（generic以外）が含まれる場合は除外
-            return True
+            strong_kws = [
+                str(k).lower() for k in self.comment_exclusion_keywords
+                if str(k).lower() not in generic_tokens
+            ]
+            if any(k in haystack_norm for k in strong_kws):
+                return True
+            return False
         except Exception:
             return False
 
