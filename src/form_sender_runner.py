@@ -1259,6 +1259,23 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
             except Exception:
                 idle_limit = 900
             last_work_ts = _time.time()
+            # --- 大量並列時の空シャード対策（全シャードプローブ + シャードローテーション） ---
+            try:
+                rcfg = get_worker_config().get('runner', {})
+                shard_num = int(rcfg.get('shard_num', 8))
+                shard_rotation_enabled = bool(rcfg.get('shard_rotation_enabled', True))
+                no_work_probe_seconds = int(rcfg.get('shard_no_work_probe_seconds', 45))
+                unsharded_probe_attempts = int(rcfg.get('shard_unsharded_probe_attempts', 1))
+                shard_rotation_strategy = str(rcfg.get('shard_rotation_strategy', 'sequential'))
+            except Exception:
+                shard_num = 8
+                shard_rotation_enabled = True
+                no_work_probe_seconds = 45
+                unsharded_probe_attempts = 1
+                shard_rotation_strategy = 'sequential'
+
+            current_shard_id = shard_id  # ループ中に動的に変更可能な shard_id
+            no_work_start_ts: Optional[float] = None
             # 取り残し再配布の定期実行（worker_id=0 のみ）
             try:
                 runner_cfg = get_worker_config().get('runner', {})
@@ -1319,7 +1336,9 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                             return
                     except Exception as e:
                         logger.warning(f"daily cap check failed: {e}")
-                had_work = await _process_one(supabase, worker, targeting_id, client_data, target_date, run_id, shard_id, fixed_company_id)
+                had_work = await _process_one(
+                    supabase, worker, targeting_id, client_data, target_date, run_id, current_shard_id, fixed_company_id
+                )
                 if not had_work:
                     # ジッター付き指数バックオフ（コンボイ緩和）
                     try:
@@ -1328,6 +1347,52 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                         jitter_ratio = 0.2
                     jitter = backoff * jitter_ratio
                     sleep_for = max(0.1, backoff + random.uniform(-jitter, jitter))
+                    # まずは既定のスリープ前に、空シャード対策のフォールバックを評価
+                    now_ts = _time.time()
+                    if no_work_start_ts is None:
+                        no_work_start_ts = now_ts
+                    # 指定シャードで一定時間以上無作業なら、全シャードプローブを実施
+                    if (current_shard_id is not None) and (now_ts - no_work_start_ts >= no_work_probe_seconds):
+                        probed = False
+                        try:
+                            attempts = max(1, unsharded_probe_attempts)
+                        except Exception:
+                            attempts = 1
+                        for _ in range(attempts):
+                            ok_any = await _process_one(
+                                supabase, worker, targeting_id, client_data, target_date, run_id, None, fixed_company_id
+                            )
+                            if ok_any:
+                                # 1件でも処理できたら即リセットして継続（シャード固定は維持）
+                                probed = True
+                                last_work_ts = _time.time()
+                                backoff = backoff_initial
+                                no_work_start_ts = None
+                                processed += 1
+                                break
+                        if probed:
+                            # フォールバックで1件処理できた場合はスリープやアイドル判定をスキップして次ループへ
+                            continue
+                        if not probed and shard_rotation_enabled and shard_num > 1:
+                            # シャードをローテーション（シーケンシャルまたは乱択）
+                            prev = current_shard_id
+                            if shard_rotation_strategy == 'random':
+                                try:
+                                    nxt_candidates = [i for i in range(shard_num) if i != (prev or 0)]
+                                    current_shard_id = random.choice(nxt_candidates) if nxt_candidates else prev
+                                except Exception:
+                                    current_shard_id = ((prev or 0) + 1) % shard_num
+                            else:
+                                current_shard_id = ((prev or 0) + 1) % shard_num
+                            try:
+                                _get_lifecycle_logger().info(
+                                    f"shard_rotate: worker_id={worker_id}, targeting_id={targeting_id}, from={prev}, to={current_shard_id}"
+                                )
+                            except Exception:
+                                pass
+                            # 次の試行に備えてタイマーをリセット
+                            no_work_start_ts = now_ts
+
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, backoff_max)
                     # アイドル継続判定
@@ -1344,6 +1409,7 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                     backoff = backoff_initial
                     processed += 1
                     last_work_ts = _time.time()
+                    no_work_start_ts = None
                     # テスト用: 規定数に達したら終了
                     if max_processed is not None and processed >= max_processed:
                         return
