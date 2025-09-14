@@ -985,11 +985,7 @@ class FormDetector:
             if all(tok in generic_tokens for tok in matched):
                 return False
 
-            # 問い合わせ語と共存している場合は除外しない（誤検出防止）
-            if has_general_contact_kw:
-                return False
-
-            # それ以外（例: Leave a Reply / Post Comment / 返信 / respond など）はコメントフォーム候補として除外
+            # 問い合わせ語と共存していても、強いコメント語（generic以外）が含まれる場合は除外
             return True
         except Exception:
             return False
