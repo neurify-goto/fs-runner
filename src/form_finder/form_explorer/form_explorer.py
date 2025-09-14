@@ -18,6 +18,7 @@ from .form_detector import FormDetector
 from .link_scorer import LinkScorer
 from ..utils import is_valid_form_url, get_robust_page_url
 from config.manager import get_form_explorer_config
+from config.manager import get_form_finder_rules
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class FormExplorer:
         self.link_scorer = LinkScorer()
         self.config = FormExplorerConfig()
         self._initialized = False
+        self._neg_keywords_cache: Optional[List[str]] = None
     
     async def initialize(self):
         """探索エンジンの初期化"""
@@ -96,6 +98,27 @@ class FormExplorer:
         except Exception as e:
             logger.error(f"FormExplorer初期化エラー: {e}")
             raise
+
+    def _get_negative_keywords(self) -> List[str]:
+        """リンク/テキストの負キーワード（設定駆動）を取得（小文字化・キャッシュ付）"""
+        if self._neg_keywords_cache is not None:
+            return self._neg_keywords_cache
+        try:
+            rules = get_form_finder_rules()
+            link_ex = rules.get("link_exclusions", {}) if isinstance(rules, dict) else {}
+            kws = [
+                str(k).lower() for k in link_ex.get("exclude_if_text_or_url_contains_any", []) if k
+            ]
+            # セーフティ: 既知のgenericは混入していない想定だが、入っていても無害化
+            generic = {"comment", "comments", "/comment/", "/comments/"}
+            self._neg_keywords_cache = [k for k in kws if k not in generic]
+        except Exception:
+            # フォールバック（安全側に限定的）
+            self._neg_keywords_cache = [
+                '#comment', '#respond', 'leave a reply', 'post comment', 'comment-form', 'commentform',
+                '採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー'
+            ]
+        return self._neg_keywords_cache
 
     async def _dismiss_overlays(self, page: Page):
         """ページ表示時のオーバーレイ/同意バナー/モーダルをできる範囲で閉じる。
@@ -458,9 +481,7 @@ class FormExplorer:
                 raw_links = page_data['content'].get('links', [])
                 cand_url = None
                 keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
-                neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
-                          'コメント', 'leave a reply', 'post comment', '#comment', '#respond',
-                          'comment-form', 'commentform', '/comment/', '/comments/']
+                neg_kw = self._get_negative_keywords()
                 for link in raw_links:
                     hay = ' '.join([
                         str(link.get('text','')),
@@ -541,9 +562,7 @@ class FormExplorer:
         # フォールバック: contact/inquiry系キーワードを強制優先リンクとして追加
         if not all_links:
             keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
-            neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
-                      'コメント', 'leave a reply', 'post comment', '#comment', '#respond',
-                      'comment-form', 'commentform', '/comment/', '/comments/']
+            neg_kw = self._get_negative_keywords()
             fallback_added = 0
             for link in valid_top_links:
                 # text/attrs/href すべてを対象に包含判定
@@ -803,9 +822,7 @@ class FormExplorer:
             return 0
         try:
             keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
-            neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
-                      'コメント', 'leave a reply', 'post comment', '#comment', '#respond',
-                      'comment-form', 'commentform', '/comment/', '/comments/']
+            neg_kw = self._get_negative_keywords()
 
             added = 0
             for link in raw_links:

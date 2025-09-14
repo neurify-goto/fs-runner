@@ -947,9 +947,11 @@ class FormDetector:
     def _is_comment_form(self, form_data: Dict[str, Any]) -> bool:
         """ブログ等のコメントフォームかどうかを簡易判定して除外。
 
-        - フォームID/クラスに comment/respond/reply などが含まれる
-        - 周辺文言/ボタン文言/入力属性に コメント系語彙 が含まれる
-        （一般的な問い合わせ語が含まれていても、コメントは除外対象とする）
+        方針:
+        - 明示的なコメントシグナル（id/class の境界一致: commentform/comment-form/reply/respond 等、
+          もしくは強いテキスト: "Leave a Reply"/"Post Comment"/「コメントを送信」など）があれば、
+          問い合わせ語が併記されていても除外する。
+        - 汎用語（comment/comments/「コメント」）のみの出現は除外しない（英語圏の"Comments"フィールド対策）。
         """
         try:
             # 1) 属性による判定（強いシグナル）

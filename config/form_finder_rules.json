@@ -33,14 +33,10 @@
       "コメント",
       "comment-form",
       "commentform",
-      "/comment/",
-      "/comments/",
       "#comment",
       "#respond",
-      "#reply",
       "leave a reply",
-      "post comment",
-      "add comment"
+      "post comment"
     ]
   },
   "comment_form_exclusion": {
