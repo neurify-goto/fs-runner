@@ -100,7 +100,11 @@ class FormExplorer:
             raise
 
     def _get_negative_keywords(self) -> List[str]:
-        """リンク/テキストの負キーワード（設定駆動）を取得（小文字化・キャッシュ付）"""
+        """リンク/テキストの負キーワード（設定駆動）を取得（小文字化・キャッシュ付）
+
+        P2対策: 設定ファイルの読み込みが成功しても、link_exclusions が欠落/空配列の
+        場合は安全側のデフォルトにフォールバックする。
+        """
         if self._neg_keywords_cache is not None:
             return self._neg_keywords_cache
         try:
@@ -111,7 +115,15 @@ class FormExplorer:
             ]
             # セーフティ: 既知のgenericは混入していない想定だが、入っていても無害化
             generic = {"comment", "comments", "/comment/", "/comments/", "コメント"}
-            self._neg_keywords_cache = [k for k in kws if k not in generic]
+            filtered = [k for k in kws if k not in generic]
+
+            # 取得できたキーワードが空なら、安全側のデフォルトにフォールバック
+            if not filtered:
+                filtered = [
+                    '#comment', '#respond', 'leave a reply', 'post comment', 'comment-form', 'commentform',
+                    '採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー'
+                ]
+            self._neg_keywords_cache = filtered
         except Exception:
             # フォールバック（安全側に限定的）
             self._neg_keywords_cache = [
