@@ -200,7 +200,7 @@ class LinkScorer:
         self.positive_url_patterns = [
             "/contact", "/inquiry", "/form", "/mail", "/support", "/ask", "/contact-us",
             "/toiawase", "/contact-form", "/contactus", "/contact_us",
-            "/support", "/help", "/question", "/inquiry-form",
+            "/help", "/question", "/inquiry-form",
             "/consult", "/consultation", "/demo", "/trial", "/meeting", "/appointment",
             "/estimate", "/quote", "/business-inquiry", "/sales-contact"
         ]
@@ -626,6 +626,8 @@ class LinkScorer:
 
     def _make_cache_key(self, link: Dict[str, Any]) -> str:
         """リンクキャッシュキー生成（URLだけでなくテキスト/属性も考慮）"""
+        # 例外時に未定義参照にならないよう初期化
+        url_key = ''
         try:
             url_key = self._normalize_url_for_cache(link.get('href', ''))
             if not url_key:
@@ -642,6 +644,7 @@ class LinkScorer:
             ]
             return '|'.join(parts)
         except Exception:
+            # 例外発生時はキャッシュキー生成を諦めて空文字を返す（安全側）
             return url_key
     
     def clear_cache(self):
