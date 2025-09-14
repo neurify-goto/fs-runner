@@ -48,6 +48,28 @@ class LinkScorer:
             # 事前正規化（高速化）
             self._excluded_kw_norm: List[str] = [s.lower() for s in self.excluded_link_keywords if s]
 
+            # 設定キーワードをカテゴリ分け
+            self._generic_comment_tokens = {"comment", "comments", "/comment/", "/comments/", "コメント"}
+            self._allowed_comment_tokens = {
+                '#comment', '#respond', 'leave a reply', 'post comment',
+                'comment-form', 'commentform', 'wp-comment', 'wp-comments'
+            }
+
+            def _is_recruitment_like(tok: str) -> bool:
+                return any(k in tok for k in [
+                    '採用', '求人', '応募', '募集', 'エントリー', 'entry',
+                    'recruit', 'recruitment', 'career', 'careers', 'job', 'jobs', 'employment'
+                ])
+
+            # genericやコメント許可トークンを除外しつつ、設定の任意キーワードを分類
+            norm_tokens = [t.strip() for t in self._excluded_kw_norm if isinstance(t, str)]
+            norm_tokens = [t for t in norm_tokens if t and len(t) >= 2]
+            self._config_general_negative = [
+                t for t in norm_tokens
+                if t not in self._generic_comment_tokens and t not in self._allowed_comment_tokens and not _is_recruitment_like(t)
+            ]
+            self._config_recruitment_like = [t for t in norm_tokens if _is_recruitment_like(t)]
+
             # 問い合わせ系ホワイトリスト（URLやテキストにrecruit等を含んでも許可）
             rec = rules.get("recruitment_only_exclusion", {}) if isinstance(rules, dict) else {}
             self.general_contact_whitelist_keywords: List[str] = [
@@ -88,6 +110,24 @@ class LinkScorer:
                 ]
             except re.error:
                 self._comment_specific_patterns = []
+            # フォールバック時もカテゴリ分け（最小限）
+            self._generic_comment_tokens = {"comment", "comments", "/comment/", "/comments/", "コメント"}
+            self._allowed_comment_tokens = {
+                '#comment', '#respond', 'leave a reply', 'post comment',
+                'comment-form', 'commentform', 'wp-comment', 'wp-comments'
+            }
+            def _is_recruitment_like(tok: str) -> bool:
+                return any(k in tok for k in [
+                    '採用', '求人', '応募', '募集', 'エントリー', 'entry',
+                    'recruit', 'recruitment', 'career', 'careers', 'job', 'jobs', 'employment'
+                ])
+            norm_tokens = [t.strip() for t in self._excluded_kw_norm if isinstance(t, str)]
+            norm_tokens = [t for t in norm_tokens if t and len(t) >= 2]
+            self._config_general_negative = [
+                t for t in norm_tokens
+                if t not in self._generic_comment_tokens and t not in self._allowed_comment_tokens and not _is_recruitment_like(t)
+            ]
+            self._config_recruitment_like = [t for t in norm_tokens if _is_recruitment_like(t)]
             self._general_kw_norm = [s.lower() for s in ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry"]]
         
         # スコア設定値（ハードコード）
@@ -243,7 +283,11 @@ class LinkScorer:
             if any(tok in haystack_norm for tok in phrase_tokens):
                 return True
 
-            # 一般的な問い合わせキーワードが含まれていればホワイトリストで許可
+            # 設定由来の一般的な負キーワード（ログイン/ダウンロード等）はホワイトリスト対象外で除外
+            if any(tok in haystack_norm for tok in getattr(self, '_config_general_negative', [])):
+                return True
+
+            # 一般的な問い合わせキーワードが含まれていればホワイトリストで許可（主に採用系を想定）
             if any(k in haystack_norm for k in self._general_kw_norm):
                 return False
 
@@ -251,9 +295,12 @@ class LinkScorer:
             recruitment_tokens = [
                 "採用", "求人", "応募", "募集", "エントリー", "recruit", "recruitment", "career", "careers", "job", "jobs", "employment"
             ]
-            if any(tok in haystack_norm for tok in recruitment_tokens):
+            recruitment_all = set(recruitment_tokens) | set(getattr(self, '_config_recruitment_like', []))
+            if any(tok in haystack_norm for tok in recruitment_all):
                 return True
 
+            # その他は除外しない
+            
             return False
         except Exception:
             # 例外時は保守的に除外しない
