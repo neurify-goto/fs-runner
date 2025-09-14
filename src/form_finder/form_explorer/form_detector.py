@@ -7,6 +7,7 @@ GitHub Actions対応フォーム検出クラス（本家準拠版）
 """
 
 import logging
+import re
 from typing import List, Dict, Any, Optional
 from config.manager import get_form_finder_rules
 from form_sender.security.log_sanitizer import sanitize_for_log
@@ -81,6 +82,29 @@ class FormDetector:
             self.form_ng_keywords: List[str] = [
                 str(k) for k in form_validation.get("ng_keywords_any", []) if k
             ]
+
+            # コメントフォーム除外（設定ファイル駆動）
+            cmt = rules.get("comment_form_exclusion", {})
+            self.comment_exclusion_keywords: List[str] = [
+                str(k) for k in cmt.get("exclude_if_keywords_present_any", []) if k
+            ] or [
+                "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment"
+            ]
+            self.comment_attr_keywords: List[str] = [
+                str(k) for k in cmt.get("exclude_if_form_attributes_contains_any", []) if k
+            ] or [
+                "commentform", "comment-form", "comment-submit", "commenttextarea", "comment-textarea",
+                "comment-author", "comment-url", "reply-form", "respond"
+            ]
+            # 属性判定は単語境界/ハイフン/アンダースコアでの区切りを要求（誤検出対策: document など）
+            try:
+                safe_attr_keywords = list(self.comment_attr_keywords)
+                self._comment_attr_patterns = [
+                    re.compile(rf"(^|[\s\-_]){re.escape(tok.lower())}($|[\s\-_])") for tok in safe_attr_keywords
+                ]
+            except re.error as e:
+                logger.warning(f"Invalid regex for comment attribute patterns: {e}")
+                self._comment_attr_patterns = []
         except Exception:
             # 設定読み込み失敗時のフォールバック（保守的に同じ規則を適用）
             self.recruitment_exclusion_keywords = ["学歴", "大学", "出身", "経歴"]
@@ -88,6 +112,16 @@ class FormDetector:
                 "お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"
             ]
             self.form_ng_keywords = []
+            self.comment_exclusion_keywords = [
+                "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment"
+            ]
+            self.comment_attr_keywords = [
+                "commentform", "comment-form", "comment-submit", "commenttextarea", "comment-textarea",
+                "comment-author", "comment-url", "reply-form", "respond"
+            ]
+            self._comment_attr_patterns = [
+                re.compile(rf"(^|[\s\-_]){re.escape(tok.lower())}($|[\s\-_])") for tok in self.comment_attr_keywords
+            ]
 
     async def find_and_validate_forms(self, page: Page, html_content: str) -> List[Dict[str, Any]]:
         """ページ内のフォームを発見・検証（本家準拠版）"""
@@ -885,6 +919,11 @@ class FormDetector:
                 logger.debug("ログインフォームのため除外")
                 return False
 
+            # 3.2 コメントフォーム除外（ブログ等）
+            if self._is_comment_form(form_data):
+                logger.debug("コメントフォームと推定のため除外")
+                return False
+
             # 3.5 採用専用フォームの除外（周辺テキスト・ボタン文言で判定）
             if self._is_recruitment_only_form(form_data):
                 logger.debug("採用専用フォームと推定のため除外")
@@ -906,6 +945,68 @@ class FormDetector:
             
         except Exception as e:
             logger.error(f"フォーム品質チェックエラー: {e}")
+            return False
+
+    def _is_comment_form(self, form_data: Dict[str, Any]) -> bool:
+        """ブログ等のコメントフォームかどうかを簡易判定して除外。
+
+        方針:
+        - 明示的なコメントシグナル（id/class の境界一致: commentform/comment-form/reply/respond 等、
+          もしくは強いテキスト: "Leave a Reply"/"Post Comment"/「コメントを送信」など）があれば、
+          問い合わせ語が併記されていても除外する。
+        - 汎用語（comment/comments/「コメント」）のみの出現は除外しない（英語圏の"Comments"フィールド対策）。
+        """
+        try:
+            # 1) 属性による判定（強いシグナル）
+            form_id = (form_data.get('formId') or form_data.get('form_id') or '').lower()
+            form_class = (form_data.get('formClass') or form_data.get('form_class') or '').lower()
+            attr_hay = f"{form_id} {form_class}"
+            # 単純部分一致ではなく境界を考慮（document 等を誤検出しない）
+            if any(p.search(attr_hay) for p in self._comment_attr_patterns):
+                return True
+
+            # 2) 周辺テキスト/ボタン文言
+            surrounding = (
+                form_data.get('surroundingText')
+                or form_data.get('surrounding_text')
+                or ''
+            )
+            button_texts = ' '.join((btn.get('text', '') or '') for btn in form_data.get('buttons', []) )
+            texts = [surrounding, button_texts]
+
+            # 3) 入力フィールドの placeholder/name/id
+            for inp in form_data.get('inputs', []) or []:
+                texts.append(inp.get('placeholder') or '')
+                texts.append(inp.get('name') or '')
+                texts.append(inp.get('id') or '')
+
+            haystack_norm = ' '.join(texts).lower()
+
+            # 問い合わせ語（一般）を抽出（共存時は除外しない方針）
+            try:
+                general_kws_norm = [str(k).lower() for k in getattr(self, 'general_contact_whitelist_keywords', []) if k]
+            except Exception:
+                general_kws_norm = ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"]
+            has_general_contact_kw = any(k in haystack_norm for k in general_kws_norm)
+
+            # コメント系に該当する語から generic を除外して強いシグナルのみで判定
+            generic_tokens = {"comment", "comments", "コメント"}
+            strong_kws = [
+                str(k).lower() for k in self.comment_exclusion_keywords
+                if str(k).lower() not in generic_tokens
+            ]
+
+            # 問い合わせ語が併記されるケースでは、より強いフレーズのみで除外
+            very_strong_kws = [
+                "leave a reply", "post comment", "コメントを送信", "コメント投稿", "コメントする"
+            ]
+
+            if has_general_contact_kw:
+                return any(k in haystack_norm for k in very_strong_kws)
+
+            # 通常は strong_kws のいずれかで除外
+            return any(k in haystack_norm for k in strong_kws)
+        except Exception:
             return False
 
     def _count_text_inputs(self, inputs: List[Dict[str, Any]]) -> int:

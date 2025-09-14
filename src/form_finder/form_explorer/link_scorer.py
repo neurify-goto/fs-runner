@@ -7,6 +7,7 @@ GitHub Actions環境に最適化したバージョン。
 """
 
 import logging
+import re
 from typing import List, Dict, Any, Tuple
 from urllib.parse import urlparse
 
@@ -36,12 +37,38 @@ class LinkScorer:
                         "採用", "求人", "応募", "募集", "エントリー", "新卒", "中途", "キャリア",
                         # 英語系
                         "recruit", "recruitment", "career", "careers", "job", "jobs", "employment",
+                        # コメント系（強シグナルのみ）
+                        "comment-form", "commentform", "wp-comment", "wp-comments",
+                        "#comment", "#respond", "leave a reply", "post comment",
+                        "コメントを送信", "コメント投稿", "コメントする",
                     ],
                 )
                 if k
             ]
             # 事前正規化（高速化）
             self._excluded_kw_norm: List[str] = [s.lower() for s in self.excluded_link_keywords if s]
+
+            # 設定キーワードをカテゴリ分け
+            self._generic_comment_tokens = {"comment", "comments", "/comment/", "/comments/", "コメント"}
+            self._allowed_comment_tokens = {
+                '#comment', '#respond', 'leave a reply', 'post comment',
+                'comment-form', 'commentform', 'wp-comment', 'wp-comments'
+            }
+
+            def _is_recruitment_like(tok: str) -> bool:
+                return any(k in tok for k in [
+                    '採用', '求人', '応募', '募集', 'エントリー', 'entry',
+                    'recruit', 'recruitment', 'career', 'careers', 'job', 'jobs', 'employment'
+                ])
+
+            # genericやコメント許可トークンを除外しつつ、設定の任意キーワードを分類
+            norm_tokens = [t.strip() for t in self._excluded_kw_norm if isinstance(t, str)]
+            norm_tokens = [t for t in norm_tokens if t and len(t) >= 2]
+            self._config_general_negative = [
+                t for t in norm_tokens
+                if t not in self._generic_comment_tokens and t not in self._allowed_comment_tokens and not _is_recruitment_like(t)
+            ]
+            self._config_recruitment_like = [t for t in norm_tokens if _is_recruitment_like(t)]
 
             # 問い合わせ系ホワイトリスト（URLやテキストにrecruit等を含んでも許可）
             rec = rules.get("recruitment_only_exclusion", {}) if isinstance(rules, dict) else {}
@@ -52,12 +79,55 @@ class LinkScorer:
                 ) if k
             ]
             self._general_kw_norm: List[str] = [s.lower() for s in self.general_contact_whitelist_keywords if s]
+            # コメント系境界パターン（部分一致の誤検出を防止: document など）
+            try:
+                comment_tokens_attr = [
+                    "comment-form", "commentform", "wp-comment", "wp-comments",
+                ]
+                # 単語境界/非英数/アンダースコア/ハイフンを境界として許可
+                self._comment_specific_patterns = [
+                    re.compile(rf"(^|[\s\W_]){re.escape(tok)}($|[\s\W_])", re.IGNORECASE)
+                    for tok in comment_tokens_attr
+                ]
+            except re.error:
+                self._comment_specific_patterns = []
         except Exception:
             # フォールバック（安全側）
             self.excluded_link_keywords = [
                 "採用", "求人", "応募", "募集", "エントリー", "recruit", "careers", "job",
+                "comment-form", "commentform", "wp-comment", "wp-comments",
+                "#comment", "#respond", "leave a reply", "post comment",
+                "コメントを送信", "コメント投稿", "コメントする",
             ]
             self._excluded_kw_norm = [s.lower() for s in self.excluded_link_keywords]
+            try:
+                comment_tokens_attr = [
+                    "comment-form", "commentform", "wp-comment", "wp-comments",
+                ]
+                self._comment_specific_patterns = [
+                    re.compile(rf"(^|[\s\W_]){re.escape(tok)}($|[\s\W_])", re.IGNORECASE)
+                    for tok in comment_tokens_attr
+                ]
+            except re.error:
+                self._comment_specific_patterns = []
+            # フォールバック時もカテゴリ分け（最小限）
+            self._generic_comment_tokens = {"comment", "comments", "/comment/", "/comments/", "コメント"}
+            self._allowed_comment_tokens = {
+                '#comment', '#respond', 'leave a reply', 'post comment',
+                'comment-form', 'commentform', 'wp-comment', 'wp-comments'
+            }
+            def _is_recruitment_like(tok: str) -> bool:
+                return any(k in tok for k in [
+                    '採用', '求人', '応募', '募集', 'エントリー', 'entry',
+                    'recruit', 'recruitment', 'career', 'careers', 'job', 'jobs', 'employment'
+                ])
+            norm_tokens = [t.strip() for t in self._excluded_kw_norm if isinstance(t, str)]
+            norm_tokens = [t for t in norm_tokens if t and len(t) >= 2]
+            self._config_general_negative = [
+                t for t in norm_tokens
+                if t not in self._generic_comment_tokens and t not in self._allowed_comment_tokens and not _is_recruitment_like(t)
+            ]
+            self._config_recruitment_like = [t for t in norm_tokens if _is_recruitment_like(t)]
             self._general_kw_norm = [s.lower() for s in ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry"]]
         
         # スコア設定値（ハードコード）
@@ -130,7 +200,7 @@ class LinkScorer:
         self.positive_url_patterns = [
             "/contact", "/inquiry", "/form", "/mail", "/support", "/ask", "/contact-us",
             "/toiawase", "/contact-form", "/contactus", "/contact_us",
-            "/support", "/help", "/question", "/inquiry-form",
+            "/help", "/question", "/inquiry-form",
             "/consult", "/consultation", "/demo", "/trial", "/meeting", "/appointment",
             "/estimate", "/quote", "/business-inquiry", "/sales-contact"
         ]
@@ -174,9 +244,11 @@ class LinkScorer:
         self.dom_index_counter = 0  # DOM順序カウンター
 
     def _is_excluded_link(self, link: Dict[str, Any]) -> bool:
-        """設定ベースのNGキーワードに該当するリンクを除外する。
+        """設定ベースのNGキーワードに該当するリンクを除外。
 
-        テキストとURLの双方を対象に大小文字無視で部分一致判定を行う。
+        - 一般問い合わせ語が含まれる場合は許可（ホワイトリスト）
+        - コメント系は境界性の高いトークン（#comment、comment-form など）のみに限定
+        - 採用系は部分一致でも安全のため従来通り
         """
         try:
             text = (link.get("text") or "").lower()
@@ -186,11 +258,53 @@ class LinkScorer:
             href = (link.get("href") or "").lower()
             haystack_norm = " ".join([text, title, aria, alt, href])
 
-            # 一般的な問い合わせキーワードが含まれていればホワイトリストで許可
+            # コメント系の厳密判定（問い合わせ語より優先して除外）
+            from urllib.parse import urlparse
+            parsed = urlparse(href)
+            frag = (parsed.fragment or "").lower()
+            path = (parsed.path or "").lower()
+
+            # #comment / #respond などのフラグメント（厳密一致 + 一般的なサフィックス形式）
+            # 例: #comment-5, #comments-123, #respond-42 など
+            if frag in {"comment", "comments", "respond"}:
+                return True
+            if re.match(r"^(comment|comments|respond)([-_].+|\d.*)$", frag):
+                return True
+
+            # /comment/ /comments/ などのパスセグメント（単語境界扱い）
+            if re.search(r"(^|/)(comment|comments)(/|$)", path):
+                return True
+
+            # 属性風のトークン（境界考慮）
+            if any(p.search(haystack_norm) for p in getattr(self, "_comment_specific_patterns", [])):
+                return True
+
+            # フレーズ系（安全性が高いので部分一致でOK）
+            phrase_tokens = [
+                "leave a reply", "post comment", "コメントを送信", "コメント投稿", "コメントする",
+            ]
+            if any(tok in haystack_norm for tok in phrase_tokens):
+                return True
+
+            # 設定由来の一般的な負キーワード（ログイン/ダウンロード等）はホワイトリスト対象外で除外
+            if any(tok in haystack_norm for tok in getattr(self, '_config_general_negative', [])):
+                return True
+
+            # 一般的な問い合わせキーワードが含まれていればホワイトリストで許可（主に採用系を想定）
             if any(k in haystack_norm for k in self._general_kw_norm):
                 return False
 
-            return any(kw in haystack_norm for kw in self._excluded_kw_norm)
+            # 採用/応募などは従来通り（部分一致）
+            recruitment_tokens = [
+                "採用", "求人", "応募", "募集", "エントリー", "recruit", "recruitment", "career", "careers", "job", "jobs", "employment"
+            ]
+            recruitment_all = set(recruitment_tokens) | set(getattr(self, '_config_recruitment_like', []))
+            if any(tok in haystack_norm for tok in recruitment_all):
+                return True
+
+            # その他は除外しない
+            
+            return False
         except Exception:
             # 例外時は保守的に除外しない
             return False
@@ -515,6 +629,8 @@ class LinkScorer:
 
     def _make_cache_key(self, link: Dict[str, Any]) -> str:
         """リンクキャッシュキー生成（URLだけでなくテキスト/属性も考慮）"""
+        # 例外時に未定義参照にならないよう初期化
+        url_key = ''
         try:
             url_key = self._normalize_url_for_cache(link.get('href', ''))
             if not url_key:
@@ -531,6 +647,7 @@ class LinkScorer:
             ]
             return '|'.join(parts)
         except Exception:
+            # 例外発生時はキャッシュキー生成を諦めて空文字を返す（安全側）
             return url_key
     
     def clear_cache(self):
