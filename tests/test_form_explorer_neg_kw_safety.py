@@ -22,18 +22,19 @@ if "playwright.async_api" not in sys.modules:
     sys.modules["playwright"] = pw
     sys.modules["playwright.async_api"] = async_api
 
-from form_finder.form_explorer.form_explorer import FormExplorer
 import importlib
 
 
 def test_negative_keywords_fallback_when_empty(monkeypatch):
     # link_exclusions が空配列
     import form_finder.form_explorer.form_explorer as fe
+    import config.manager as cm
 
     def fake_rules():
         return {"link_exclusions": {"exclude_if_text_or_url_contains_any": []}}
 
-    monkeypatch.setattr(fe, "get_form_finder_rules", fake_rules)
+    # reload 前に config.manager 側を差し替え、再インポート時の再束縛でも偽関数が適用されるようにする
+    monkeypatch.setattr(cm, "get_form_finder_rules", fake_rules)
     importlib.reload(fe)
 
     explorer = fe.FormExplorer()
@@ -46,6 +47,7 @@ def test_negative_keywords_fallback_when_empty(monkeypatch):
 def test_negative_keywords_sanitizes_generic_comment(monkeypatch):
     # generic 'comment' が設定に含まれても除去
     import form_finder.form_explorer.form_explorer as fe
+    import config.manager as cm
 
     def fake_rules():
         return {
@@ -54,11 +56,11 @@ def test_negative_keywords_sanitizes_generic_comment(monkeypatch):
             }
         }
 
-    monkeypatch.setattr(fe, "get_form_finder_rules", fake_rules)
+    # reload 前に config.manager 側を差し替え
+    monkeypatch.setattr(cm, "get_form_finder_rules", fake_rules)
     importlib.reload(fe)
 
     explorer = fe.FormExplorer()
     neg = explorer._get_negative_keywords()
     assert "comment" not in neg and "comments" not in neg and "/comment/" not in neg
     assert "採用" in neg and "求人" in neg
-
