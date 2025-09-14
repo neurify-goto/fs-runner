@@ -32,10 +32,15 @@
       "employment",
       "comment-form",
       "commentform",
+      "wp-comment",
+      "wp-comments",
       "#comment",
       "#respond",
       "leave a reply",
-      "post comment"
+      "post comment",
+      "コメントを送信",
+      "コメント投稿",
+      "コメントする"
     ]
   },
   "comment_form_exclusion": {
@@ -55,7 +60,9 @@
       "comment-author",
       "comment-url",
       "reply-form",
-      "respond"
+      "respond",
+      "wp-comment",
+      "wp-comments"
     ]
   },
   "form_validation": {

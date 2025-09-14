@@ -36,6 +36,10 @@ class LinkScorer:
                         "採用", "求人", "応募", "募集", "エントリー", "新卒", "中途", "キャリア",
                         # 英語系
                         "recruit", "recruitment", "career", "careers", "job", "jobs", "employment",
+                        # コメント系（強シグナルのみ）
+                        "comment-form", "commentform", "wp-comment", "wp-comments",
+                        "#comment", "#respond", "leave a reply", "post comment",
+                        "コメントを送信", "コメント投稿", "コメントする",
                     ],
                 )
                 if k
@@ -56,6 +60,9 @@ class LinkScorer:
             # フォールバック（安全側）
             self.excluded_link_keywords = [
                 "採用", "求人", "応募", "募集", "エントリー", "recruit", "careers", "job",
+                "comment-form", "commentform", "wp-comment", "wp-comments",
+                "#comment", "#respond", "leave a reply", "post comment",
+                "コメントを送信", "コメント投稿", "コメントする",
             ]
             self._excluded_kw_norm = [s.lower() for s in self.excluded_link_keywords]
             self._general_kw_norm = [s.lower() for s in ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry"]]
@@ -174,9 +181,11 @@ class LinkScorer:
         self.dom_index_counter = 0  # DOM順序カウンター
 
     def _is_excluded_link(self, link: Dict[str, Any]) -> bool:
-        """設定ベースのNGキーワードに該当するリンクを除外する。
+        """設定ベースのNGキーワードに該当するリンクを除外。
 
-        テキストとURLの双方を対象に大小文字無視で部分一致判定を行う。
+        - 一般問い合わせ語が含まれる場合は許可（ホワイトリスト）
+        - コメント系は境界性の高いトークン（#comment、comment-form など）のみに限定
+        - 採用系は部分一致でも安全のため従来通り
         """
         try:
             text = (link.get("text") or "").lower()
@@ -190,7 +199,31 @@ class LinkScorer:
             if any(k in haystack_norm for k in self._general_kw_norm):
                 return False
 
-            return any(kw in haystack_norm for kw in self._excluded_kw_norm)
+            # コメント系の厳密判定
+            from urllib.parse import urlparse
+            parsed = urlparse(href)
+            frag = (parsed.fragment or "").lower()
+            path = (parsed.path or "").lower()
+
+            comment_anchor_tokens = {"#comment", "#respond"}
+            if any(tok in href for tok in comment_anchor_tokens):
+                return True
+
+            comment_specific_tokens = [
+                "comment-form", "commentform", "wp-comment", "wp-comments",
+                "leave a reply", "post comment", "コメントを送信", "コメント投稿", "コメントする",
+            ]
+            if any(tok in haystack_norm for tok in comment_specific_tokens):
+                return True
+
+            # 採用/応募などは従来通り（部分一致）
+            recruitment_tokens = [
+                "採用", "求人", "応募", "募集", "エントリー", "recruit", "recruitment", "career", "careers", "job", "jobs", "employment"
+            ]
+            if any(tok in haystack_norm for tok in recruitment_tokens):
+                return True
+
+            return False
         except Exception:
             # 例外時は保守的に除外しない
             return False
