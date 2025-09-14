@@ -50,17 +50,28 @@ class ConfigManager:
     def get_form_finder_rules(self) -> Dict[str, Any]:
         """Form-Finder固有のフィルタ/除外ルールを取得"""
         try:
-            return self._load_config("form_finder_rules.json")
-        except Exception:
-            # 最小限のフォールバック（厳密には設定ファイルが望ましい）
-            return {
-                "recruitment_only_exclusion": {
-                    "exclude_if_keywords_present_any": ["学歴", "大学", "出身", "経歴"],
-                    "allow_if_general_contact_keywords_any": [
-                        "お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"
-                    ],
-                }
+            cfg = self._load_config("form_finder_rules.json")
+            # かんたんな構造検証（致命的ではないためWarningに留める）
+            if not isinstance(cfg, dict):
+                raise ValueError("form_finder_rules must be a dict")
+            return cfg
+        except (FileNotFoundError, ValueError) as e:
+            logging.getLogger(__name__).warning(
+                f"form_finder_rules fallback due to config issue: {e}"
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"form_finder_rules fallback due to unexpected error: {e}"
+            )
+        # 最小限のフォールバック（厳密には設定ファイルが望ましい）
+        return {
+            "recruitment_only_exclusion": {
+                "exclude_if_keywords_present_any": ["学歴", "大学", "出身", "経歴"],
+                "allow_if_general_contact_keywords_any": [
+                    "お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"
+                ],
             }
+        }
     
     def get_retry_setting(self, operation_type: str) -> Dict[str, Any]:
         """特定の操作タイプのリトライ設定を取得

@@ -40,21 +40,11 @@
   },
   "comment_form_exclusion": {
     "exclude_if_keywords_present_any": [
-      "コメント",
       "コメントを送信",
       "コメントする",
       "コメント投稿",
-      "コメントを書く",
-      "返信",
-      "リプライ",
-      "トラックバック",
-      "ピンバック",
       "Leave a Reply",
-      "Post Comment",
-      "Add Comment",
-      "Leave a Comment",
-      "Write a comment",
-      "Discussion"
+      "Post Comment"
     ],
     "exclude_if_form_attributes_contains_any": [
       "commentform",

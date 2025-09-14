@@ -88,8 +88,7 @@ class FormDetector:
             self.comment_exclusion_keywords: List[str] = [
                 str(k) for k in cmt.get("exclude_if_keywords_present_any", []) if k
             ] or [
-                "コメント", "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment",
-                "Add Comment", "reply", "respond", "comment"
+                "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment"
             ]
             self.comment_attr_keywords: List[str] = [
                 str(k) for k in cmt.get("exclude_if_form_attributes_contains_any", []) if k
@@ -98,9 +97,14 @@ class FormDetector:
                 "comment-author", "comment-url", "reply-form", "respond"
             ]
             # 属性判定は単語境界/ハイフン/アンダースコアでの区切りを要求（誤検出対策: document など）
-            self._comment_attr_patterns = [
-                re.compile(rf"(^|[\s\-_]){re.escape(tok.lower())}($|[\s\-_])") for tok in self.comment_attr_keywords
-            ]
+            try:
+                safe_attr_keywords = list(self.comment_attr_keywords)
+                self._comment_attr_patterns = [
+                    re.compile(rf"(^|[\s\-_]){re.escape(tok.lower())}($|[\s\-_])") for tok in safe_attr_keywords
+                ]
+            except re.error as e:
+                logger.warning(f"Invalid regex for comment attribute patterns: {e}")
+                self._comment_attr_patterns = []
         except Exception:
             # 設定読み込み失敗時のフォールバック（保守的に同じ規則を適用）
             self.recruitment_exclusion_keywords = ["学歴", "大学", "出身", "経歴"]
@@ -109,8 +113,7 @@ class FormDetector:
             ]
             self.form_ng_keywords = []
             self.comment_exclusion_keywords = [
-                "コメント", "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment",
-                "Add Comment", "reply", "respond"
+                "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment"
             ]
             self.comment_attr_keywords = [
                 "commentform", "comment-form", "comment-submit", "commenttextarea", "comment-textarea",
@@ -992,9 +995,17 @@ class FormDetector:
                 str(k).lower() for k in self.comment_exclusion_keywords
                 if str(k).lower() not in generic_tokens
             ]
-            if any(k in haystack_norm for k in strong_kws):
-                return True
-            return False
+
+            # 問い合わせ語が併記されるケースでは、より強いフレーズのみで除外
+            very_strong_kws = [
+                "leave a reply", "post comment", "コメントを送信", "コメント投稿", "コメントする"
+            ]
+
+            if has_general_contact_kw:
+                return any(k in haystack_norm for k in very_strong_kws)
+
+            # 通常は strong_kws のいずれかで除外
+            return any(k in haystack_norm for k in strong_kws)
         except Exception:
             return False
 
