@@ -213,3 +213,6 @@ tests/tmp/*
 
 # Local Python venv
 .venv*/
+
+# Local agent files
+.serena/
