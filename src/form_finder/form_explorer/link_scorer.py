@@ -7,6 +7,7 @@ GitHub Actions環境に最適化したバージョン。
 """
 
 import logging
+import re
 from typing import List, Dict, Any, Tuple
 from urllib.parse import urlparse
 
@@ -56,6 +57,18 @@ class LinkScorer:
                 ) if k
             ]
             self._general_kw_norm: List[str] = [s.lower() for s in self.general_contact_whitelist_keywords if s]
+            # コメント系境界パターン（部分一致の誤検出を防止: document など）
+            try:
+                comment_tokens_attr = [
+                    "comment-form", "commentform", "wp-comment", "wp-comments",
+                ]
+                # 単語境界/非英数/アンダースコア/ハイフンを境界として許可
+                self._comment_specific_patterns = [
+                    re.compile(rf"(^|[\s\W_]){re.escape(tok)}($|[\s\W_])", re.IGNORECASE)
+                    for tok in comment_tokens_attr
+                ]
+            except re.error:
+                self._comment_specific_patterns = []
         except Exception:
             # フォールバック（安全側）
             self.excluded_link_keywords = [
@@ -65,6 +78,16 @@ class LinkScorer:
                 "コメントを送信", "コメント投稿", "コメントする",
             ]
             self._excluded_kw_norm = [s.lower() for s in self.excluded_link_keywords]
+            try:
+                comment_tokens_attr = [
+                    "comment-form", "commentform", "wp-comment", "wp-comments",
+                ]
+                self._comment_specific_patterns = [
+                    re.compile(rf"(^|[\s\W_]){re.escape(tok)}($|[\s\W_])", re.IGNORECASE)
+                    for tok in comment_tokens_attr
+                ]
+            except re.error:
+                self._comment_specific_patterns = []
             self._general_kw_norm = [s.lower() for s in ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry"]]
         
         # スコア設定値（ハードコード）
@@ -205,15 +228,23 @@ class LinkScorer:
             frag = (parsed.fragment or "").lower()
             path = (parsed.path or "").lower()
 
-            comment_anchor_tokens = {"#comment", "#respond"}
-            if any(tok in href for tok in comment_anchor_tokens):
+            # #comment / #respond などのフラグメント（厳密一致）
+            if frag in {"comment", "comments", "respond"}:
                 return True
 
-            comment_specific_tokens = [
-                "comment-form", "commentform", "wp-comment", "wp-comments",
+            # /comment/ /comments/ などのパスセグメント（単語境界扱い）
+            if re.search(r"(^|/)(comment|comments)(/|$)", path):
+                return True
+
+            # 属性風のトークン（境界考慮）
+            if any(p.search(haystack_norm) for p in getattr(self, "_comment_specific_patterns", [])):
+                return True
+
+            # フレーズ系（安全性が高いので部分一致でOK）
+            phrase_tokens = [
                 "leave a reply", "post comment", "コメントを送信", "コメント投稿", "コメントする",
             ]
-            if any(tok in haystack_norm for tok in comment_specific_tokens):
+            if any(tok in haystack_norm for tok in phrase_tokens):
                 return True
 
             # 採用/応募などは従来通り（部分一致）

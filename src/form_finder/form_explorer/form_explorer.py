@@ -115,7 +115,22 @@ class FormExplorer:
             ]
             # セーフティ: 既知のgenericは混入していない想定だが、入っていても無害化
             generic = {"comment", "comments", "/comment/", "/comments/", "コメント"}
-            filtered = [k for k in kws if k not in generic]
+            # 文字列・トリム・最小長・generic排除
+            filtered_base = [k.strip() for k in kws if isinstance(k, str)]
+            filtered = [k for k in filtered_base if k and len(k) >= 2 and k not in generic]
+
+            # コメント系の危険な一般語をさらに除去（ホワイトリストのみ許可）
+            allowed_comment_tokens = {
+                '#comment', '#respond', 'leave a reply', 'post comment', 'comment-form', 'commentform',
+                'wp-comment', 'wp-comments'
+            }
+            safe_filtered = []
+            for k in filtered:
+                if 'comment' in k and k not in allowed_comment_tokens:
+                    # 誤除外を防ぐため除外（例: 'document', 'comments policy' など）
+                    continue
+                safe_filtered.append(k)
+            filtered = safe_filtered
 
             # 取得できたキーワードが空なら、安全側のデフォルトにフォールバック
             if not filtered:
