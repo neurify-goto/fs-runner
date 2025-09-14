@@ -965,9 +965,32 @@ class FormDetector:
                 texts.append(inp.get('id') or '')
 
             haystack_norm = ' '.join(texts).lower()
-            if any(str(k).lower() in haystack_norm for k in self.comment_exclusion_keywords if k):
-                return True
-            return False
+
+            # 問い合わせ語（一般）を抽出（共存時は除外しない方針）
+            try:
+                general_kws_norm = [str(k).lower() for k in getattr(self, 'general_contact_whitelist_keywords', []) if k]
+            except Exception:
+                general_kws_norm = ["お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"]
+            has_general_contact_kw = any(k in haystack_norm for k in general_kws_norm)
+
+            # コメント系に該当する語のマッチ集合
+            matched = [
+                str(k).lower() for k in self.comment_exclusion_keywords if str(k).lower() in haystack_norm
+            ]
+            if not matched:
+                return False
+
+            # 汎用語だけ（comment/comments/コメント）のみのヒットは除外判定しない
+            generic_tokens = {"comment", "comments", "コメント"}
+            if all(tok in generic_tokens for tok in matched):
+                return False
+
+            # 問い合わせ語と共存している場合は除外しない（誤検出防止）
+            if has_general_contact_kw:
+                return False
+
+            # それ以外（例: Leave a Reply / Post Comment / 返信 / respond など）はコメントフォーム候補として除外
+            return True
         except Exception:
             return False
 
