@@ -1120,6 +1120,26 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         except Exception:
             pass
 
+        # NO_MESSAGE_AREA 検出時: companies(または companies_extra).black = true を設定
+        # - ランナー分類（classify_detail.code）も含めて NO_MESSAGE_AREA と判定された場合に反映
+        # - DOMにお問い合わせ本文（textarea）が存在しないフォームは以後の送信対象から除外する
+        try:
+            code_val = None
+            try:
+                if isinstance(classify_detail, dict):
+                    code_val = classify_detail.get('code')
+            except Exception:
+                code_val = None
+            if (not is_success) and (
+                (isinstance(error_type, str) and error_type == 'NO_MESSAGE_AREA') or code_val == 'NO_MESSAGE_AREA'
+            ):
+                try:
+                    supabase.table(COMPANY_TABLE).update({'black': True}).eq('id', company_id).execute()
+                except Exception as ue:
+                    logger.warning(f"{COMPANY_TABLE}.black update failed (company_id={company_id}, suppressed): {ue}")
+        except Exception:
+            pass
+
         # Bot保護が検出されている場合は error_type を BOT_DETECTED に寄せる（優先）
         if not is_success:
             try:
