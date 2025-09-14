@@ -24,3 +24,15 @@ def test_comment_phrases_should_be_excluded():
     assert scorer._is_excluded_link({"href": "/post", "text": "Leave a Reply"}) is True
     assert scorer._is_excluded_link({"href": "/post", "text": "Post Comment"}) is True
 
+
+def test_comment_phrases_with_contact_should_still_be_excluded():
+    scorer = LinkScorer()
+    # 問い合わせ語が共存してもコメント系が優先されて除外されるべき
+    link = {"href": "/post", "text": "Contact — Leave a Reply"}
+    assert scorer._is_excluded_link(link) is True
+
+
+def test_comment_fragment_with_contact_should_still_be_excluded():
+    scorer = LinkScorer()
+    link = {"href": "https://example.com/post#comment", "text": "Contact"}
+    assert scorer._is_excluded_link(link) is True

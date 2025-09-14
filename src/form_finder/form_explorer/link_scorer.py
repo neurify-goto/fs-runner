@@ -218,11 +218,7 @@ class LinkScorer:
             href = (link.get("href") or "").lower()
             haystack_norm = " ".join([text, title, aria, alt, href])
 
-            # 一般的な問い合わせキーワードが含まれていればホワイトリストで許可
-            if any(k in haystack_norm for k in self._general_kw_norm):
-                return False
-
-            # コメント系の厳密判定
+            # コメント系の厳密判定（問い合わせ語より優先して除外）
             from urllib.parse import urlparse
             parsed = urlparse(href)
             frag = (parsed.fragment or "").lower()
@@ -246,6 +242,10 @@ class LinkScorer:
             ]
             if any(tok in haystack_norm for tok in phrase_tokens):
                 return True
+
+            # 一般的な問い合わせキーワードが含まれていればホワイトリストで許可
+            if any(k in haystack_norm for k in self._general_kw_norm):
+                return False
 
             # 採用/応募などは従来通り（部分一致）
             recruitment_tokens = [
