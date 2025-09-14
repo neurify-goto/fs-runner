@@ -7,6 +7,7 @@ GitHub Actions対応フォーム検出クラス（本家準拠版）
 """
 
 import logging
+import re
 from typing import List, Dict, Any, Optional
 from config.manager import get_form_finder_rules
 from form_sender.security.log_sanitizer import sanitize_for_log
@@ -93,7 +94,12 @@ class FormDetector:
             self.comment_attr_keywords: List[str] = [
                 str(k) for k in cmt.get("exclude_if_form_attributes_contains_any", []) if k
             ] or [
-                "commentform", "comment-form", "comment", "comments", "respond", "reply", "commenttextarea"
+                "commentform", "comment-form", "comment-submit", "commenttextarea", "comment-textarea",
+                "comment-author", "comment-url", "reply", "reply-form", "respond"
+            ]
+            # 属性判定は単語境界/ハイフン/アンダースコアでの区切りを要求（誤検出対策: document など）
+            self._comment_attr_patterns = [
+                re.compile(rf"(^|[\s\-_]){re.escape(tok.lower())}($|[\s\-_])") for tok in self.comment_attr_keywords
             ]
         except Exception:
             # 設定読み込み失敗時のフォールバック（保守的に同じ規則を適用）
@@ -104,10 +110,14 @@ class FormDetector:
             self.form_ng_keywords = []
             self.comment_exclusion_keywords = [
                 "コメント", "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment",
-                "Add Comment", "reply", "respond", "comment"
+                "Add Comment", "reply", "respond"
             ]
             self.comment_attr_keywords = [
-                "commentform", "comment-form", "comment", "comments", "respond", "reply", "commenttextarea"
+                "commentform", "comment-form", "comment-submit", "commenttextarea", "comment-textarea",
+                "comment-author", "comment-url", "reply", "reply-form", "respond"
+            ]
+            self._comment_attr_patterns = [
+                re.compile(rf"(^|[\s\-_]){re.escape(tok.lower())}($|[\s\-_])") for tok in self.comment_attr_keywords
             ]
 
     async def find_and_validate_forms(self, page: Page, html_content: str) -> List[Dict[str, Any]]:
@@ -946,7 +956,8 @@ class FormDetector:
             form_id = (form_data.get('formId') or form_data.get('form_id') or '').lower()
             form_class = (form_data.get('formClass') or form_data.get('form_class') or '').lower()
             attr_hay = f"{form_id} {form_class}"
-            if any(tok.lower() in attr_hay for tok in self.comment_attr_keywords):
+            # 単純部分一致ではなく境界を考慮（document 等を誤検出しない）
+            if any(p.search(attr_hay) for p in self._comment_attr_patterns):
                 return True
 
             # 2) 周辺テキスト/ボタン文言

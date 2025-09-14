@@ -459,7 +459,8 @@ class FormExplorer:
                 cand_url = None
                 keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
                 neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
-                          'コメント', 'comment', 'comments', 'reply', 'respond']
+                          'コメント', 'leave a reply', 'post comment', '#comment', '#respond',
+                          'comment-form', 'commentform', '/comment/', '/comments/']
                 for link in raw_links:
                     hay = ' '.join([
                         str(link.get('text','')),
@@ -541,7 +542,8 @@ class FormExplorer:
         if not all_links:
             keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
             neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
-                      'コメント', 'comment', 'comments', 'reply', 'respond']
+                      'コメント', 'leave a reply', 'post comment', '#comment', '#respond',
+                      'comment-form', 'commentform', '/comment/', '/comments/']
             fallback_added = 0
             for link in valid_top_links:
                 # text/attrs/href すべてを対象に包含判定
@@ -802,7 +804,8 @@ class FormExplorer:
         try:
             keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
             neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
-                      'コメント', 'comment', 'comments', 'reply', 'respond']
+                      'コメント', 'leave a reply', 'post comment', '#comment', '#respond',
+                      'comment-form', 'commentform', '/comment/', '/comments/']
 
             added = 0
             for link in raw_links:

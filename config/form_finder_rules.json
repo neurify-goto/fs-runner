@@ -31,13 +31,16 @@
       "jobs",
       "employment",
       "コメント",
-      "comment",
-      "comments",
-      "reply",
-      "respond",
+      "comment-form",
+      "commentform",
+      "/comment/",
+      "/comments/",
       "#comment",
       "#respond",
-      "#reply"
+      "#reply",
+      "leave a reply",
+      "post comment",
+      "add comment"
     ]
   },
   "comment_form_exclusion": {
@@ -61,15 +64,14 @@
     "exclude_if_form_attributes_contains_any": [
       "commentform",
       "comment-form",
-      "comment",
-      "comments",
-      "respond",
-      "reply",
-      "reply-form",
       "comment-submit",
       "commenttextarea",
+      "comment-textarea",
       "comment-author",
-      "comment-url"
+      "comment-url",
+      "reply",
+      "reply-form",
+      "respond"
     ]
   },
   "form_validation": {
