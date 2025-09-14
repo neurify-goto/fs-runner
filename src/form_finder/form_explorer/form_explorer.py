@@ -458,7 +458,8 @@ class FormExplorer:
                 raw_links = page_data['content'].get('links', [])
                 cand_url = None
                 keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
-                neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー']
+                neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
+                          'コメント', 'comment', 'comments', 'reply', 'respond']
                 for link in raw_links:
                     hay = ' '.join([
                         str(link.get('text','')),
@@ -539,7 +540,8 @@ class FormExplorer:
         # フォールバック: contact/inquiry系キーワードを強制優先リンクとして追加
         if not all_links:
             keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
-            neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー']
+            neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
+                      'コメント', 'comment', 'comments', 'reply', 'respond']
             fallback_added = 0
             for link in valid_top_links:
                 # text/attrs/href すべてを対象に包含判定
@@ -799,7 +801,8 @@ class FormExplorer:
             return 0
         try:
             keywords = ['お問い合わせ', 'お問合せ', '問い合わせ', 'toiawase', 'contact', 'inquiry']
-            neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー']
+            neg_kw = ['採用', '求人', 'recruit', 'careers', 'job', 'entry', 'エントリー',
+                      'コメント', 'comment', 'comments', 'reply', 'respond']
 
             added = 0
             for link in raw_links:

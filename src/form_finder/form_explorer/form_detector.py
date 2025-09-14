@@ -81,6 +81,20 @@ class FormDetector:
             self.form_ng_keywords: List[str] = [
                 str(k) for k in form_validation.get("ng_keywords_any", []) if k
             ]
+
+            # コメントフォーム除外（設定ファイル駆動）
+            cmt = rules.get("comment_form_exclusion", {})
+            self.comment_exclusion_keywords: List[str] = [
+                str(k) for k in cmt.get("exclude_if_keywords_present_any", []) if k
+            ] or [
+                "コメント", "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment",
+                "Add Comment", "reply", "respond", "comment"
+            ]
+            self.comment_attr_keywords: List[str] = [
+                str(k) for k in cmt.get("exclude_if_form_attributes_contains_any", []) if k
+            ] or [
+                "commentform", "comment-form", "comment", "comments", "respond", "reply", "commenttextarea"
+            ]
         except Exception:
             # 設定読み込み失敗時のフォールバック（保守的に同じ規則を適用）
             self.recruitment_exclusion_keywords = ["学歴", "大学", "出身", "経歴"]
@@ -88,6 +102,13 @@ class FormDetector:
                 "お問い合わせ", "お問合せ", "問い合わせ", "contact", "inquiry", "ご相談", "連絡"
             ]
             self.form_ng_keywords = []
+            self.comment_exclusion_keywords = [
+                "コメント", "コメントを送信", "コメントする", "コメント投稿", "Leave a Reply", "Post Comment",
+                "Add Comment", "reply", "respond", "comment"
+            ]
+            self.comment_attr_keywords = [
+                "commentform", "comment-form", "comment", "comments", "respond", "reply", "commenttextarea"
+            ]
 
     async def find_and_validate_forms(self, page: Page, html_content: str) -> List[Dict[str, Any]]:
         """ページ内のフォームを発見・検証（本家準拠版）"""
@@ -885,6 +906,11 @@ class FormDetector:
                 logger.debug("ログインフォームのため除外")
                 return False
 
+            # 3.2 コメントフォーム除外（ブログ等）
+            if self._is_comment_form(form_data):
+                logger.debug("コメントフォームと推定のため除外")
+                return False
+
             # 3.5 採用専用フォームの除外（周辺テキスト・ボタン文言で判定）
             if self._is_recruitment_only_form(form_data):
                 logger.debug("採用専用フォームと推定のため除外")
@@ -906,6 +932,43 @@ class FormDetector:
             
         except Exception as e:
             logger.error(f"フォーム品質チェックエラー: {e}")
+            return False
+
+    def _is_comment_form(self, form_data: Dict[str, Any]) -> bool:
+        """ブログ等のコメントフォームかどうかを簡易判定して除外。
+
+        - フォームID/クラスに comment/respond/reply などが含まれる
+        - 周辺文言/ボタン文言/入力属性に コメント系語彙 が含まれる
+        （一般的な問い合わせ語が含まれていても、コメントは除外対象とする）
+        """
+        try:
+            # 1) 属性による判定（強いシグナル）
+            form_id = (form_data.get('formId') or form_data.get('form_id') or '').lower()
+            form_class = (form_data.get('formClass') or form_data.get('form_class') or '').lower()
+            attr_hay = f"{form_id} {form_class}"
+            if any(tok.lower() in attr_hay for tok in self.comment_attr_keywords):
+                return True
+
+            # 2) 周辺テキスト/ボタン文言
+            surrounding = (
+                form_data.get('surroundingText')
+                or form_data.get('surrounding_text')
+                or ''
+            )
+            button_texts = ' '.join((btn.get('text', '') or '') for btn in form_data.get('buttons', []) )
+            texts = [surrounding, button_texts]
+
+            # 3) 入力フィールドの placeholder/name/id
+            for inp in form_data.get('inputs', []) or []:
+                texts.append(inp.get('placeholder') or '')
+                texts.append(inp.get('name') or '')
+                texts.append(inp.get('id') or '')
+
+            haystack_norm = ' '.join(texts).lower()
+            if any(str(k).lower() in haystack_norm for k in self.comment_exclusion_keywords if k):
+                return True
+            return False
+        except Exception:
             return False
 
     def _count_text_inputs(self, inputs: List[Dict[str, Any]]) -> int:
