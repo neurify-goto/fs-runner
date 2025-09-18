@@ -76,6 +76,18 @@ jobs:
 
     - name: Determine execution mode and worker count
       run: |
+        normalize_use_extra_flag() {
+          local raw="$1"
+          raw=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+          raw=$(printf '%s' "$raw" | tr -d '"')
+          raw=${raw//\'/}
+          case "$raw" in
+            true|1|yes) echo "true" ;;
+            false|0|no|''|null) echo "false" ;;
+            *) echo "false" ;;
+          esac
+        }
+
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           echo "TEST_MODE=${{ github.event.inputs.test_mode }}" >> $GITHUB_ENV
           echo "TARGETING_ID=${{ github.event.inputs.targeting_id }}" >> $GITHUB_ENV
@@ -83,7 +95,10 @@ jobs:
           RAW_NUM_WORKERS="4"
           echo "Running via WORKFLOW DISPATCH: targeting_id=${{ github.event.inputs.targeting_id }}, test_mode=${{ github.event.inputs.test_mode }}"
           # Table selection (workflow_dispatch)
-          if [ "${{ github.event.inputs.use_extra_table }}" = "true" ]; then
+          RAW_USE_EXTRA="${{ toJson(github.event.inputs.use_extra_table) }}"
+          USE_EXTRA=$(normalize_use_extra_flag "${RAW_USE_EXTRA}")
+          echo "Payload use_extra_table (workflow_dispatch) raw=${RAW_USE_EXTRA}, normalized=${USE_EXTRA}"
+          if [ "${USE_EXTRA}" = "true" ]; then
             echo "COMPANY_TABLE=companies_extra" >> $GITHUB_ENV
             echo "SEND_QUEUE_TABLE=send_queue_extra" >> $GITHUB_ENV
           else
@@ -96,7 +111,10 @@ jobs:
           RAW_NUM_WORKERS="${{ github.event.client_payload.workers_per_workflow || 4 }}"
           echo "Running in TEST MODE with targeting_id=1"
           # From payload if present
-          if [ "${{ github.event.client_payload.use_extra_table || false }}" = "true" ]; then
+          RAW_USE_EXTRA="${{ toJson(github.event.client_payload.use_extra_table || false) }}"
+          USE_EXTRA=$(normalize_use_extra_flag "${RAW_USE_EXTRA}")
+          echo "Payload use_extra_table (form_sender_test) raw=${RAW_USE_EXTRA}, normalized=${USE_EXTRA}"
+          if [ "${USE_EXTRA}" = "true" ]; then
             echo "COMPANY_TABLE=companies_extra" >> $GITHUB_ENV
             echo "SEND_QUEUE_TABLE=send_queue_extra" >> $GITHUB_ENV
           else
@@ -108,7 +126,10 @@ jobs:
           echo "TARGETING_ID=${{ github.event.client_payload.targeting_id }}" >> $GITHUB_ENV
           RAW_NUM_WORKERS="${{ github.event.client_payload.workers_per_workflow || 4 }}"
           echo "Running in PRODUCTION MODE"
-          if [ "${{ github.event.client_payload.use_extra_table || false }}" = "true" ]; then
+          RAW_USE_EXTRA="${{ toJson(github.event.client_payload.use_extra_table || false) }}"
+          USE_EXTRA=$(normalize_use_extra_flag "${RAW_USE_EXTRA}")
+          echo "Payload use_extra_table (repository_dispatch) raw=${RAW_USE_EXTRA}, normalized=${USE_EXTRA}"
+          if [ "${USE_EXTRA}" = "true" ]; then
             echo "COMPANY_TABLE=companies_extra" >> $GITHUB_ENV
             echo "SEND_QUEUE_TABLE=send_queue_extra" >> $GITHUB_ENV
           else

@@ -53,16 +53,46 @@ function getActiveTargetingIdsFromSheet() {
     }
     
     // ヘッダー行を分析してカラムインデックスを取得
-    const headers = data[0].map(header => header.toString().toLowerCase());
+    const headers = data[0].map(header => {
+      if (header === null || typeof header === 'undefined') return '';
+      if (typeof header.toString !== 'function') return '';
+      return header.toString().trim().toLowerCase();
+    });
+
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'targeting_sheet_headers_normalized',
+        headers
+      }));
+    } catch (e) {}
     
-    const colIndexes = {
-      active: headers.indexOf('active'),
-      id: headers.indexOf('id'),
-      client_id: headers.indexOf('client_id'),
-      description: headers.indexOf('description'),
-      concurrent_workflow: headers.indexOf('concurrent_workflow'),
-      extra: headers.indexOf('extra')
+    const indexOfHeader = function(name) {
+      const normalized = name ? name.trim().toLowerCase() : '';
+      const idx = headers.indexOf(normalized);
+      return idx;
     };
+
+    let extraIndex = indexOfHeader('extra');
+    if (extraIndex === -1) extraIndex = indexOfHeader('use_extra_table');
+    if (extraIndex === -1) extraIndex = indexOfHeader('use extra table');
+
+    const colIndexes = {
+      active: indexOfHeader('active'),
+      id: indexOfHeader('id'),
+      client_id: indexOfHeader('client_id'),
+      description: indexOfHeader('description'),
+      concurrent_workflow: indexOfHeader('concurrent_workflow'),
+      extra: extraIndex
+    };
+
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'targeting_sheet_column_indexes',
+        colIndexes
+      }));
+    } catch (e) {}
     
     // 必須カラムの存在確認
     if (colIndexes.id === -1) {
@@ -140,6 +170,18 @@ function getActiveTargetingIdsFromSheet() {
         }
       }
 
+      try {
+        console.log(JSON.stringify({
+          level: 'debug',
+          event: 'targeting_row_extra_evaluation',
+          row_number: i + 1,
+          targeting_id: targetingId,
+          extra_col_index: colIndexes.extra,
+          extra_raw_value: colIndexes.extra >= 0 ? row[colIndexes.extra] : null,
+          use_extra_table: useExtra
+        }));
+      } catch (e) {}
+
       activeTargetings.push({
         targeting_id: targetingId,
         client_id: clientId,
@@ -216,7 +258,11 @@ function validateSpreadsheetConfig() {
       };
     }
     
-    const clientHeaders = clientData[0].map(header => header.toString().toLowerCase());
+    const clientHeaders = clientData[0].map(header => {
+      if (header === null || typeof header === 'undefined') return '';
+      if (typeof header.toString !== 'function') return '';
+      return header.toString().trim().toLowerCase();
+    });
     console.log(`clientシートヘッダー行: ${clientHeaders.join(', ')}`);
     
     // targetingシートのヘッダー行確認
@@ -230,7 +276,11 @@ function validateSpreadsheetConfig() {
       };
     }
     
-    const targetingHeaders = targetingData[0].map(header => header.toString().toLowerCase());
+    const targetingHeaders = targetingData[0].map(header => {
+      if (header === null || typeof header === 'undefined') return '';
+      if (typeof header.toString !== 'function') return '';
+      return header.toString().trim().toLowerCase();
+    });
     console.log(`targetingシートヘッダー行: ${targetingHeaders.join(', ')}`);
     
     // clientシートの必須カラム確認（FORM_SENDER.md 1.3.2節準拠）
@@ -462,11 +512,41 @@ function getTargetingConfig(targetingId) {
     }
     
     // targetingシートのヘッダー解析
-    const targetingHeaders = targetingData[0].map(header => header.toString().toLowerCase());
+    const targetingHeaders = targetingData[0].map(header => {
+      if (header === null || typeof header === 'undefined') return '';
+      if (typeof header.toString !== 'function') return '';
+      return header.toString().trim().toLowerCase();
+    });
     const targetingColMap = {};
     targetingHeaders.forEach((header, index) => {
       targetingColMap[header] = index;
     });
+
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'targeting_config_headers',
+        targeting_id: targetingId,
+        headers: targetingHeaders
+      }));
+    } catch (e) {}
+
+    if (typeof targetingColMap['extra'] !== 'number') {
+      if (typeof targetingColMap['use_extra_table'] === 'number') {
+        targetingColMap['extra'] = targetingColMap['use_extra_table'];
+      } else if (typeof targetingColMap['use extra table'] === 'number') {
+        targetingColMap['extra'] = targetingColMap['use extra table'];
+      }
+    }
+
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'targeting_config_column_map',
+        targeting_id: targetingId,
+        column_map: targetingColMap
+      }));
+    } catch (e) {}
     
     // targeting_idに該当する行を検索
     let targetingRow = null;
@@ -506,7 +586,11 @@ function getTargetingConfig(targetingId) {
     }
     
     // clientシートのヘッダー解析
-    const clientHeaders = clientData[0].map(header => header.toString().toLowerCase());
+    const clientHeaders = clientData[0].map(header => {
+      if (header === null || typeof header === 'undefined') return '';
+      if (typeof header.toString !== 'function') return '';
+      return header.toString().trim().toLowerCase();
+    });
     const clientColMap = {};
     clientHeaders.forEach((header, index) => {
       clientColMap[header] = index;
@@ -540,6 +624,17 @@ function getTargetingConfig(targetingId) {
       }
       return false;
     })(extraColIndex >= 0 ? targetingRow[extraColIndex] : false);
+
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'targeting_config_extra_evaluation',
+        targeting_id: targetingId,
+        extra_col_index: extraColIndex,
+        extra_raw_value: extraColIndex >= 0 ? targetingRow[extraColIndex] : null,
+        use_extra_table: useExtraTable
+      }));
+    } catch (e) {}
     
     // 2シートのデータを結合して完全なクライアント設定を構築（FORM_SENDER.md 1.3.2節のプレースホルダ変数対応）
     // FORM_SENDER.md:124仕様準拠: project_nameは除外してデータ結合
