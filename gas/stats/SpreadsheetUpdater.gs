@@ -12,8 +12,8 @@ const SPREADSHEET_CONFIG = {
 
 // targetingシート設定（列ヘッダーをもとに出力列を判定）
 const TARGETING_SHEET_CONFIG = {
-  ID_COLUMN: 2, // B列 - targeting_id（ヘッダー名が不変のため固定）
-  HEADER_ROW_INDEX: 1
+  HEADER_ROW_INDEX: 1,
+  ID_COLUMN_HEADER: 'id'
 };
 
 const TARGETING_COLUMN_HEADERS = {
@@ -742,7 +742,10 @@ function updateTargetingSubmissionsStats() {
       TARGETING_SHEET_CONFIG.HEADER_ROW_INDEX
     );
 
-    const idColumnIndex = TARGETING_SHEET_CONFIG.ID_COLUMN;
+    const idColumnIndex = resolveTargetingColumnIndex(
+      headerIndexMap,
+      TARGETING_SHEET_CONFIG.ID_COLUMN_HEADER
+    );
     const totalAllColumnIndex = resolveTargetingColumnIndex(
       headerIndexMap,
       TARGETING_COLUMN_HEADERS.SUBMISSIONS_TOTAL_ALL
@@ -790,11 +793,11 @@ function updateTargetingSubmissionsStats() {
       };
     }
     
-    // B列（id列）のデータを取得
+    // targeting_id列のデータを取得（ヘッダー名で判定）
     const idRange = targetingSheet.getRange(2, idColumnIndex, dataRowCount, 1);
     const idValues = idRange.getValues().map(row => parseInt(row[0]));
     
-    console.log(`targetingシートB列から取得したid一覧: [${idValues.join(', ')}] (${dataRowCount}行)`);
+    console.log(`targetingシートの列「${TARGETING_SHEET_CONFIG.ID_COLUMN_HEADER}」から取得したid一覧: [${idValues.join(', ')}] (${dataRowCount}行)`);
     
     // 有効なtargeting_idのみを抽出（NaN、0以下を除外）
     const validTargetingIds = idValues.filter(id => !isNaN(id) && id > 0);
