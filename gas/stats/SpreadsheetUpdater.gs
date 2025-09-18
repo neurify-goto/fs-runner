@@ -10,15 +10,61 @@ const SPREADSHEET_CONFIG = {
   LOG_SHEET_NAME: '統計ログ'
 };
 
-// targeting シート列配置設定
-// M列に concurrent_workflow を新設したため、統計出力列を1列ずらして N-Q に変更
-const TARGETING_COLUMN_CONFIG = {
-  ID_COLUMN: 2,                    // B列 - targeting_id
-  SUBMISSIONS_TOTAL_ALL: 14,       // N列 - submissions総数（通算）
-  SUBMISSIONS_SUCCESS_ALL: 15,     // O列 - 成功submissions数（通算）
-  SUBMISSIONS_TOTAL_TODAY: 16,     // P列 - submissions総数（本日）
-  SUBMISSIONS_SUCCESS_TODAY: 17    // Q列 - 成功submissions数（本日）
+// targetingシート設定（列ヘッダーをもとに出力列を判定）
+const TARGETING_SHEET_CONFIG = {
+  ID_COLUMN: 2, // B列 - targeting_id（ヘッダー名が不変のため固定）
+  HEADER_ROW_INDEX: 1
 };
+
+const TARGETING_COLUMN_HEADERS = {
+  SUBMISSIONS_TOTAL_ALL: '送信試行数',
+  SUBMISSIONS_SUCCESS_ALL: '送信成功数',
+  SUBMISSIONS_TOTAL_TODAY: '本日送信試行数',
+  SUBMISSIONS_SUCCESS_TODAY: '本日送信成功数',
+  SUBMISSIONS_SUCCESS_RATE_TODAY: '本日送信成功率'
+};
+
+/**
+ * targetingシートのヘッダー行から列名と列番号のマップを構築
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet 対象のシート
+ * @param {number} headerRowIndex ヘッダー行の行番号（1-based）
+ * @returns {Object} 列名をキー、列番号を値とするマップ
+ */
+function buildTargetingHeaderIndexMap(sheet, headerRowIndex) {
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn <= 0) {
+    return {};
+  }
+
+  const headerValues = sheet
+    .getRange(headerRowIndex, 1, 1, lastColumn)
+    .getValues()[0]
+    .map(value => (typeof value === 'string' ? value.trim() : value));
+
+  const headerIndexMap = {};
+  headerValues.forEach((header, index) => {
+    if (!header) {
+      return;
+    }
+    headerIndexMap[header] = index + 1; // 列番号は1-based
+  });
+
+  return headerIndexMap;
+}
+
+/**
+ * ヘッダーマップから指定した列名に対応する列番号を取得
+ * @param {Object} headerIndexMap 列名→列番号マップ
+ * @param {string} headerName 列名
+ * @returns {number} 列番号（1-based）
+ */
+function resolveTargetingColumnIndex(headerIndexMap, headerName) {
+  const columnIndex = headerIndexMap[headerName];
+  if (!columnIndex) {
+    throw new Error(`targetingシートのヘッダー「${headerName}」が見つかりません`);
+  }
+  return columnIndex;
+}
 
 // セル配置設定（1行目：タイトル行、2行目以降：統計データ）
 const CELL_MAPPING = {
@@ -660,11 +706,12 @@ function testStatsLogFunctions() {
 }
 
 /**
- * targetingテーブルのN列・O列・P列・Q列にsubmissions統計を更新
- * N列: 各targeting_idのsubmissions総数（通算）
- * O列: 各targeting_idの成功submissions数（通算、success=true）
- * P列: 各targeting_idの本日submissions総数
- * Q列: 各targeting_idの本日成功submissions数（success=true）
+ * targetingシートのヘッダー名（送信試行数など）を用いて submissions 統計を更新
+ * 送信試行数: 各targeting_idの submissions 総数（通算）
+ * 送信成功数: 成功 submissions 数（通算、success=true）
+ * 本日送信試行数: 当日 submissions 総数
+ * 本日送信成功数: 当日成功 submissions 数（success=true）
+ * 本日送信成功率: 当日成功数 / 当日送信数 × 100（小数第2位を四捨五入）
  * @returns {Object} 更新結果
  */
 function updateTargetingSubmissionsStats() {
@@ -689,14 +736,47 @@ function updateTargetingSubmissionsStats() {
       };
     }
     
-    // 列配置設定を定数から取得
-    const idColumnIndex = TARGETING_COLUMN_CONFIG.ID_COLUMN;
-    const mColumnIndex = TARGETING_COLUMN_CONFIG.SUBMISSIONS_TOTAL_ALL;
-    const nColumnIndex = TARGETING_COLUMN_CONFIG.SUBMISSIONS_SUCCESS_ALL;
-    const oColumnIndex = TARGETING_COLUMN_CONFIG.SUBMISSIONS_TOTAL_TODAY;
-    const pColumnIndex = TARGETING_COLUMN_CONFIG.SUBMISSIONS_SUCCESS_TODAY;
+    // 列配置をヘッダー名から解決
+    const headerIndexMap = buildTargetingHeaderIndexMap(
+      targetingSheet,
+      TARGETING_SHEET_CONFIG.HEADER_ROW_INDEX
+    );
+
+    const idColumnIndex = TARGETING_SHEET_CONFIG.ID_COLUMN;
+    const totalAllColumnIndex = resolveTargetingColumnIndex(
+      headerIndexMap,
+      TARGETING_COLUMN_HEADERS.SUBMISSIONS_TOTAL_ALL
+    );
+    const successAllColumnIndex = resolveTargetingColumnIndex(
+      headerIndexMap,
+      TARGETING_COLUMN_HEADERS.SUBMISSIONS_SUCCESS_ALL
+    );
+    const totalTodayColumnIndex = resolveTargetingColumnIndex(
+      headerIndexMap,
+      TARGETING_COLUMN_HEADERS.SUBMISSIONS_TOTAL_TODAY
+    );
+    const successTodayColumnIndex = resolveTargetingColumnIndex(
+      headerIndexMap,
+      TARGETING_COLUMN_HEADERS.SUBMISSIONS_SUCCESS_TODAY
+    );
+    const successRateTodayColumnIndex = resolveTargetingColumnIndex(
+      headerIndexMap,
+      TARGETING_COLUMN_HEADERS.SUBMISSIONS_SUCCESS_RATE_TODAY
+    );
     
-    console.log(`targetingシート列配置: ID=${idColumnIndex}, N=${mColumnIndex}, O=${nColumnIndex}, P=${oColumnIndex}, Q=${pColumnIndex}`);
+    console.log(
+      'targetingシート列配置:',
+      JSON.stringify(
+        {
+          id: idColumnIndex,
+          totalAll: totalAllColumnIndex,
+          successAll: successAllColumnIndex,
+          totalToday: totalTodayColumnIndex,
+          successToday: successTodayColumnIndex,
+          successRateToday: successRateTodayColumnIndex
+        }
+      )
+    );
     
     // データ行の範囲を取得（ヘッダー行を除く）
     const dataRowCount = targetingSheet.getLastRow() - 1;
@@ -741,10 +821,11 @@ function updateTargetingSubmissionsStats() {
     console.log(`本日統計一括取得完了: ${Object.keys(allTodayStats).length}件の本日統計を取得, 処理時間: ${todayBatchTime}ms`);
     
     // 各行のsubmissions統計を設定（通算＋本日）
-    const mColumnValues = []; // N列用（submissions総数・通算）
-    const nColumnValues = []; // O列用（成功submissions数・通算）
-    const oColumnValues = []; // P列用（submissions総数・本日）
-    const pColumnValues = []; // Q列用（成功submissions数・本日）
+    const totalAllColumnValues = [];
+    const successAllColumnValues = [];
+    const totalTodayColumnValues = [];
+    const successTodayColumnValues = [];
+    const successRateTodayColumnValues = [];
     
     let successCount = 0;
     let invalidCount = 0;
@@ -755,10 +836,11 @@ function updateTargetingSubmissionsStats() {
       
       if (isNaN(targetingId) || targetingId <= 0) {
         console.log(`行 ${rowNumber}: id が無効な値 (${targetingId}) - 空文字を設定`);
-        mColumnValues.push(['']);
-        nColumnValues.push(['']);
-        oColumnValues.push(['']);
-        pColumnValues.push(['']);
+        totalAllColumnValues.push(['']);
+        successAllColumnValues.push(['']);
+        totalTodayColumnValues.push(['']);
+        successTodayColumnValues.push(['']);
+        successRateTodayColumnValues.push(['']);
         invalidCount++;
         continue;
       }
@@ -774,27 +856,37 @@ function updateTargetingSubmissionsStats() {
       const todaySuccessSubmissionsCount = todayStats ? (todayStats.success_count_today || 0) : 0;
       
       // 各列にデータを設定
-      mColumnValues.push([totalCount]);
-      nColumnValues.push([successSubmissionsCount]);
-      oColumnValues.push([todayTotalCount]);
-      pColumnValues.push([todaySuccessSubmissionsCount]);
+      const todaySuccessRate = todayTotalCount > 0
+        ? Math.round((todaySuccessSubmissionsCount / todayTotalCount) * 10000) / 100
+        : 0;
+
+      totalAllColumnValues.push([totalCount]);
+      successAllColumnValues.push([successSubmissionsCount]);
+      totalTodayColumnValues.push([todayTotalCount]);
+      successTodayColumnValues.push([todaySuccessSubmissionsCount]);
+      successRateTodayColumnValues.push([todaySuccessRate]);
       
-      console.log(`行 ${rowNumber} (targeting_id=${targetingId}): 通算(N=${totalCount}, O=${successSubmissionsCount}) 本日(P=${todayTotalCount}, Q=${todaySuccessSubmissionsCount})`);
+      console.log(
+        `行 ${rowNumber} (targeting_id=${targetingId}): 通算(${totalCount}, ${successSubmissionsCount}) 本日(${todayTotalCount}, ${todaySuccessSubmissionsCount}) 成功率(${todaySuccessRate}%)`
+      );
       successCount++;
     }
     
     // N列・O列・P列・Q列を一括更新（値のみ）
-    const mRange = targetingSheet.getRange(2, mColumnIndex, dataRowCount, 1);
-    mRange.setValues(mColumnValues);
+    const totalAllRange = targetingSheet.getRange(2, totalAllColumnIndex, dataRowCount, 1);
+    totalAllRange.setValues(totalAllColumnValues);
     
-    const nRange = targetingSheet.getRange(2, nColumnIndex, dataRowCount, 1);
-    nRange.setValues(nColumnValues);
+    const successAllRange = targetingSheet.getRange(2, successAllColumnIndex, dataRowCount, 1);
+    successAllRange.setValues(successAllColumnValues);
     
-    const oRange = targetingSheet.getRange(2, oColumnIndex, dataRowCount, 1);
-    oRange.setValues(oColumnValues);
+    const totalTodayRange = targetingSheet.getRange(2, totalTodayColumnIndex, dataRowCount, 1);
+    totalTodayRange.setValues(totalTodayColumnValues);
     
-    const pRange = targetingSheet.getRange(2, pColumnIndex, dataRowCount, 1);
-    pRange.setValues(pColumnValues);
+    const successTodayRange = targetingSheet.getRange(2, successTodayColumnIndex, dataRowCount, 1);
+    successTodayRange.setValues(successTodayColumnValues);
+
+    const successRateTodayRange = targetingSheet.getRange(2, successRateTodayColumnIndex, dataRowCount, 1);
+    successRateTodayRange.setValues(successRateTodayColumnValues);
     
     const jstTime = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss');
     
