@@ -60,7 +60,8 @@ function getActiveTargetingIdsFromSheet() {
       id: headers.indexOf('id'),
       client_id: headers.indexOf('client_id'),
       description: headers.indexOf('description'),
-      concurrent_workflow: headers.indexOf('concurrent_workflow')
+      concurrent_workflow: headers.indexOf('concurrent_workflow'),
+      extra: headers.indexOf('extra')
     };
     
     // 必須カラムの存在確認
@@ -116,7 +117,7 @@ function getActiveTargetingIdsFromSheet() {
       
       // 管理用情報を取得
       const description = colIndexes.description >= 0 ? row[colIndexes.description] || '' : '';
-      
+
       // 並列起動数（未定義/不正値は1）
       let cw = 1;
       try {
@@ -127,12 +128,25 @@ function getActiveTargetingIdsFromSheet() {
         }
       } catch (e) { cw = 1; }
 
+      // extraテーブル利用フラグ（TRUE/1/"true" を許可）
+      let useExtra = false;
+      if (colIndexes.extra >= 0) {
+        const extraValue = row[colIndexes.extra];
+        if (extraValue === true || extraValue === 1) {
+          useExtra = true;
+        } else if (typeof extraValue === 'string') {
+          const lowered = extraValue.toString().toLowerCase();
+          useExtra = lowered === 'true' || lowered === '1';
+        }
+      }
+
       activeTargetings.push({
         targeting_id: targetingId,
         client_id: clientId,
         description: description,
         row_number: i + 1,
-        concurrent_workflow: cw
+        concurrent_workflow: cw,
+        use_extra_table: useExtra
       });
       
       console.log(`行 ${i + 1}: targeting_id ${targetingId} (client_id: ${clientId}) をアクティブとして追加`);
@@ -515,6 +529,17 @@ function getTargetingConfig(targetingId) {
     }
     
     console.log(`client_id ${clientId} のクライアント情報取得完了`);
+
+    // extraテーブル利用判定
+    const extraColIndex = typeof targetingColMap['extra'] === 'number' ? targetingColMap['extra'] : -1;
+    const useExtraTable = (function(value) {
+      if (value === true || value === 1) return true;
+      if (typeof value === 'string') {
+        const lowered = value.toLowerCase();
+        return lowered === 'true' || lowered === '1';
+      }
+      return false;
+    })(extraColIndex >= 0 ? targetingRow[extraColIndex] : false);
     
     // 2シートのデータを結合して完全なクライアント設定を構築（FORM_SENDER.md 1.3.2節のプレースホルダ変数対応）
     // FORM_SENDER.md:124仕様準拠: project_nameは除外してデータ結合
@@ -550,6 +575,7 @@ function getTargetingConfig(targetingId) {
       client_id: clientId,
       active: targetingRow[targetingColMap['active']] === true || targetingRow[targetingColMap['active']] === 'TRUE',
       description: targetingRow[targetingColMap['description'] || -1] || '',
+      use_extra_table: useExtraTable,
       
       // clientシートからの情報をネスト構造化
       client: {
@@ -594,6 +620,7 @@ function getTargetingConfig(targetingId) {
         send_start_time: targetingRow[targetingColMap['send_start_time'] || -1] || '09:00',
         send_end_time: targetingRow[targetingColMap['send_end_time'] || -1] || '18:00',
         send_days_of_week: parseSendDaysOfWeek(targetingRow[targetingColMap['send_days_of_week'] || -1]),
+        use_extra_table: useExtraTable,
         // 追加: 並列起動数（新規 M 列）
         concurrent_workflow: (function() {
           try {

@@ -137,7 +137,7 @@ function startFormSenderFromTrigger() {
     
     for (const targeting of activeTargetings) {
       try {
-        const result = processTargeting(targeting.targeting_id);
+        const result = processTargeting(targeting.targeting_id, { useExtra: targeting.use_extra_table === true });
         
         if (result && result.success) {
           triggeredCount++;
@@ -313,7 +313,7 @@ function startFormSenderFromTriggerAt7() {
       let triggered = 0;
       for (const t of activeTargetings) {
         try {
-          const r = processTargeting(t.targeting_id);
+          const r = processTargeting(t.targeting_id, { useExtra: t.use_extra_table === true });
           if (r && r.success) triggered++;
         } catch (e) {
           console.error(`ターゲティング ${t.targeting_id} 処理エラー: ${e.message}`);
@@ -395,7 +395,7 @@ function startFormSenderFromTriggerAt13() {
       let triggered = 0;
       for (const t of activeTargetings) {
         try {
-          const r = processTargeting(t.targeting_id);
+          const r = processTargeting(t.targeting_id, { useExtra: t.use_extra_table === true });
           if (r && r.success) triggered++;
         } catch (e) {
           console.error(`ターゲティング ${t.targeting_id} 処理エラー: ${e.message}`);
@@ -442,7 +442,7 @@ function startFormSenderAll() {
     let triggered = 0;
     for (const t of activeTargetings) {
       try {
-        const r = processTargeting(t.targeting_id);
+        const r = processTargeting(t.targeting_id, { useExtra: t.use_extra_table === true });
         if (r && r.success) triggered++;
       } catch (e) {
         console.error(`ターゲティング ${t.targeting_id} 処理エラー: ${e.message}`);
@@ -486,7 +486,7 @@ function startFormSender(targetingId = null) {
  * @param {number} targetingId ターゲティングID
  * @returns {Object} 処理結果
  */
-function processTargeting(targetingId) {
+function processTargeting(targetingId, options) {
   try {
     console.log(`ターゲティング ${targetingId} の処理を開始（新アーキテクチャ版）`);
     
@@ -510,10 +510,18 @@ function processTargeting(targetingId) {
       return { success: false, message: '基本設定検証失敗' };
     }
     
+    // extraテーブル利用判定（optionsで明示指定が無ければシート設定を使用）
+    const resolvedOptions = options ? Object.assign({}, options) : {};
+    if (typeof resolvedOptions.useExtra === 'undefined') {
+      resolvedOptions.useExtra = !!targetingConfig.use_extra_table;
+    } else {
+      resolvedOptions.useExtra = !!resolvedOptions.useExtra;
+    }
+
     // GitHub Actions ワークフローをトリガー（batch_id なし）
     console.log('条件チェック完了。GitHub Actions 連続処理ワークフローを開始します');
     
-    const workflowResult = triggerFormSenderWorkflow(targetingId);
+    const workflowResult = triggerFormSenderWorkflow(targetingId, resolvedOptions);
     
     if (workflowResult && workflowResult.success) {
       console.log(`GitHub Actions 連続処理ワークフローが正常に開始されました`);
@@ -589,6 +597,7 @@ function buildSendQueueForTargeting(targetingId = null) {
     const cfg = getTargetingConfig(targetingId); // 既存ロジックを流用
     if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
     const t = cfg.targeting;
+    const useExtra = !!(cfg.use_extra_table || t.use_extra_table);
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     // デバッグ: パラメータ要約
     const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
@@ -610,7 +619,8 @@ function buildSendQueueForTargeting(targetingId = null) {
         t.targeting_sql || '',
         (t.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
         10000,
-        8
+        8,
+        useExtra ? { useExtra: true } : undefined
       );
       const elapsedMs = Date.now() - startedMs;
       console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: Number(inserted) || 0, elapsed_ms: elapsedMs }));
@@ -621,7 +631,9 @@ function buildSendQueueForTargeting(targetingId = null) {
       if (!isStmtTimeout) throw e;
       // フォールバック: チャンク分割投入（Stage1→Stage2）
       console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked', targeting_id: targetingId, reason: 'statement_timeout' }));
-      const result = buildSendQueueForTargetingChunked_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''));
+      const result = useExtra
+        ? buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''))
+        : buildSendQueueForTargetingChunked_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''));
       return result;
     }
   } catch (e) {
@@ -663,6 +675,7 @@ function buildSendQueueForAllTargetings() {
         if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
 
         const targeting = cfg.targeting;
+        const useExtra = !!(cfg.use_extra_table || targeting.use_extra_table || t.use_extra_table === true);
         const dateStartMs = Date.now();
         // 追加の詳細デバッグ: 各targetingのパラメータと長さ
         const ngTokens = (targeting.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
@@ -683,7 +696,8 @@ function buildSendQueueForAllTargetings() {
             targeting.targeting_sql || '',
             (targeting.ng_companies || ''),
             10000,
-            8
+            8,
+            useExtra ? { useExtra: true } : undefined
           );
           n = Number(inserted) || 0;
           const elapsedMs = Date.now() - dateStartMs;
@@ -696,7 +710,9 @@ function buildSendQueueForAllTargetings() {
           const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
           if (!isStmtTimeout) throw e;
           console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked', targeting_id: targetingId, reason: 'statement_timeout' }));
-          const res = buildSendQueueForTargetingChunked_(targetingId, dateJst, targeting.targeting_sql || '', (targeting.ng_companies || ''));
+          const res = useExtra
+            ? buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targeting.targeting_sql || '', (targeting.ng_companies || ''))
+            : buildSendQueueForTargetingChunked_(targetingId, dateJst, targeting.targeting_sql || '', (targeting.ng_companies || ''));
           if (res && res.success) {
             n = Number(res.inserted_total || 0);
             totalInserted += n;
@@ -1132,14 +1148,23 @@ function triggerFormSenderWorkflow(targetingId, options) {
     // 機微情報は出さない
     console.log(`クライアント設定取得完了: ***COMPANY_REDACTED*** (client_id: ${clientConfig.client_id})`);
     
+    // extraテーブル利用判定（options指定が無い場合はシート設定を採用）
+    const useExtra = (function() {
+      if (options && typeof options.useExtra !== 'undefined') {
+        return !!options.useExtra;
+      }
+      return !!clientConfig.use_extra_table;
+    })();
+
     // 並列起動数（targetingシート M列: concurrent_workflow）。空/未定義は1。
     const cw = Math.max(1, parseInt(clientConfig?.targeting?.concurrent_workflow || 1) || 1);
     console.log(`並列起動数(concurrent_workflow): ${cw}`);
 
     let ok = 0;
     let fail = 0;
+    const dispatchOptions = Object.assign({}, options || {}, { useExtra });
     for (let i = 1; i <= cw; i++) {
-      const result = sendRepositoryDispatch('form_sender_task', targetingId, clientConfig, i, cw, options || {});
+      const result = sendRepositoryDispatch('form_sender_task', targetingId, clientConfig, i, cw, dispatchOptions);
       if (result && result.success) {
         ok++;
       } else {
