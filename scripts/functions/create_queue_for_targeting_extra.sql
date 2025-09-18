@@ -5,7 +5,7 @@ create or replace function public.create_queue_for_targeting_extra(
   p_targeting_sql text,
   p_ng_companies text,
   p_client_name text default null,
-  p_max_daily integer,
+  p_max_daily integer default null,
   p_shards integer default 8
 )
 returns integer
