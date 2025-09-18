@@ -91,6 +91,7 @@ begin
                                and c.company_name not like ''%学校%'')';
     v_sql := v_sql || ' and (c.client = $8)';
     v_sql := v_sql || ' and (c.client = $8)';
+    v_sql := v_sql || ' and (c.client = $8)';
     v_sql := v_sql || ' order by c.id asc limit $5 ),
       bp as (
         select coalesce(max(priority), 0) as base
