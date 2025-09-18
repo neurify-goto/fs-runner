@@ -4,6 +4,7 @@ create or replace function public.create_queue_for_targeting_extra(
   p_targeting_id bigint,
   p_targeting_sql text,
   p_ng_companies text,
+  p_client_name text default null,
   p_max_daily integer,
   p_shards integer default 8
 )
@@ -24,6 +25,7 @@ declare
   v_t0 timestamp with time zone;
   v_t1 timestamp with time zone;
   v_elapsed_ms numeric;
+  v_client_name text;
 begin
   perform set_config('statement_timeout', '180000', true);
   perform set_config('lock_timeout', '10000', true);
@@ -59,19 +61,24 @@ begin
   v_shards := coalesce(p_shards, 8);
   if v_shards is null or v_shards <= 0 then v_shards := 8; end if;
 
+  v_client_name := nullif(btrim(coalesce(p_client_name, '')), '');
+  if v_client_name is null then
+    raise exception 'p_client_name is required for create_queue_for_targeting_extra';
+  end if;
+
   -- Stage1
   v_sql :=
     'with candidates as (
        select c.id
-       from public.companies_extra c
-       left join public.submissions s_hist
-         on s_hist.targeting_id = $2
-        and s_hist.company_id = c.id
-       where c.form_url is not null
-         and c.black is null
-         and coalesce(c.prohibition_detected, false) = false
-         and c.duplication is null
-         and s_hist.id is null';
+      from public.companies_extra c
+      left join public.submissions s_hist
+        on s_hist.targeting_id = $2
+       and s_hist.company_id = c.id
+      where c.form_url is not null
+        and c.black is null
+        and coalesce(c.prohibition_detected, false) = false
+        and c.duplication is null
+        and s_hist.id is null';
   if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
     v_sql := v_sql || ' and (' || p_targeting_sql || ')';
   end if;
@@ -83,6 +90,7 @@ begin
                                and c.company_name not like ''%税理士%''
                                and c.company_name not like ''%弁理士%''
                                and c.company_name not like ''%学校%'')';
+  v_sql := v_sql || ' and (c.client = $6)';
   v_sql := v_sql || ' order by c.id asc limit $4 )
     insert into public.send_queue_extra(
       target_date_jst, targeting_id, company_id, priority, shard_id, status, attempts, created_at)
@@ -93,7 +101,7 @@ begin
       from candidates
     on conflict (target_date_jst, targeting_id, company_id) do nothing;';
   v_t1 := clock_timestamp();
-  execute v_sql using p_target_date, p_targeting_id, v_ng_names, v_limit, v_shards;
+  execute v_sql using p_target_date, p_targeting_id, v_ng_names, v_limit, v_shards, v_client_name;
   get diagnostics v_ins = row_count;
   v_elapsed_ms := extract(epoch from (clock_timestamp() - v_t1)) * 1000;
   raise notice 'CQT_EXTRA:STAGE1 inserted=% rows in % ms', v_ins, v_elapsed_ms::bigint;
@@ -146,11 +154,12 @@ begin
                                and c.company_name not like ''%税理士%''
                                and c.company_name not like ''%弁理士%''
                                and c.company_name not like ''%学校%'')';
+    v_sql := v_sql || ' and (c.client = $6)';
     v_sql := v_sql || ' order by c.id asc limit $4 )
       insert into public.send_queue_extra(
         target_date_jst, targeting_id, company_id, priority, shard_id, status, attempts, created_at)
       select $1::date, $2::bigint, id,
-             $6 + row_number() over (order by id),
+             $7 + row_number() over (order by id),
              (id % $5),
              ''pending'', 0, now()
         from candidates
@@ -162,7 +171,7 @@ begin
        and targeting_id    = p_targeting_id;
 
     v_t1 := clock_timestamp();
-    execute v_sql using p_target_date, p_targeting_id, v_ng_names, v_need, v_shards, v_base_priority;
+    execute v_sql using p_target_date, p_targeting_id, v_ng_names, v_need, v_shards, v_client_name, v_base_priority;
     get diagnostics v_ins2 = row_count;
     v_ins := coalesce(v_ins,0) + coalesce(v_ins2,0);
     v_elapsed_ms := extract(epoch from (clock_timestamp() - v_t1)) * 1000;
@@ -182,6 +191,5 @@ begin
 end;
 $$;
 
-grant execute on function public.create_queue_for_targeting_extra(date,bigint,text,text,integer,integer)
+grant execute on function public.create_queue_for_targeting_extra(date,bigint,text,text,text,integer,integer)
   to authenticated, service_role;
-

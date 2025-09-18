@@ -50,6 +50,39 @@ FN_MARK_DONE = 'mark_done_extra' if USE_EXTRA_TABLE else 'mark_done'
 FN_REQUEUE = 'requeue_stale_assigned_extra' if USE_EXTRA_TABLE else 'requeue_stale_assigned'
 
 
+class ExtraClientMismatchError(RuntimeError):
+    """companies_extra.client と期待値の不一致を表す内部例外。"""
+
+    def __init__(self, company_id: int, expected_client: Optional[str], actual_client: Optional[str], message: str):
+        super().__init__(message)
+        self.company_id = company_id
+        self.expected_client = expected_client
+        self.actual_client = actual_client
+
+
+def _extract_extra_client_name(client_data: Dict[str, Any]) -> Optional[str]:
+    """targetingのextra指定時に参照するclientシート上の会社名を抽出。"""
+    if not USE_EXTRA_TABLE:
+        return None
+    try:
+        client_section = client_data.get('client')
+        if isinstance(client_section, dict):
+            raw_name = client_section.get('company_name')
+            if isinstance(raw_name, str):
+                name = raw_name.strip()
+                return name or None
+    except Exception:
+        pass
+    return None
+
+
+def _apply_extra_client_filter(query_builder, client_name: Optional[str]):
+    """companies_extra向けにclient一致条件を適用するヘルパー。"""
+    if USE_EXTRA_TABLE and client_name:
+        return query_builder.eq('client', client_name)
+    return query_builder
+
+
 def _get_name_policy_exclude_keywords() -> List[str]:
     """企業名による除外ワード一覧を設定から取得（フォールバックあり）。
 
@@ -704,6 +737,8 @@ def _within_business_hours(client_data: Dict[str, Any]) -> bool:
 
 async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, client_data: Dict[str, Any], target_date: date, run_id: str, shard_id: Optional[int] = None, fixed_company_id: Optional[int] = None) -> bool:
     """1件専有→処理→確定。処理が無ければFalseを返す。"""
+    expected_extra_client = _extract_extra_client_name(client_data)
+    matched_extra_client: Optional[str] = None
     # 1) claim（固定 company_id が指定された場合は claim をスキップ）
     if fixed_company_id is None:
         params = {
@@ -789,9 +824,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     # 2) fetch company
     try:
         # ブラックリスト回避: companies.black が NULL のもののみ処理対象
+        company_columns = 'id, form_url, black, company_name'
+        if USE_EXTRA_TABLE:
+            company_columns += ', client'
         comp = (
             supabase.table(COMPANY_TABLE)
-            .select('id, form_url, black, company_name')
+            .select(company_columns)
             .eq('id', company_id)
             .limit(1)
             .execute()
@@ -799,6 +837,24 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         if not comp.data:
             raise RuntimeError('company not found')
         company = comp.data[0]
+        if USE_EXTRA_TABLE:
+            if not expected_extra_client:
+                raise ExtraClientMismatchError(
+                    company_id,
+                    expected_extra_client,
+                    company.get('client') if isinstance(company, dict) else None,
+                    'expected client name missing for extra targeting'
+                )
+            actual_client_raw = company.get('client') if isinstance(company, dict) else None
+            if not isinstance(actual_client_raw, str):
+                raise ExtraClientMismatchError(company_id, expected_extra_client, None, 'companies_extra.client missing')
+            actual_client = actual_client_raw.strip()
+            if not actual_client:
+                raise ExtraClientMismatchError(company_id, expected_extra_client, actual_client_raw, 'companies_extra.client empty')
+            if actual_client != expected_extra_client:
+                raise ExtraClientMismatchError(company_id, expected_extra_client, actual_client, 'companies_extra.client mismatch')
+            matched_extra_client = actual_client
+            company['client'] = actual_client
         # まず企業名ポリシーでの除外判定を先行させ、後続の重複チェック(追加クエリ)を省略して負荷を下げる
         try:
             cname = company.get('company_name') or ''
@@ -945,6 +1001,64 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
         if company.get('black') is not None:
             raise RuntimeError('company blacklisted')
+    except ExtraClientMismatchError as e_client:
+        try:
+            expected_hash = hashlib.sha256((e_client.expected_client or '').encode('utf-8')).hexdigest()[:10] if e_client.expected_client else 'none'
+        except Exception:
+            expected_hash = 'error'
+        try:
+            actual_hash = hashlib.sha256((e_client.actual_client or '').encode('utf-8')).hexdigest()[:10] if e_client.actual_client else 'none'
+        except Exception:
+            actual_hash = 'error'
+        logger.warning(
+            f"companies_extra client mismatch (company_id={e_client.company_id}, targeting_id={targeting_id}, expected_hash={expected_hash}, actual_hash={actual_hash}): {e_client}"
+        )
+        classify_detail = {
+            'code': 'SKIPPED_WRONG_CLIENT',
+            'category': 'POLICY',
+            'retryable': False,
+            'cooldown_seconds': 0,
+            'confidence': 1.0,
+            'evidence': {
+                'expected_client': e_client.expected_client,
+                'actual_client': e_client.actual_client,
+                'note': str(e_client),
+            }
+        }
+        _md_args = {
+            'p_target_date': str(target_date),
+            'p_targeting_id': targeting_id,
+            'p_company_id': e_client.company_id,
+            'p_success': False,
+            'p_error_type': 'SKIPPED_WRONG_CLIENT',
+            'p_classify_detail': classify_detail,
+            'p_field_mapping': None,
+            'p_bot_protection': False,
+            'p_submitted_at': jst_now().isoformat(),
+            'p_run_id': run_id,
+        }
+        try:
+            supabase.rpc(FN_MARK_DONE, _md_args).execute()
+        except Exception as e_mdmsc:
+            if _should_fallback_on_rpc_error(e_mdmsc, FN_MARK_DONE, ['p_run_id']):
+                _md_args.pop('p_run_id', None)
+                try:
+                    supabase.rpc(FN_MARK_DONE, _md_args).execute()
+                except Exception as e_mdmsc2:
+                    if (not USE_EXTRA_TABLE) and _should_fallback_on_rpc_error(e_mdmsc2, FN_MARK_DONE, []):
+                        supabase.rpc('mark_done', _md_args).execute()
+                    else:
+                        raise
+            else:
+                raise
+        try:
+            wid = getattr(worker, 'worker_id', 0)
+            _get_lifecycle_logger().info(
+                f"process_done: company_id={e_client.company_id}, worker_id={wid}, targeting_id={targeting_id}, success=False, reason=SKIPPED_WRONG_CLIENT"
+            )
+        except Exception:
+            pass
+        return True
     except Exception as e:
         logger.error(f"fetch company error ({company_id}): {e}")
         # mark failed quickly（代表コードで詳細分類を付与）
@@ -1114,7 +1228,9 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         try:
             if (not is_success) and isinstance(error_type, str) and error_type == 'PROHIBITION_DETECTED':
                 try:
-                    supabase.table(COMPANY_TABLE).update({'prohibition_detected': True}).eq('id', company_id).execute()
+                    query = supabase.table(COMPANY_TABLE).update({'prohibition_detected': True}).eq('id', company_id)
+                    query = _apply_extra_client_filter(query, matched_extra_client)
+                    query.execute()
                 except Exception as ue:
                     logger.warning(f"companies.prohibition_detected update failed (company_id={company_id}, suppressed): {ue}")
         except Exception:
@@ -1134,7 +1250,9 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 (isinstance(error_type, str) and error_type == 'NO_MESSAGE_AREA') or code_val == 'NO_MESSAGE_AREA'
             ):
                 try:
-                    supabase.table(COMPANY_TABLE).update({'black': True}).eq('id', company_id).execute()
+                    query = supabase.table(COMPANY_TABLE).update({'black': True}).eq('id', company_id)
+                    query = _apply_extra_client_filter(query, matched_extra_client)
+                    query.execute()
                 except Exception as ue:
                     logger.warning(f"{COMPANY_TABLE}.black update failed (company_id={company_id}, suppressed): {ue}")
         except Exception:

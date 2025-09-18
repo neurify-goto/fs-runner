@@ -4,6 +4,7 @@ create or replace function public.create_queue_for_targeting_step_extra(
   p_targeting_id bigint,
   p_targeting_sql text,
   p_ng_companies text,
+  p_client_name text default null,
   p_shards integer default 8,
   p_limit integer default 2000,
   p_after_id bigint default 0,
@@ -24,6 +25,7 @@ declare
   v_t0 timestamp with time zone;
   v_t1 timestamp with time zone;
   v_elapsed_ms numeric;
+  v_client_name text;
 begin
   perform set_config('statement_timeout', '120000', true);
   perform set_config('lock_timeout', '10000', true);
@@ -36,6 +38,11 @@ begin
 
   v_shards := coalesce(p_shards, 8);
   if v_shards is null or v_shards <= 0 then v_shards := 8; end if;
+
+  v_client_name := nullif(btrim(coalesce(p_client_name, '')), '');
+  if v_client_name is null then
+    raise exception 'p_client_name is required for create_queue_for_targeting_step_extra';
+  end if;
 
   v_t0 := clock_timestamp();
   raise notice 'CQT_STEP_EXTRA:BEGIN stage=%, after_id=%, limit=%, id_window=%, shards=%, targeting_id=%, date=%', v_stage, p_after_id, p_limit, p_id_window, v_shards, p_targeting_id, p_target_date;
@@ -82,6 +89,7 @@ begin
                                and c.company_name not like ''%税理士%''
                                and c.company_name not like ''%弁理士%''
                                and c.company_name not like ''%学校%'')';
+    v_sql := v_sql || ' and (c.client = $8)';
     v_sql := v_sql || ' order by c.id asc limit $5 ),
       bp as (
         select coalesce(max(priority), 0) as base
@@ -109,7 +117,7 @@ begin
              (cand_agg.cand_count = $5 OR cand_agg.cand_max >= ($6 + $7)) as has_more
       from ins_agg, cand_agg;';
     v_t1 := clock_timestamp();
-    execute v_sql into v_inserted, v_last_id, v_has_more using p_target_date, p_targeting_id, v_ng_names, v_shards, p_limit, p_after_id, p_id_window;
+    execute v_sql into v_inserted, v_last_id, v_has_more using p_target_date, p_targeting_id, v_ng_names, v_shards, p_limit, p_after_id, p_id_window, v_client_name;
     v_elapsed_ms := extract(epoch from (clock_timestamp() - v_t1)) * 1000;
     raise notice 'CQT_STEP_EXTRA:END stage=1 inserted=%, last_id=%, has_more=%, elapsed_ms=%', v_inserted, v_last_id, v_has_more, v_elapsed_ms::bigint;
     return query select v_inserted, v_last_id, v_has_more, v_stage;
@@ -155,6 +163,7 @@ begin
                                and c.company_name not like ''%税理士%''
                                and c.company_name not like ''%弁理士%''
                                and c.company_name not like ''%学校%'')';
+    v_sql := v_sql || ' and (c.client = $8)';
     v_sql := v_sql || ' order by c.id asc limit $5 ),
       bp as (
         select coalesce(max(priority), 0) as base
@@ -183,7 +192,7 @@ begin
       from ins_agg, cand_agg;';
 
     v_t1 := clock_timestamp();
-    execute v_sql into v_inserted, v_last_id, v_has_more using p_target_date, p_targeting_id, v_ng_names, v_shards, p_limit, p_after_id, p_id_window;
+    execute v_sql into v_inserted, v_last_id, v_has_more using p_target_date, p_targeting_id, v_ng_names, v_shards, p_limit, p_after_id, p_id_window, v_client_name;
     v_elapsed_ms := extract(epoch from (clock_timestamp() - v_t1)) * 1000;
     raise notice 'CQT_STEP_EXTRA:END stage=2 inserted=%, last_id=%, has_more=%, elapsed_ms=%', v_inserted, v_last_id, v_has_more, v_elapsed_ms::bigint;
     return query select v_inserted, v_last_id, v_has_more, v_stage;
@@ -191,6 +200,5 @@ begin
 end;
 $$;
 
-grant execute on function public.create_queue_for_targeting_step_extra(date,bigint,text,text,integer,integer,bigint,smallint,integer)
+grant execute on function public.create_queue_for_targeting_step_extra(date,bigint,text,text,text,integer,integer,bigint,smallint,integer)
   to authenticated, service_role;
-

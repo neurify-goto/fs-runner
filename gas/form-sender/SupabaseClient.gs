@@ -109,22 +109,36 @@ function resetSendQueueAll(options) {
 /** targeting用の当日キュー作成 */
 function createQueueForTargeting(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, maxDailySends, shards, options) {
   const useExtra = options && options.useExtra === true;
+  const clientName = (function(opt) {
+    if (!opt || typeof opt.clientName !== 'string') return '';
+    const trimmed = opt.clientName.trim();
+    return trimmed || '';
+  })(options);
   const fn = useExtra ? 'create_queue_for_targeting_extra' : 'create_queue_for_targeting';
-  return callRpc_(fn, {
+  const payload = {
     p_target_date: targetDateJst,
     p_targeting_id: Number(targetingId),
     p_targeting_sql: targetingSql || '',
     p_ng_companies: ngCompaniesCsv || '',
     p_max_daily: Number(maxDailySends || 0),
     p_shards: Number(shards || 8)
-  });
+  };
+  if (useExtra) {
+    payload.p_client_name = clientName || null;
+  }
+  return callRpc_(fn, payload);
 }
 
 /** チャンク投入: 単一ステージ(1/2)を after_id 以降 p_limit 件だけ投入 */
 function createQueueForTargetingStep(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, shards, limitPerCall, afterId, stage, idWindow, options) {
   const useExtra = options && options.useExtra === true;
+  const clientName = (function(opt) {
+    if (!opt || typeof opt.clientName !== 'string') return '';
+    const trimmed = opt.clientName.trim();
+    return trimmed || '';
+  })(options);
   const fn = useExtra ? 'create_queue_for_targeting_step_extra' : 'create_queue_for_targeting_step';
-  return callRpc_(fn, {
+  const payload = {
     p_target_date: targetDateJst,
     p_targeting_id: Number(targetingId),
     p_targeting_sql: targetingSql || '',
@@ -134,7 +148,11 @@ function createQueueForTargetingStep(targetingId, targetDateJst, targetingSql, n
     p_after_id: Number(afterId || 0),
     p_stage: Number(stage || 1),
     p_id_window: Number(idWindow || 50000)
-  });
+  };
+  if (useExtra) {
+    payload.p_client_name = clientName || null;
+  }
+  return callRpc_(fn, payload);
 }
 
 /**

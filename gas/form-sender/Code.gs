@@ -598,6 +598,14 @@ function buildSendQueueForTargeting(targetingId = null) {
     if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
     const t = cfg.targeting;
     const useExtra = !!(cfg.use_extra_table || t.use_extra_table);
+    const clientName = (function(clientSection) {
+      if (!clientSection || typeof clientSection.company_name !== 'string') return '';
+      const trimmed = clientSection.company_name.trim();
+      return trimmed || '';
+    })(cfg.client);
+    if (useExtra && !clientName) {
+      throw new Error('clientシートのcompany_nameが空のためextraテーブルを利用できません');
+    }
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     // デバッグ: パラメータ要約
     const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
@@ -620,7 +628,7 @@ function buildSendQueueForTargeting(targetingId = null) {
         (t.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
         10000,
         8,
-        useExtra ? { useExtra: true } : undefined
+        useExtra ? { useExtra: true, clientName } : undefined
       );
       const elapsedMs = Date.now() - startedMs;
       console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: Number(inserted) || 0, elapsed_ms: elapsedMs }));
@@ -632,7 +640,7 @@ function buildSendQueueForTargeting(targetingId = null) {
       // フォールバック: チャンク分割投入（Stage1→Stage2）
       console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked', targeting_id: targetingId, reason: 'statement_timeout' }));
       const result = useExtra
-        ? buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''))
+        ? buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''), clientName)
         : buildSendQueueForTargetingChunked_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''));
       return result;
     }
@@ -676,6 +684,14 @@ function buildSendQueueForAllTargetings() {
 
         const targeting = cfg.targeting;
         const useExtra = !!(cfg.use_extra_table || targeting.use_extra_table || t.use_extra_table === true);
+        const clientName = (function(clientSection) {
+          if (!clientSection || typeof clientSection.company_name !== 'string') return '';
+          const trimmed = clientSection.company_name.trim();
+          return trimmed || '';
+        })(cfg.client);
+        if (useExtra && !clientName) {
+          throw new Error('clientシートのcompany_nameが空のためextraテーブルを利用できません');
+        }
         const dateStartMs = Date.now();
         // 追加の詳細デバッグ: 各targetingのパラメータと長さ
         const ngTokens = (targeting.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
@@ -697,7 +713,7 @@ function buildSendQueueForAllTargetings() {
             (targeting.ng_companies || ''),
             10000,
             8,
-            useExtra ? { useExtra: true } : undefined
+            useExtra ? { useExtra: true, clientName } : undefined
           );
           n = Number(inserted) || 0;
           const elapsedMs = Date.now() - dateStartMs;
@@ -711,7 +727,7 @@ function buildSendQueueForAllTargetings() {
           if (!isStmtTimeout) throw e;
           console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked', targeting_id: targetingId, reason: 'statement_timeout' }));
           const res = useExtra
-            ? buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targeting.targeting_sql || '', (targeting.ng_companies || ''))
+            ? buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targeting.targeting_sql || '', (targeting.ng_companies || ''), clientName)
             : buildSendQueueForTargetingChunked_(targetingId, dateJst, targeting.targeting_sql || '', (targeting.ng_companies || ''));
           if (res && res.success) {
             n = Number(res.inserted_total || 0);
@@ -769,6 +785,11 @@ function buildSendQueueForTargetingExtra(targetingId = null) {
     const cfg = getTargetingConfig(targetingId);
     if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
     const t = cfg.targeting;
+    const clientName = (function(clientSection) {
+      if (!clientSection || typeof clientSection.company_name !== 'string') return '';
+      const trimmed = clientSection.company_name.trim();
+      return trimmed || '';
+    })(cfg.client);
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
     console.log(JSON.stringify({
@@ -785,7 +806,7 @@ function buildSendQueueForTargetingExtra(targetingId = null) {
         (t.ng_companies || ''),
         10000,
         8,
-        { useExtra: true }
+        { useExtra: true, clientName }
       );
       const elapsedMs = Date.now() - startedMs;
       console.log(JSON.stringify({ level: 'info', event: 'queue_build_done_extra', targeting_id: targetingId, inserted: Number(inserted) || 0, elapsed_ms: elapsedMs }));
@@ -795,7 +816,7 @@ function buildSendQueueForTargetingExtra(targetingId = null) {
       const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
       if (!isStmtTimeout) throw e;
       console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked_extra', targeting_id: targetingId, reason: 'statement_timeout' }));
-      const result = buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''));
+      const result = buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''), clientName);
       if (result && result.success) {
         return { success: true, inserted_total: Number(result.inserted_total || 0), targeting_id: targetingId, mode: 'chunked' };
       }
@@ -826,11 +847,19 @@ function buildSendQueueForAllTargetingsExtra() {
       let cfg = null;
       let targetingSql = '';
       let ngCompaniesCsv = '';
+      let clientName = '';
       try {
         cfg = getTargetingConfig(targetingId);
         if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
         targetingSql = cfg.targeting.targeting_sql || '';
         ngCompaniesCsv = cfg.targeting.ng_companies || '';
+        if (cfg.client && typeof cfg.client.company_name === 'string') {
+          const trimmed = cfg.client.company_name.trim();
+          clientName = trimmed || '';
+        }
+        if (useExtra && !clientName) {
+          throw new Error('clientシートのcompany_nameが空のためextraテーブルを利用できません');
+        }
 
         const inserted = createQueueForTargeting(
           targetingId,
@@ -839,7 +868,7 @@ function buildSendQueueForAllTargetingsExtra() {
           ngCompaniesCsv,
           10000,
           8,
-          { useExtra: true }
+          { useExtra: true, clientName }
         );
         processed++; totalInserted += Number(inserted) || 0;
         details.push({ targeting_id: targetingId, success: true, inserted: Number(inserted) || 0 });
@@ -847,7 +876,7 @@ function buildSendQueueForAllTargetingsExtra() {
         const msg = String(e || '');
         const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
         if (isStmtTimeout) {
-          const res = buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targetingSql, ngCompaniesCsv);
+          const res = buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targetingSql, ngCompaniesCsv, clientName);
           if (res && res.success) {
             processed++; totalInserted += Number(res.inserted_total || 0);
             details.push({ targeting_id: targetingId, success: true, inserted: Number(res.inserted_total || 0), mode: 'chunked' });
@@ -935,10 +964,15 @@ function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, 
 }
 
 // extra 版のチャンク投入
-function buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targetingSql, ngCompaniesCsv) {
+function buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targetingSql, ngCompaniesCsv, clientName) {
   const MAX_TOTAL = 10000;
   let total = 0;
   const shards = 8;
+  const normalizedClientName = (function(name) {
+    if (typeof name !== 'string') return '';
+    const trimmed = name.trim();
+    return trimmed || '';
+  })(clientName);
   let limit = CONFIG.CHUNK_LIMIT_INITIAL;
   const minLimit = CONFIG.CHUNK_LIMIT_MIN;
   let idWindow = CONFIG.CHUNK_ID_WINDOW_INITIAL;
@@ -955,7 +989,7 @@ function buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targeting
       const started = Date.now();
       try {
         const windowStart = afterId;
-        const res = createQueueForTargetingStep(targetingId, dateJst, targetingSql, ngCompaniesCsv, shards, limit, windowStart, stage, idWindow, { useExtra: true });
+        const res = createQueueForTargetingStep(targetingId, dateJst, targetingSql, ngCompaniesCsv, shards, limit, windowStart, stage, idWindow, { useExtra: true, clientName: normalizedClientName });
         const elapsed = Date.now() - started;
         const inserted = Number((res && res[0] && res[0].inserted) || 0);
         const lastId = Number((res && res[0] && res[0].last_id) || windowStart);
