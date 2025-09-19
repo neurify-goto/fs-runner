@@ -26,6 +26,61 @@ function getGitHubConfig() {
  * @param {Object} clientConfig スプレッドシートから取得したクライアント設定
  * @returns {Object} 送信結果
  */
+/**
+ * use_extra_table フラグを正規化
+ * @param {*} value 判定対象の値
+ * @returns {boolean} 正規化済み真偽値
+ */
+function normalizeUseExtraFlag(value) {
+  if (value === true || value === false) {
+    return value;
+  }
+
+  if (value === null || typeof value === 'undefined') {
+    return false;
+  }
+
+  if (typeof value === 'number') {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === '') return false;
+    if (['true', '1', 'yes', 'y', 'on'].indexOf(normalized) >= 0) return true;
+    if (['false', '0', 'no', 'n', 'off', 'null'].indexOf(normalized) >= 0) return false;
+  }
+
+  if (value && typeof value.valueOf === 'function' && value !== value.valueOf()) {
+    return normalizeUseExtraFlag(value.valueOf());
+  }
+
+  return false;
+}
+
+/**
+ * use_extra_table 判定を決定
+ * @param {Object} options オプションパラメータ
+ * @param {Object} clientConfig クライアント設定
+ * @returns {boolean} 判定結果
+ */
+function resolveUseExtraTableFlag(options, clientConfig) {
+  if (options && Object.prototype.hasOwnProperty.call(options, 'useExtra')) {
+    return normalizeUseExtraFlag(options.useExtra);
+  }
+
+  if (clientConfig && Object.prototype.hasOwnProperty.call(clientConfig, 'use_extra_table')) {
+    return normalizeUseExtraFlag(clientConfig.use_extra_table);
+  }
+
+  if (clientConfig && clientConfig.targeting && Object.prototype.hasOwnProperty.call(clientConfig.targeting, 'use_extra_table')) {
+    return normalizeUseExtraFlag(clientConfig.targeting.use_extra_table);
+  }
+
+  return false;
+}
+
 function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = null, runTotal = null, options = {}) {
   try {
     const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
@@ -57,7 +112,7 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = 
       throw new Error(`clientConfig.targeting に必須フィールドが不足: ${missingTargetingFields.join(', ')}`);
     }
     
-    const useExtra = options && options.useExtra === true;
+    const useExtra = resolveUseExtraTableFlag(options, clientConfig);
     const payload = {
       event_type: eventType,
       client_payload: {
@@ -88,6 +143,17 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = 
         payload.client_payload.company_table = 'companies';
         payload.client_payload.send_queue_table = 'send_queue';
       }
+      try {
+        console.log(JSON.stringify({
+          level: 'debug',
+          event: 'repository_dispatch_use_extra_resolved',
+          targeting_id: targetingId,
+          options_useExtra: options ? options.useExtra : undefined,
+          client_use_extra_table: clientConfig ? clientConfig.use_extra_table : undefined,
+          targeting_use_extra_table: clientConfig && clientConfig.targeting ? clientConfig.targeting.use_extra_table : undefined,
+          resolved_use_extra_table: useExtra
+        }));
+      } catch (logError) {}
     } catch (e) {
       // 解析失敗時は無視（後方互換）
     }
