@@ -108,33 +108,33 @@ jobs:
         elif [ "${{ github.event.action }}" = "form_sender_test" ]; then
           echo "TEST_MODE=true" >> $GITHUB_ENV
           echo "TARGETING_ID=1" >> $GITHUB_ENV
-          RAW_NUM_WORKERS="${{ github.event.client_payload.execution.workers_per_workflow || 4 }}"
+          RAW_NUM_WORKERS="${{ (github.event.client_payload.execution && github.event.client_payload.execution.workers_per_workflow) || github.event.client_payload.workers_per_workflow || 4 }}"
           echo "Running in TEST MODE with targeting_id=1"
           # From payload if present
-          RAW_USE_EXTRA="${{ toJson(github.event.client_payload.tables.use_extra_table || false) }}"
+          RAW_USE_EXTRA="${{ toJson((github.event.client_payload.tables && github.event.client_payload.tables.use_extra_table) || github.event.client_payload.use_extra_table || false) }}"
           USE_EXTRA=$(normalize_use_extra_flag "${RAW_USE_EXTRA}")
           echo "Payload use_extra_table (form_sender_test) raw=${RAW_USE_EXTRA}, normalized=${USE_EXTRA}"
           if [ "${USE_EXTRA}" = "true" ]; then
             echo "COMPANY_TABLE=companies_extra" >> $GITHUB_ENV
             echo "SEND_QUEUE_TABLE=send_queue_extra" >> $GITHUB_ENV
           else
-            echo "COMPANY_TABLE=${{ github.event.client_payload.tables.company_table || 'companies' }}" >> $GITHUB_ENV
-            echo "SEND_QUEUE_TABLE=${{ github.event.client_payload.tables.send_queue_table || 'send_queue' }}" >> $GITHUB_ENV
+            echo "COMPANY_TABLE=${{ (github.event.client_payload.tables && github.event.client_payload.tables.company_table) || github.event.client_payload.company_table || 'companies' }}" >> $GITHUB_ENV
+            echo "SEND_QUEUE_TABLE=${{ (github.event.client_payload.tables && github.event.client_payload.tables.send_queue_table) || github.event.client_payload.send_queue_table || 'send_queue' }}" >> $GITHUB_ENV
           fi
         else
           echo "TEST_MODE=false" >> $GITHUB_ENV
           echo "TARGETING_ID=${{ github.event.client_payload.targeting_id }}" >> $GITHUB_ENV
-          RAW_NUM_WORKERS="${{ github.event.client_payload.execution.workers_per_workflow || 4 }}"
+          RAW_NUM_WORKERS="${{ (github.event.client_payload.execution && github.event.client_payload.execution.workers_per_workflow) || github.event.client_payload.workers_per_workflow || 4 }}"
           echo "Running in PRODUCTION MODE"
-          RAW_USE_EXTRA="${{ toJson(github.event.client_payload.tables.use_extra_table || false) }}"
+          RAW_USE_EXTRA="${{ toJson((github.event.client_payload.tables && github.event.client_payload.tables.use_extra_table) || github.event.client_payload.use_extra_table || false) }}"
           USE_EXTRA=$(normalize_use_extra_flag "${RAW_USE_EXTRA}")
           echo "Payload use_extra_table (repository_dispatch) raw=${RAW_USE_EXTRA}, normalized=${USE_EXTRA}"
           if [ "${USE_EXTRA}" = "true" ]; then
             echo "COMPANY_TABLE=companies_extra" >> $GITHUB_ENV
             echo "SEND_QUEUE_TABLE=send_queue_extra" >> $GITHUB_ENV
           else
-            echo "COMPANY_TABLE=${{ github.event.client_payload.tables.company_table || 'companies' }}" >> $GITHUB_ENV
-            echo "SEND_QUEUE_TABLE=${{ github.event.client_payload.tables.send_queue_table || 'send_queue' }}" >> $GITHUB_ENV
+            echo "COMPANY_TABLE=${{ (github.event.client_payload.tables && github.event.client_payload.tables.company_table) || github.event.client_payload.company_table || 'companies' }}" >> $GITHUB_ENV
+            echo "SEND_QUEUE_TABLE=${{ (github.event.client_payload.tables && github.event.client_payload.tables.send_queue_table) || github.event.client_payload.send_queue_table || 'send_queue' }}" >> $GITHUB_ENV
           fi
         fi
 
@@ -147,9 +147,9 @@ jobs:
 
         # シャードIDを計算（Repository Dispatch の並列起動時）。send_queue作成時の既定shards=8に準拠
         if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-          RI="${{ github.event.client_payload.execution.run_index || '' }}"
+          RI="${{ (github.event.client_payload.execution && github.event.client_payload.execution.run_index) || github.event.client_payload.run_index || '' }}"
           if [ -n "$RI" ]; then
-            SHARDS="${{ github.event.client_payload.execution.shards || github.event.client_payload.shards || 8 }}"
+            SHARDS="${{ (github.event.client_payload.execution && github.event.client_payload.execution.shards) || github.event.client_payload.shards || 8 }}"
             if ! echo "$SHARDS" | grep -Eq '^[0-9]+$' || [ "$SHARDS" -le 0 ]; then SHARDS=8; fi
             # run_indexは1始まりとして扱う
             SI=$(( (RI - 1) % SHARDS ))
