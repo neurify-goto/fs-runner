@@ -828,7 +828,6 @@ function updateTargetingSubmissionsStats() {
     const successAllColumnValues = [];
     const totalTodayColumnValues = [];
     const successTodayColumnValues = [];
-    const successRateTodayColumnValues = [];
     
     let successCount = 0;
     let invalidCount = 0;
@@ -843,7 +842,6 @@ function updateTargetingSubmissionsStats() {
         successAllColumnValues.push(['']);
         totalTodayColumnValues.push(['']);
         successTodayColumnValues.push(['']);
-        successRateTodayColumnValues.push(['']);
         invalidCount++;
         continue;
       }
@@ -867,18 +865,17 @@ function updateTargetingSubmissionsStats() {
       successAllColumnValues.push([successSubmissionsCount]);
       totalTodayColumnValues.push([todayTotalCount]);
       successTodayColumnValues.push([todaySuccessSubmissionsCount]);
-      successRateTodayColumnValues.push([todaySuccessRate]);
-      
+
       console.log(
-        `行 ${rowNumber} (targeting_id=${targetingId}): 通算(${totalCount}, ${successSubmissionsCount}) 本日(${todayTotalCount}, ${todaySuccessSubmissionsCount}) 成功率(${todaySuccessRate}%)`
+        `行 ${rowNumber} (targeting_id=${targetingId}): 通算(${totalCount}, ${successSubmissionsCount}) 本日(${todayTotalCount}, ${todaySuccessSubmissionsCount}) 成功率(参照値 ${todaySuccessRate}%)`
       );
       successCount++;
     }
     
-    // N列・O列・P列・Q列を一括更新（値のみ）
+    // 通算・本日の統計列を一括更新（値のみ）
     const totalAllRange = targetingSheet.getRange(2, totalAllColumnIndex, dataRowCount, 1);
     totalAllRange.setValues(totalAllColumnValues);
-    
+
     const successAllRange = targetingSheet.getRange(2, successAllColumnIndex, dataRowCount, 1);
     successAllRange.setValues(successAllColumnValues);
     
@@ -888,8 +885,7 @@ function updateTargetingSubmissionsStats() {
     const successTodayRange = targetingSheet.getRange(2, successTodayColumnIndex, dataRowCount, 1);
     successTodayRange.setValues(successTodayColumnValues);
 
-    const successRateTodayRange = targetingSheet.getRange(2, successRateTodayColumnIndex, dataRowCount, 1);
-    successRateTodayRange.setValues(successRateTodayColumnValues);
+    // 本日送信成功率はスプレッドシート側の通常計算に委ねるため更新しない
     
     const jstTime = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss');
     
