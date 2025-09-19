@@ -127,22 +127,30 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = 
     // 追加情報: 並列起動数とインデックス（任意）
     try {
       const cw = Math.max(1, parseInt(clientConfig?.targeting?.concurrent_workflow || 1) || 1);
-      payload.client_payload.concurrent_workflow = cw;
-      if (runIndex !== null) payload.client_payload.run_index = runIndex;
-      if (runTotal !== null) payload.client_payload.run_total = runTotal;
-      // 1ワークフロー内ワーカー数（Code.gsのCONFIG由来、1〜4にクランプ）
+      // 実行メタ情報（API仕様: プロパティ数10以下に抑制）
+      const executionMeta = {
+        concurrent_workflow: cw
+      };
+      if (runIndex !== null) executionMeta.run_index = runIndex;
+      if (runTotal !== null) executionMeta.run_total = runTotal;
       const rawWorkers = (typeof CONFIG?.WORKERS_PER_WORKFLOW !== 'undefined') ? CONFIG.WORKERS_PER_WORKFLOW : 1;
       const w = Math.min(4, Math.max(1, parseInt(rawWorkers) || 1));
-      payload.client_payload.workers_per_workflow = w;
-      // extraテーブル使用フラグ
-      payload.client_payload.use_extra_table = useExtra;
+      executionMeta.workers_per_workflow = w;
+      payload.client_payload.execution = executionMeta;
+
+      // テーブル選択情報
+      const tableSelection = {
+        use_extra_table: useExtra
+      };
       if (useExtra) {
-        payload.client_payload.company_table = 'companies_extra';
-        payload.client_payload.send_queue_table = 'send_queue_extra';
+        tableSelection.company_table = 'companies_extra';
+        tableSelection.send_queue_table = 'send_queue_extra';
       } else {
-        payload.client_payload.company_table = 'companies';
-        payload.client_payload.send_queue_table = 'send_queue';
+        tableSelection.company_table = 'companies';
+        tableSelection.send_queue_table = 'send_queue';
       }
+      payload.client_payload.tables = tableSelection;
+
       try {
         console.log(JSON.stringify({
           level: 'debug',
@@ -151,7 +159,9 @@ function sendRepositoryDispatch(taskType, targetingId, clientConfig, runIndex = 
           options_useExtra: options ? options.useExtra : undefined,
           client_use_extra_table: clientConfig ? clientConfig.use_extra_table : undefined,
           targeting_use_extra_table: clientConfig && clientConfig.targeting ? clientConfig.targeting.use_extra_table : undefined,
-          resolved_use_extra_table: useExtra
+          resolved_use_extra_table: useExtra,
+          execution_meta: executionMeta,
+          table_selection: tableSelection
         }));
       } catch (logError) {}
     } catch (e) {
