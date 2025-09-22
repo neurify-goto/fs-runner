@@ -134,7 +134,7 @@ begin
 
   -- 追加要件(改): 総数が上限(10000)に満たない場合のみ、
   -- 「過去に送信試行はあるが成功履歴がないもの」で不足分を補充。
-  -- さらに、直近2週間（JST基準）に送信試行(submissions)がある企業は除外する。
+  -- さらに、直近3日間（JST基準）に送信試行(submissions)がある企業は除外する。
   if coalesce(v_current_total, 0) < v_limit then
     raise notice 'CQT:STAGE2 need=% (current_total=%, limit=%)', (v_limit - coalesce(v_current_total,0)), coalesce(v_current_total,0), v_limit;
     v_need := v_limit - coalesce(v_current_total, 0);
@@ -155,12 +155,12 @@ begin
                  and s_today.company_id = c.id
                  and s_today.submitted_at >= ($1::timestamp AT TIME ZONE ''Asia/Tokyo'')
                  and s_today.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
-           -- 直近2週間(JST)に送信試行があるものは除外
-           left join public.submissions s_recent14
-                  on s_recent14.targeting_id = $2
-                 and s_recent14.company_id = c.id
-                 and s_recent14.submitted_at >= (($1::timestamp - interval ''14 days'') AT TIME ZONE ''Asia/Tokyo'')
-                 and s_recent14.submitted_at <  (($1::timestamp) AT TIME ZONE ''Asia/Tokyo'')
+           -- 直近3日間(JST)に送信試行があるものは除外
+           left join public.submissions s_recent3
+                  on s_recent3.targeting_id = $2
+                 and s_recent3.company_id = c.id
+                 and s_recent3.submitted_at >= (($1::timestamp - interval ''3 days'') AT TIME ZONE ''Asia/Tokyo'')
+                 and s_recent3.submitted_at <  (($1::timestamp) AT TIME ZONE ''Asia/Tokyo'')
            join hist h
              on h.company_id = c.id
           where c.form_url is not null
@@ -168,7 +168,7 @@ begin
             and coalesce(c.prohibition_detected, false) = false
             and c.duplication is null
             and s_today.id is null
-            and s_recent14.id is null
+            and s_recent3.id is null
             and coalesce(h.has_success, false) = false';
 
     -- targeting_sql を同様に適用
