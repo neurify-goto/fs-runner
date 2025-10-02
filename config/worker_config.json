@@ -10,9 +10,7 @@
   "_comment_form_sender": "Form-Sender用マルチプロセス設定（重いフォーム送信処理に最適化）",
   "_comment_form_sender_priority": "設定優先順位: form_sender_multi_process専用設定を使用、フォールバック無し",
   "form_sender_multi_process": {
-    "num_workers": 3,
-    "github_actions_workers": 3,
-    "max_workers": 3,
+    "_comment_worker_count": "ワーカー数は GAS CONFIG.WORKERS_PER_WORKFLOW や Runner CLI (--num-workers) で管理",
     "worker_startup_timeout": 60,
     "worker_shutdown_timeout": 30,
     "heartbeat_interval": 90,
@@ -234,19 +232,6 @@
       "enable_buffering": false,
       "buffer_size": 20,
       "buffer_timeout_seconds": 30
-    }
-  },
-  "_comment_resource": "リソース検証とモニタリング設定（GitHub Actions 4コア16GB環境対応）",
-  "resource_validation": {
-    "_comment_memory_limit": "16GB の 89% (安全マージン11%確保)",
-    "max_total_memory_mb": 14336,
-    "_comment_cpu_limit": "CPU制限: 4コア中3コア使用、1コア予約",
-    "max_total_workers": 3,
-    "_comment_startup": "起動時検証を有効化",
-    "validate_on_startup": true,
-    "memory_calculation": {
-      "form_sender_total": "3_workers_x_3072MB_plus_3GB_system",
-      "form_finder_total": "3_workers_x_2048MB_plus_3GB_system"
     }
   },
   "_comment_performance": "パフォーマンス監視設定",

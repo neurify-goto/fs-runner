@@ -18,9 +18,6 @@ class ConfigValidator:
     # 設定値の制約定義
     CONSTRAINTS = {
         'multi_process': {
-            'num_workers': {'min': 1, 'max': 4, 'type': int},
-            'github_actions_workers': {'min': 1, 'max': 3, 'type': int},
-            'max_workers': {'min': 1, 'max': 4, 'type': int},
             'worker_startup_timeout': {'min': 30, 'max': 300, 'type': int},
             'worker_shutdown_timeout': {'min': 10, 'max': 120, 'type': int},
             'heartbeat_interval': {'min': 10, 'max': 300, 'type': int},
@@ -105,28 +102,21 @@ class ConfigValidator:
                 if 'max' in constraints and value > constraints['max']:
                     errors.append(f"multi_process.{field_name} must be <= {constraints['max']}, got {value}")
             
-            # GitHub Actions固有の制約（3ワーカー設計対応）
-            if is_github_actions:
-                num_workers = mp_config.get('num_workers', 0)
-                
-                # 3ワーカー設計の具体的検証
-                if num_workers == 3:
-                    logger.info(f"GitHub Actions: Using optimized 3-worker configuration")
-                elif num_workers > 3:
-                    errors.append(f"GitHub Actions environment: num_workers should be <= 3 (1 core reserved for orchestrator), got {num_workers}")
-                elif num_workers < 2:
-                    errors.append(f"GitHub Actions environment: num_workers should be >= 2 for parallel processing, got {num_workers}")
-                
-                # システムメモリを考慮した正確なメモリ計算
+            # GitHub Actions固有の制約は、num_workers が設定されている場合のみ評価
+            num_workers = mp_config.get('num_workers')
+            if is_github_actions and isinstance(num_workers, int):
+                if num_workers < 1:
+                    errors.append(f"GitHub Actions environment: num_workers must be >= 1 when specified, got {num_workers}")
+
                 memory_per_worker = mp_config.get('memory_per_worker_mb', 0)
                 system_memory = 3072  # オーケストレーター + システムプロセス: 3GB
                 total_memory = (memory_per_worker * num_workers) + system_memory
-                
-                # メモリ配分の妥当性チェック
-                if total_memory > 14336:  # 16GB環境の89%まで許容（11%安全マージン）
-                    errors.append(f"GitHub Actions: Total memory usage ({total_memory}MB = {num_workers}×{memory_per_worker}MB + {system_memory}MB system) exceeds safe limit (14336MB/16GB)")
-                    
-                # Form-Sender/Form-Finder別の推奨メモリ配分チェック
+
+                if total_memory > 14336:
+                    errors.append(
+                        f"GitHub Actions: Total memory usage ({total_memory}MB = {num_workers}×{memory_per_worker}MB + {system_memory}MB system) exceeds safe limit (14336MB/16GB)"
+                    )
+
                 if memory_per_worker == 3072:
                     logger.info("Memory allocation suitable for Form-Sender (heavy processing)")
                 elif memory_per_worker == 2048:
@@ -135,15 +125,19 @@ class ConfigValidator:
                     errors.append(f"GitHub Actions: memory_per_worker ({memory_per_worker}MB) may be excessive for current workloads")
             
             # 相互関係の検証
-            num_workers = mp_config.get('num_workers', 0)
-            max_workers = mp_config.get('max_workers', 0)
-            if max_workers < num_workers:
-                errors.append(f"max_workers ({max_workers}) must be >= num_workers ({num_workers})")
-            
+            num_workers_value = mp_config.get('num_workers')
+            max_workers = mp_config.get('max_workers')
+            if isinstance(num_workers_value, int) and isinstance(max_workers, int) and max_workers < num_workers_value:
+                errors.append(f"max_workers ({max_workers}) must be >= num_workers ({num_workers_value})")
+
             batch_size = mp_config.get('batch_size', 0)
             max_pending = mp_config.get('max_pending_tasks', 0)
-            if max_pending < batch_size * num_workers * 2:
-                errors.append(f"max_pending_tasks ({max_pending}) should be >= batch_size * num_workers * 2 ({batch_size * num_workers * 2})")
+            if isinstance(num_workers_value, int) and num_workers_value > 0:
+                required_pending = batch_size * num_workers_value * 2
+                if max_pending < required_pending:
+                    errors.append(
+                        f"max_pending_tasks ({max_pending}) should be >= batch_size * num_workers * 2 ({required_pending})"
+                    )
         
         except Exception as e:
             errors.append(f"Validation error: {e}")
@@ -261,9 +255,6 @@ class ConfigValidator:
         if is_github_actions:
             return {
                 'multi_process': {
-                    'num_workers': 2,
-                    'github_actions_workers': 2,
-                    'max_workers': 2,
                     'batch_size': 10,
                     'memory_per_worker_mb': 4096,
                     'max_pending_tasks': 50
@@ -272,9 +263,6 @@ class ConfigValidator:
         else:
             return {
                 'multi_process': {
-                    'num_workers': 2,
-                    'github_actions_workers': 2,
-                    'max_workers': 3,
                     'batch_size': 15,
                     'memory_per_worker_mb': 4096,
                     'max_pending_tasks': 100
