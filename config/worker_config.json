@@ -31,6 +31,24 @@
       "max_parallel_writes": 5
     }
   },
+  "_comment_cpu_profiles": "CPUクラス別の上限ワーカー数やブラウザ軽量化設定。FORM_SENDER_CPU_CLASS=low などで参照する",
+  "cpu_profiles": {
+    "standard": {
+      "max_workers": 4,
+      "browser_launch_delay_ms": 800,
+      "wait_for_network_idle": true
+    },
+    "low": {
+      "max_workers": 1,
+      "browser_launch_delay_ms": 300,
+      "wait_for_network_idle": false,
+      "resource_blocking": {
+        "block_images": true,
+        "block_fonts": true,
+        "block_stylesheets": true
+      }
+    }
+  },
   "form_sender": {
     "timeout_settings": {
       "page_load": 15000,

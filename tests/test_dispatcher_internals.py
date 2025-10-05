@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from dispatcher.config import DispatcherSettings
 from dispatcher.schemas import ExecutionConfig, FormSenderTask, Metadata, TableConfig
 from dispatcher.service import DispatcherService
-from dispatcher.gcp import SignedUrlManager
+from dispatcher.gcp import CloudRunJobRunner, SignedUrlManager
 
 
 def _task_payload_dict(
@@ -360,6 +360,85 @@ def test_dispatcher_build_env_includes_max_workers():
     assert env_vars["FORM_SENDER_CLIENT_CONFIG_OBJECT"] == task.client_config_object
     assert env_vars["FORM_SENDER_ENV"] == "cloud_run"
     assert env_vars["FORM_SENDER_LOG_SANITIZE"] == "1"
+    assert env_vars["FORM_SENDER_CPU_CLASS"] == "standard"
+
+
+def test_dispatcher_build_env_honours_cpu_class_override():
+    payload = _task_payload_dict(datetime.now(timezone.utc))
+    payload["cpu_class"] = "low"
+    task = FormSenderTask.parse_obj(payload)
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender-runner",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        default_cpu_class="standard",
+    )
+
+    service = object.__new__(DispatcherService)
+    service._settings = settings
+    service._secret_manager = None
+
+    env_vars = DispatcherService._build_env(
+        service,
+        task,
+        job_execution_id="exec-456",
+        signed_url="https://storage.googleapis.com/fs-bucket/config.json",
+    )
+
+    assert env_vars["FORM_SENDER_CPU_CLASS"] == "low"
+
+
+def test_cancel_execution_falls_back_when_run_metadata_stub(monkeypatch):
+    service = object.__new__(DispatcherService)
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender-runner",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+    )
+    service._settings = settings
+
+    fake_operation = SimpleNamespace(metadata=SimpleNamespace(Unpack=lambda target: True))
+
+    cancelled = {}
+
+    class _FakeOperationsClient:
+        def get_operation(self, name):
+            cancelled["get_operation_called"] = name
+            return fake_operation
+
+        def cancel_operation(self, name):
+            cancelled["cancel_operation_called"] = name
+
+    service._operations_client = _FakeOperationsClient()
+    service._executions_client = SimpleNamespace(cancel_execution=lambda request: (_ for _ in ()).throw(RuntimeError("should not hit executions cancel")))
+    service._supabase = SimpleNamespace(
+        get_execution=lambda execution_id: {
+            "execution_id": execution_id,
+            "status": "running",
+            "metadata": {
+                "cloud_run_operation": "operations/op-123",
+            },
+        },
+        update_status=lambda *args, **kwargs: None,
+    )
+
+    # Replace RunJobMetadata with stub lacking DESCRIPTOR
+    monkeypatch.setattr("dispatcher.gcp.RunJobMetadata", type("_StubMetadata", (), {"name": ""}))
+
+    runner = CloudRunJobRunner.__new__(CloudRunJobRunner)
+    runner._operations_client = service._operations_client
+    runner._executions_client = service._executions_client
+    runner._job_path = "projects/proj/locations/asia-northeast1/jobs/form-sender-runner"
+    service._job_runner = runner
+
+    # Should fall back to cancel_operation and not raise
+    service.cancel_execution("exec-id")
+
+    assert "cancel_operation_called" in cancelled
 
 
 def test_handle_form_sender_task_preserves_execution_id(monkeypatch):

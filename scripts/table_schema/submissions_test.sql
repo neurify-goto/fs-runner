@@ -31,3 +31,7 @@ create index if not exists idx_submissions_test_targeting_company
 
 create index if not exists idx_submissions_test_target_company_submitted
   on public.submissions_test (targeting_id, company_id, submitted_at);
+
+create index if not exists idx_submissions_test_company_recent_failures
+  on public.submissions_test (company_id, submitted_at)
+  where coalesce(success, false) = false;

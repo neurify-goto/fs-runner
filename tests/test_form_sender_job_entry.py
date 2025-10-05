@@ -22,6 +22,7 @@ def _reload_module(monkeypatch, env=None):
         "FORM_SENDER_GIT_TOKEN",
         "JOB_EXECUTION_META",
         "JOB_EXECUTION_ID",
+        "FORM_SENDER_CPU_CLASS",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -221,4 +222,3 @@ def test_prepare_workspace_detaches_commit(monkeypatch, tmp_path):
 
     assert calls[1][0] == ("git", "fetch", "--depth=1", "origin", commit)
     assert calls[2][0] == ("git", "checkout", "--force", "--detach", commit)
-

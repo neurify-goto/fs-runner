@@ -63,6 +63,7 @@
    - `job_executions.sql`
    - `send_queue_test.sql`
    - `submissions_test.sql`
+   - （既存環境も再適用推奨）`submissions.sql` / `submissions_test.sql` に部分インデックス `idx_submissions*_company_recent_failures` が追加されました。直近7日以内の送信失敗除外ロジックで利用します。
 2. **RPC / Function**
    - `create_queue_for_targeting_test`
    - `create_queue_for_targeting_step_test`
@@ -70,6 +71,7 @@
    - `mark_done_test`
    - `reset_send_queue_all_test`
    - `requeue_stale_assigned_test`
+   - 直近7日以内に送信失敗した企業は `create_queue_for_targeting_step*` の Stage1/2 で自動除外されます。追加の設定は不要ですが、Supabase テーブルに新しい部分インデックスを適用しておく必要があります。
 3. **ロール権限**
    - Cloud Run Job/dispatcher に使用する Service Role Key が上記テーブル・関数へアクセス可能であること。
 
@@ -87,6 +89,7 @@ CLI を使用する場合は、以下のように `psql` または Supabase CLI 
 ```bash
 # 例: psql で DDL を一括適用
 export SUPABASE_DB_URL="postgresql://postgres:<password>@db.<project>.supabase.co:5432/postgres"
+psql "$SUPABASE_DB_URL" -f scripts/table_schema/submissions.sql          # 部分インデックス追加
 psql "$SUPABASE_DB_URL" -f scripts/table_schema/job_executions.sql
 psql "$SUPABASE_DB_URL" -f scripts/table_schema/send_queue_test.sql
 psql "$SUPABASE_DB_URL" -f scripts/table_schema/submissions_test.sql
@@ -176,6 +179,7 @@ SUPABASE_SERVICE_ROLE_KEY=projects/${PROJECT_ID}/secrets/SUPABASE_SERVICE_ROLE_K
 | `FORM_SENDER_TOTAL_SHARDS` | `8` | fallback 値（dispatcher/GAS で上書き） |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Secret Manager | RPC 用。`--set-secrets` で注入 |
 | `SUPABASE_URL_TEST` / `SUPABASE_SERVICE_ROLE_KEY_TEST` | Secret Manager | `FORM_SENDER_TEST_MODE=true` 時に使用 |
+| `FORM_SENDER_CPU_CLASS` | `standard` (既定) / `low` | CPUプロファイル切替（`low` は 1 vCPU 運用向け。Max workers・Playwright設定を軽量化） |
 
 ### 4.5 dispatcher から渡される環境変数
 Cloud Run Job 実行時には、dispatcher から以下が注入されます。手動実行時は `gcloud run jobs execute --set-env-vars` で明示してください。
@@ -190,8 +194,15 @@ Cloud Run Job 実行時には、dispatcher から以下が注入されます。�
 - `JOB_EXECUTION_META`（Base64 JSON: `run_index_base`, `shards`, `workers_per_workflow`, `test_mode`）
 - `FORM_SENDER_GIT_REF` / `FORM_SENDER_GIT_TOKEN`（ブランチテスト）
 - `COMPANY_TABLE` / `SEND_QUEUE_TABLE` / `SUBMISSIONS_TABLE` / `FORM_SENDER_TABLE_MODE`
+- `FORM_SENDER_CPU_CLASS`（dispatcher が `cpu_class` ペイロードまたは既定値から決定）
 
 ---
+
+### 4.6 CPU プロファイル切り替え方法
+- **標準構成 (`standard`)**: 4 ワーカー前提。2 vCPU / 14 GiB リソースで従来の挙動を維持します。
+- **低負荷構成 (`low`)**: 1 ワーカー上限・軽量ブラウザ設定で 1 vCPU / 12 GiB 程度のリソースに最適化。Cloud Run Job のデフォルト環境変数で `FORM_SENDER_CPU_CLASS=low` に設定してください。
+- targeting ごとに切り替えたい場合は、dispatcher の repository_dispatch ペイロードに `"cpu_class": "low"` を付与すると、該当タスクのみ低負荷モードで実行されます。
+- GitHub Actions フォールバックでは環境変数が未設定のため `standard` が適用され、従来どおり 4 ワーカー構成を保持します。
 
 ## 5. Cloud Run Service (dispatcher) デプロイ
 
@@ -318,6 +329,7 @@ DISPATCHER_SUPABASE_SERVICE_ROLE_KEY=projects/${PROJECT_ID}/secrets/SUPABASE_SER
 | `FORM_SENDER_SIGNED_URL_TTL_HOURS` | 署名URL TTL (既定 15h) |
 | `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD` | 残り秒数閾値 (既定 1800s) |
 | `FORM_SENDER_GIT_TOKEN_SECRET` | ブランチテスト用 PAT を Secret Manager から取得する際のリソース名 |
+| `FORM_SENDER_CPU_CLASS_DEFAULT` | dispatcher が付与する既定CPUプロファイル (`standard` 推奨、低負荷運用時は `low`) |
 
 ### 5.7 Cloud Tasks から dispatcher を呼び出す設定
 - Cloud Run コンソールで `form-sender-dispatcher` の URL をコピー。

@@ -51,6 +51,7 @@ class FormSenderTask(BaseModel):
     branch: Optional[str] = None
     workflow_trigger: str = Field(default="automated")
     metadata: Metadata = Field(default_factory=Metadata)
+    cpu_class: Optional[str] = Field(default=None)
 
     @validator("client_config_object")
     def validate_gcs_uri(cls, value: str) -> str:  # type: ignore[override]
@@ -82,6 +83,15 @@ class FormSenderTask(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9\-]+", trimmed):
             raise ValueError("execution_id must be alphanumeric or hyphenated")
         return trimmed
+
+    @validator("cpu_class")
+    def validate_cpu_class(cls, value: Optional[str]) -> Optional[str]:  # type: ignore[override]
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if normalized not in {"standard", "low"}:
+            raise ValueError("cpu_class must be 'standard' or 'low'")
+        return normalized
 
     def job_execution_meta(self) -> str:
         import json
