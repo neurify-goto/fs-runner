@@ -82,6 +82,7 @@ class DispatcherService:
         }
 
     def _build_env(self, task: FormSenderTask, job_execution_id: str, signed_url: str) -> Dict[str, str]:
+        cpu_class = (task.cpu_class or self._settings.default_cpu_class or "standard").strip().lower()
         env_vars: Dict[str, str] = {
             "FORM_SENDER_CLIENT_CONFIG_URL": signed_url,
             "FORM_SENDER_CLIENT_CONFIG_OBJECT": task.client_config_object,
@@ -98,6 +99,7 @@ class DispatcherService:
             "FORM_SENDER_TABLE_MODE": "extra" if task.tables.use_extra_table else ("test" if task.test_mode else "default"),
             "JOB_EXECUTION_ID": job_execution_id,
             "JOB_EXECUTION_META": task.job_execution_meta(),
+            "FORM_SENDER_CPU_CLASS": cpu_class,
         }
 
         if task.tables.submissions_table:

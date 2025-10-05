@@ -23,6 +23,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone, timedelta, date
+from functools import lru_cache
 from typing import Optional, Dict, Any, List
 
 from supabase import create_client
@@ -101,7 +102,39 @@ def _resolve_worker_count(requested: int, company_id: Optional[int]) -> int:
         candidate = min(candidate, workers_from_meta)
 
     candidate = min(candidate, max_workers_cap)
+
+    cpu_profile_limit = _get_cpu_profile_max_workers()
+    if cpu_profile_limit is not None:
+        candidate = min(candidate, cpu_profile_limit)
+
     return max(1, candidate)
+
+
+@lru_cache(maxsize=None)
+def _get_cpu_profile_settings() -> Dict[str, Any]:
+    cpu_class = (os.getenv("FORM_SENDER_CPU_CLASS") or "standard").strip().lower()
+    try:
+        from config.manager import get_worker_config  # local import to avoid circulars during tests
+
+        worker_cfg = get_worker_config() or {}
+        profiles = worker_cfg.get("cpu_profiles") or {}
+        profile = profiles.get(cpu_class)
+        if profile is None:
+            profile = profiles.get("standard")
+        return profile or {}
+    except Exception:
+        return {}
+
+
+def _get_cpu_profile_max_workers() -> Optional[int]:
+    profile = _get_cpu_profile_settings()
+    value = profile.get("max_workers") if isinstance(profile, dict) else None
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _update_job_execution_status(status: str) -> None:
@@ -1851,6 +1884,14 @@ def main():
 
     run_id = _resolve_run_id()
     logger.info("Using run_id=%s", run_id)
+
+    cpu_class = (os.getenv("FORM_SENDER_CPU_CLASS") or "standard").strip().lower()
+    os.environ["FORM_SENDER_CPU_CLASS"] = cpu_class
+    profile_settings = _get_cpu_profile_settings()
+    if profile_settings:
+        logger.info("CPU profile '%s' loaded with settings: %s", cpu_class, {k: profile_settings[k] for k in sorted(profile_settings.keys()) if k != "resource_blocking"})
+    else:
+        logger.info("CPU profile '%s' has no custom settings", cpu_class)
 
     # 親プロセスにも抑制ポリシーを適用
     _install_logging_policy_for_ci()

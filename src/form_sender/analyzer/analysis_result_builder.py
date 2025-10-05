@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from .field_patterns import FieldPatterns
 from .element_scorer import ElementScorer
@@ -14,10 +14,13 @@ class AnalysisResultBuilder:
         self.element_scorer = element_scorer
         self.settings = settings
 
-    def create_analysis_summary(self, field_mapping: Dict[str, Any], 
-                                auto_handled: Dict[str, Any], 
-                                special_elements: Dict[str, List[Any]],
-                                form_type: str | None = None) -> Dict[str, Any]:
+    def create_analysis_summary(
+        self,
+        field_mapping: Dict[str, Any],
+        auto_handled: Dict[str, Any],
+        special_elements: Dict[str, List[Any]],
+        form_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
         total_patterns = len(self.field_patterns.get_patterns())
         mapped_count = len(field_mapping)
         auto_handled_count = len(auto_handled)

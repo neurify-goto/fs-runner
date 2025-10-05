@@ -17,6 +17,7 @@ class DispatcherSettings:
     signed_url_refresh_threshold_seconds: int = 1800
     client_config_bucket: Optional[str] = None
     git_token_secret: Optional[str] = None
+    default_cpu_class: str = "standard"
 
     @classmethod
     def from_env(cls) -> "DispatcherSettings":
@@ -37,6 +38,7 @@ class DispatcherSettings:
             signed_url_refresh_threshold_seconds=int(os.getenv("FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD", "1800")),
             client_config_bucket=os.getenv("FORM_SENDER_CLIENT_CONFIG_BUCKET"),
             git_token_secret=os.getenv("FORM_SENDER_GIT_TOKEN_SECRET"),
+            default_cpu_class=os.getenv("FORM_SENDER_CPU_CLASS_DEFAULT", "standard"),
         )
 
 

@@ -9,7 +9,16 @@ from google.api_core import operations_v1
 from google.api_core.client_options import ClientOptions
 from google.api_core.operation import Operation
 from google.cloud import run_v2, secretmanager, storage
-from google.cloud.run_v2 import CancelExecutionRequest, RunJobMetadata
+try:  # pragma: no cover - optional dependency during local tests
+    from google.cloud.run_v2 import CancelExecutionRequest, RunJobMetadata
+except ImportError:  # pragma: no cover - fallback when run_v2 extras are not available
+    class CancelExecutionRequest:  # type: ignore[override]
+        def __init__(self, name: str):
+            self.name = name
+
+    class RunJobMetadata:  # type: ignore[override]
+        def __init__(self):
+            self.name = ""
 
 from .config import DispatcherSettings
 from .schemas import FormSenderTask
@@ -163,8 +172,15 @@ class CloudRunJobRunner:
         op = self._operations_client.get_operation(name=operation_name)
         if not op.metadata:
             return None
+        if not hasattr(RunJobMetadata, "DESCRIPTOR"):
+            return None
+
         metadata = RunJobMetadata()
-        unpacked = op.metadata.Unpack(metadata)  # type: ignore[attr-defined]
+        try:
+            unpacked = op.metadata.Unpack(metadata)  # type: ignore[attr-defined]
+        except TypeError:  # pragma: no cover - defensive for stub fallback
+            return None
+
         if unpacked:
             return metadata.name
         return None
