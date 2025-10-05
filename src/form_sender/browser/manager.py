@@ -48,13 +48,25 @@ class BrowserManager:
         # デフォルトはやや長め（初回読み込みの安定性重視）
         self.timeout_settings = self.config.get("timeout_settings", {"page_load": 30000})
         worker_cfg = self.config.get("worker_config", {})
+        self.cpu_class = (os.getenv("FORM_SENDER_CPU_CLASS") or "standard").strip().lower()
+        cpu_profiles = worker_cfg.get("cpu_profiles", {}) if isinstance(worker_cfg, dict) else {}
+        self._cpu_profile = cpu_profiles.get(self.cpu_class) or cpu_profiles.get("standard") or {}
+        self._launch_delay_ms = self._cpu_profile.get("browser_launch_delay_ms")
+        try:
+            if self._launch_delay_ms is not None:
+                self._launch_delay_ms = int(self._launch_delay_ms)
+        except (TypeError, ValueError):
+            self._launch_delay_ms = None
+        profile_wait_idle = self._cpu_profile.get("wait_for_network_idle")
+        self._wait_for_network_idle = bool(profile_wait_idle) if profile_wait_idle is not None else True
         browser_cfg = worker_cfg.get("browser", {})
+        profile_rb_cfg = self._cpu_profile.get("resource_blocking", {}) if isinstance(self._cpu_profile, dict) else {}
         rb_cfg = browser_cfg.get("resource_blocking", {})
         stealth_cfg = browser_cfg.get("stealth", {}) if isinstance(browser_cfg, dict) else {}
         # 既定は設計方針に合わせてブロックON（画像/フォント）。設定で上書き可能。
-        self._rb_block_images = bool(rb_cfg.get("block_images", True))
-        self._rb_block_fonts = bool(rb_cfg.get("block_fonts", True))
-        self._rb_block_stylesheets = bool(rb_cfg.get("block_stylesheets", False))
+        self._rb_block_images = bool(profile_rb_cfg.get("block_images", rb_cfg.get("block_images", True)))
+        self._rb_block_fonts = bool(profile_rb_cfg.get("block_fonts", rb_cfg.get("block_fonts", True)))
+        self._rb_block_stylesheets = bool(profile_rb_cfg.get("block_stylesheets", rb_cfg.get("block_stylesheets", False)))
         # ステルス設定
         try:
             self._stealth_enabled = bool(stealth_cfg.get("enabled", True))
@@ -98,9 +110,6 @@ class BrowserManager:
                         logger.warning(f"Worker {self.worker_id}: Stealth unavailable, using plain Playwright (v2 err: {e_v2}; v1 err: {e_v1})")
             else:
                 self.playwright = await async_playwright().start()
-            if github_actions_env:
-                await asyncio.sleep(0.5)
-
             browser_args = self._get_browser_args(github_actions_env)
             launch_timeout = 60000 if github_actions_env else 30000
 
@@ -119,6 +128,10 @@ class BrowserManager:
             slow_kw = {}
             if slow_env.isdigit() and int(slow_env) > 0:
                 slow_kw = {"slow_mo": int(slow_env)}
+
+            launch_delay_ms = self._launch_delay_ms
+            if launch_delay_ms is None:
+                launch_delay_ms = 1000 if github_actions_env else 500
 
             # macOS の GUI 実行ではシステムの Chrome を優先利用（安定化）
             use_chrome_channel = (platform.system().lower() == 'darwin' and not use_headless and not github_actions_env)
@@ -149,7 +162,7 @@ class BrowserManager:
                 )
 
             # 環境に関わらず、起動直後は短い待機を入れて安定化
-            await asyncio.sleep(0.5 if not github_actions_env else 1.0)
+            await asyncio.sleep(max(0.1, launch_delay_ms / 1000.0))
 
             logger.info(f"Worker {self.worker_id}: Browser initialized successfully")
             return True
@@ -167,11 +180,16 @@ class BrowserManager:
         base_args = [
             "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
             "--disable-software-rasterizer", "--disable-web-security",
-            "--disable-extensions", "--disable-plugins", "--disable-images", "--no-first-run",
+            "--disable-extensions", "--disable-plugins", "--no-first-run",
             "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
             "--disable-backgrounding-occluded-windows", "--disable-ipc-flooding-protection",
             "--disable-features=VizDisplayCompositor", "--disable-background-networking",
         ]
+        if self.cpu_class == 'low':
+            base_args.extend([
+                "--disable-logging",
+                "--mute-audio",
+            ])
         if is_github_actions:
             base_args.extend([
                 "--memory-pressure-off", "--max_old_space_size=2048",
@@ -332,7 +350,7 @@ class BrowserManager:
                         wait_until=wait_state,
                     )
                     # 追加の待機はローカルGUIでは行わない（安定優先）
-                    if not (platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None)):
+                    if self._wait_for_network_idle and not (platform.system().lower() == 'darwin' and (self.headless is False or self.headless is None)):
                         try:
                             await page.wait_for_load_state('networkidle', timeout=5000)
                         except Exception:

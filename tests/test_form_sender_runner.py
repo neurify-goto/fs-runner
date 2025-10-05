@@ -1,3 +1,4 @@
+import os
 import types
 
 import pytest
@@ -49,11 +50,18 @@ class _FakeSupabase:
 def _reset_globals(monkeypatch):
     original_job_execution_id = runner.JOB_EXECUTION_ID
     original_failure_flag = runner._failure_recorded
+    original_cpu_class = os.environ.get("FORM_SENDER_CPU_CLASS")
+    runner._get_cpu_profile_settings.cache_clear()
     try:
         yield
     finally:
         runner.JOB_EXECUTION_ID = original_job_execution_id
         runner._failure_recorded = original_failure_flag
+        runner._get_cpu_profile_settings.cache_clear()
+        if original_cpu_class is None:
+            os.environ.pop("FORM_SENDER_CPU_CLASS", None)
+        else:
+            os.environ["FORM_SENDER_CPU_CLASS"] = original_cpu_class
 
 
 def test_update_job_execution_status_skips_success_if_failed(monkeypatch):
@@ -78,3 +86,17 @@ def test_mark_job_failed_once_only_updates_first_time(monkeypatch):
     supabase.last_update = None
     runner._mark_job_failed_once()
     assert supabase.last_update is None
+
+
+def test_resolve_worker_count_respects_cpu_profile(monkeypatch):
+    monkeypatch.setenv("FORM_SENDER_CPU_CLASS", "low")
+    monkeypatch.setenv("FORM_SENDER_MAX_WORKERS", "4")
+
+    def _fake_worker_config():
+        return {"cpu_profiles": {"low": {"max_workers": 1}}}
+
+    # Clear cached profile before injecting fake config
+    runner._get_cpu_profile_settings.cache_clear()
+    monkeypatch.setattr("config.manager.get_worker_config", lambda: _fake_worker_config())
+
+    assert runner._resolve_worker_count(3, company_id=None) == 1

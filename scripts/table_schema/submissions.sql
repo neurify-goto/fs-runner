@@ -23,3 +23,7 @@ create index IF not exists idx_submissions_success on public.submissions using b
 create index IF not exists idx_submissions_targeting_company on public.submissions using btree (targeting_id, company_id, success) TABLESPACE pg_default;
 
 create index IF not exists idx_submissions_target_company_submitted on public.submissions using btree (targeting_id, company_id, submitted_at) TABLESPACE pg_default;
+
+create index IF not exists idx_submissions_company_recent_failures
+  on public.submissions (company_id, submitted_at)
+  where coalesce(success, false) = false;
