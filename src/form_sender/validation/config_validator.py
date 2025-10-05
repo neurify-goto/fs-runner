@@ -6,10 +6,11 @@ worker_config.jsonやその他設定ファイルの値を検証し、
 """
 
 import logging
-import os
 from typing import Dict, Any, List, Tuple
 
 logger = logging.getLogger(__name__)
+
+from utils.env import is_github_actions
 
 
 class ConfigValidator:
@@ -76,7 +77,7 @@ class ConfigValidator:
                 return ['form_sender_multi_process or multi_process section is missing']
             
             # GitHub Actions環境の特別制約
-            is_github_actions = os.getenv('GITHUB_ACTIONS') == 'true'
+            github_actions_env = is_github_actions()
             
             # 各設定値の検証
             for field_name, constraints in ConfigValidator.CONSTRAINTS['multi_process'].items():
@@ -104,7 +105,7 @@ class ConfigValidator:
             
             # GitHub Actions固有の制約は、num_workers が設定されている場合のみ評価
             num_workers = mp_config.get('num_workers')
-            if is_github_actions and isinstance(num_workers, int):
+            if github_actions_env and isinstance(num_workers, int):
                 if num_workers < 1:
                     errors.append(f"GitHub Actions environment: num_workers must be >= 1 when specified, got {num_workers}")
 
@@ -250,9 +251,7 @@ class ConfigValidator:
         Returns:
             Dict[str, Any]: 推奨設定値
         """
-        is_github_actions = os.getenv('GITHUB_ACTIONS') == 'true'
-        
-        if is_github_actions:
+        if is_github_actions():
             return {
                 'multi_process': {
                     'batch_size': 10,
@@ -260,11 +259,10 @@ class ConfigValidator:
                     'max_pending_tasks': 50
                 }
             }
-        else:
-            return {
-                'multi_process': {
-                    'batch_size': 15,
-                    'memory_per_worker_mb': 4096,
-                    'max_pending_tasks': 100
-                }
+        return {
+            'multi_process': {
+                'batch_size': 15,
+                'memory_per_worker_mb': 4096,
+                'max_pending_tasks': 100
             }
+        }

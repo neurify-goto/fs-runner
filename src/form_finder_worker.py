@@ -25,6 +25,7 @@ from form_sender.security.log_sanitizer import setup_sanitized_logging
 
 # マルチプロセス対応コンポーネントをインポート
 from form_finder.orchestrator.manager import ConfigurableFormFinderOrchestrator
+from utils.env import get_runtime_environment, is_ci_environment
 
 # ロギング設定
 logging.basicConfig(
@@ -119,7 +120,8 @@ def save_error_results(batch_id: str, error_message: str):
 async def main():
     """メイン処理（マルチプロセス・アーキテクチャ版）"""
     # ログレベルの方針: 既定はINFO。ローカルでのみ明示的にデバッグを許可
-    is_ci = os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
+    runtime_env = get_runtime_environment()
+    is_ci = is_ci_environment()
     debug_enabled = (os.getenv('FORM_FINDER_DEBUG', '').lower() == 'true') and not is_ci
     if debug_enabled:
         logging.getLogger('form_finder.orchestrator.manager').setLevel(logging.DEBUG)
@@ -129,7 +131,7 @@ async def main():
 
     logger.info(f"=== Form Finder Multi-Process Processing Started ===")
     logger.info(f"Processing Mode: Multi-Process with Worker Pool")
-    logger.info(f"Environment: {'GitHub Actions' if is_ci else 'Local'}")
+    logger.info(f"Environment: {runtime_env}")
     
     # マルチプロセス環境設定（既存設定を確認してから適用）
     if mp.get_start_method(allow_none=True) is None:

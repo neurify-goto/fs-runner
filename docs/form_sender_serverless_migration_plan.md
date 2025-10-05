@@ -50,6 +50,13 @@
 ---
 
 ## 4. 目標アーキテクチャ案
+
+> **進捗ステータス (2025-10-03 時点)**
+>
+> - 以下の内容は「最終的に目指す構成」をまとめた計画書であり、まだ本番にリリースされていません。
+> - Cloud Tasks/dispatcher/Cloud Run Job の接続コード・GitHub Actions からの切替・運用 Runbook などは別途実装タスクで進行中です。
+> - `USE_SERVERLESS_FORM_SENDER=true` への切替は、Dispatcher 本番デプロイ完了と総合テスト（§8, §9）が揃うまで **絶対に行わないでください**。
+
 ```
 [GAS トリガー]
    │  (targeting_id, client_config, run_index, use_extra_table 等)
@@ -116,6 +123,7 @@
 - `run_index_base` は GAS が targeting_id 単位で保持する 0 始まりのカウンタで、Job 側で `run_index = run_index_base + CLOUD_RUN_TASK_INDEX + 1` と計算して 1 オリジンを維持する。GAS が複数 targeting を順次処理する場合も、日次でリセットする単純なカウンタを維持する。
 - `run_total` は従来の `concurrent_workflow` 値をそのまま採用する。`parallelism` は `resolveParallelism(concurrent_workflow)`（GAS 側で新設）で算出し、既定では `run_total` と同値を返す。`ScriptProperties.FORM_SENDER_PARALLELISM_OVERRIDE` に 1〜run_total の値が設定されている場合のみその値で上書きし、未設定や 0/空文字の場合は override せず現行性能を維持する。これにより負荷が高い時間帯だけ即時にスロットルできる。Cloud Tasks 側では 1 targeting につき payload 1 件のみ投入し、dispatcher は `taskCount = run_total`・`parallelism = parallelism` を Jobs API に渡す。
 - `workers_per_workflow` は Cloud Run Job → form_sender_runner の `--num-workers` に渡され、`FORM_SENDER_MAX_WORKERS` との最小値が採用される。
+- Cloud Tasks `taskName` は `fs-YYYYMMDD-targetingId-runIndexBase` 形式で固定化し、同一ターゲティング・run_index_base の二重投入を防ぐ。
 - `branch` と `workflow_trigger` は workflow_dispatch / form_sender_branch_test 相当の手動動線を再現するために使用し、dispatcher が `client_config_ref`（HTTPS 署名 URL）と `client_config_object`（gs:// パス）を Job に渡す。未指定時は本番運用とみなす。
 
 ### 4.2 ブランチ/手動テスト動線
@@ -232,7 +240,7 @@
 ### 6.6 設定・Secrets 管理
 - Secret Manager
   - `form_sender/supabase_url`, `form_sender/supabase_service_role_key` を登録。
-  - Cloud Run Job/Service に Secret バージョンを環境変数としてマウントし、名称は `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` に合わせる。テストモード向けには `form_sender/supabase_url_test`, `form_sender/supabase_service_role_key_test` を登録し、`FORM_SENDER_TEST_MODE=true` の際に使用する。
+  - Cloud Run Job/Service に Secret バージョンを環境変数としてマウントし、名称は `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` に合わせる。テストモード向けには `form_sender/supabase_url_test`, `form_sender/supabase_service_role_key_test` を登録し、環境変数 `SUPABASE_URL_TEST` / `SUPABASE_SERVICE_ROLE_KEY_TEST` として公開する。`FORM_SENDER_TEST_MODE=true` または `FORM_SENDER_TABLE_MODE=test` の際はこれらテスト用シークレットを使用する。
   - dispatcher 用に `form_sender_dispatcher/supabase_url`, `form_sender_dispatcher/supabase_service_role_key` を追加し、環境変数 `DISPATCHER_SUPABASE_URL` / `DISPATCHER_SUPABASE_SERVICE_ROLE_KEY` として注入する。dispatcher サービスアカウントには当該シークレットの Accessor 権限と Supabase 側の job_executions 用ロールのみを付与する。
 - Cloud Run Job 既定環境変数（静的設定）
   - `TZ=Asia/Tokyo`

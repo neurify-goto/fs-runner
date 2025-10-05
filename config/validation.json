@@ -14,8 +14,32 @@
         },
         "GITHUB_ACTIONS": {
             "required": false,
-            "allowed_values": ["true", "false"],
+            "allowed_values": [
+                "true",
+                "false"
+            ],
             "error_msg": "GITHUB_ACTIONS must be true or false"
+        },
+        "FORM_SENDER_ENV": {
+            "required": false,
+            "allowed_values": [
+                "cloud_run",
+                "github_actions",
+                "local"
+            ],
+            "error_msg": "FORM_SENDER_ENV must be cloud_run, github_actions, or local"
+        },
+        "FORM_SENDER_LOG_SANITIZE": {
+            "required": false,
+            "allowed_values": [
+                "0",
+                "1",
+                "true",
+                "false",
+                "yes",
+                "no"
+            ],
+            "error_msg": "FORM_SENDER_LOG_SANITIZE must be a boolean-like value"
         }
     },
     "form_sender": {
@@ -26,7 +50,7 @@
             "default": 2
         },
         "batch_size": {
-            "type": "integer", 
+            "type": "integer",
             "min_value": 1,
             "max_value": 100,
             "default": 10

@@ -9,17 +9,22 @@ def infer_idx(nm: str, ide: str, cls: str):
     blob = nm + ' ' + ide + ' ' + cls
     if not (('tel' in blob) or ('phone' in blob) or ('電話' in blob)):
         return None
+    # 配列風の末尾インデックス [0-9] は 0 起点なので +1 して 1..3 化
+    m_bracket = re.search(r'\[(\d)\](?!.*\d)', blob)
+    if m_bracket:
+        raw = int(m_bracket.group(1))
+        return raw + 1
     for s in (nm, ide, cls):
         if not s:
             continue
-        m = re.search(r'(?:tel|phone|電話)[^\d]*([0123])(?!.*\d)', s)
+        m = re.search(r'(?:tel|phone|電話)[^\d]*([0-9])(?!.*\d)', s)
         if m:
             raw = int(m.group(1))
-            return (raw + 1) if raw in (0, 1, 2) else raw
+            return 1 if raw == 0 else raw
     tail = re.search(r'(\d)(?!.*\d)$', blob)
     if tail:
         raw = int(tail.group(1))
-        return (raw + 1) if raw in (0, 1, 2) else raw
+        return 1 if raw == 0 else raw
     return 1
 
 

@@ -30,6 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     if: github.event.action != 'form_sender_branch_test'
+    env:
+      FORM_SENDER_ENV: github_actions
+      FORM_SENDER_LOG_SANITIZE: '1'
 
     steps:
     - name: Checkout repository

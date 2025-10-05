@@ -92,6 +92,124 @@ const CONFIG = {
 // 実行プロセス内の軽量キャッシュ（1実行中のみ有効）
 var __HOLIDAY_CACHE = {};
 
+function shouldUseServerlessFormSender_() {
+  var flag = PropertiesService.getScriptProperties().getProperty('USE_SERVERLESS_FORM_SENDER');
+  return String(flag || '').toLowerCase() === 'true';
+}
+
+function isTargetingServerlessEnabled_(targetingConfig) {
+  if (!targetingConfig) {
+    return false;
+  }
+
+  var candidates = [
+    targetingConfig.useServerless,
+    targetingConfig.use_serverless
+  ];
+
+  if (targetingConfig.targeting) {
+    candidates.push(targetingConfig.targeting.useServerless);
+    candidates.push(targetingConfig.targeting.use_serverless);
+  }
+
+  for (var i = 0; i < candidates.length; i++) {
+    var value = candidates[i];
+    if (value === true || value === 1) {
+      return true;
+    }
+    if (typeof value === 'string') {
+      var normalized = value.toLowerCase();
+      if (normalized === 'true' || normalized === '1') {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function resolveShardCount_() {
+  var prop = PropertiesService.getScriptProperties().getProperty('FORM_SENDER_SHARD_COUNT');
+  var value = parseInt(prop, 10);
+  if (!isFinite(value) || value <= 0) {
+    return 8;
+  }
+  return value;
+}
+
+function resolveParallelism_(concurrentWorkflow) {
+  var prop = PropertiesService.getScriptProperties().getProperty('FORM_SENDER_PARALLELISM_OVERRIDE');
+  var value = parseInt(prop, 10);
+  if (!isFinite(value) || value <= 0) {
+    return concurrentWorkflow;
+  }
+  return Math.min(concurrentWorkflow, value);
+}
+
+function resolveWorkersPerWorkflow_() {
+  var prop = PropertiesService.getScriptProperties().getProperty('FORM_SENDER_WORKERS_OVERRIDE');
+  var value = parseInt(prop, 10);
+  if (!isFinite(value) || value <= 0) {
+    return CONFIG.WORKERS_PER_WORKFLOW;
+  }
+  return Math.max(1, Math.min(4, value));
+}
+
+function allocateRunIndexBase_(targetingId, runTotal) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var baseKey = 'FORM_SENDER_RUN_INDEX_BASE__' + targetingId;
+    var stateKey = baseKey + '__STATE';
+    var todayJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+
+    var delta = parseInt(runTotal, 10);
+    if (!isFinite(delta) || delta <= 0) {
+      delta = 1;
+    }
+
+    var current = 0;
+    var rawState = props.getProperty(stateKey);
+    if (rawState) {
+      try {
+        var state = JSON.parse(rawState);
+        if (state && state.date === todayJst) {
+          var stored = Number(state.counter);
+          if (isFinite(stored) && stored >= 0) {
+            current = stored;
+          }
+        }
+      } catch (error) {
+        console.warn('run_index_base state parse error. resetting counter:', error);
+        current = 0;
+      }
+    } else {
+      var legacyRaw = props.getProperty(baseKey);
+      if (legacyRaw !== null && typeof legacyRaw !== 'undefined') {
+        console.log('run_index_base legacy property detected for targeting ' + targetingId + '. resetting for daily counter migration.');
+      }
+      current = 0;
+    }
+
+    if (!isFinite(current) || current < 0) {
+      current = 0;
+    }
+
+    var next = current + delta;
+    props.setProperty(baseKey, String(next));
+    props.setProperty(stateKey, JSON.stringify({
+      date: todayJst,
+      counter: next,
+      updated_at: new Date().toISOString()
+    }));
+
+    return current;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /**
  * 時間ベースのトリガーから呼び出すメイン関数（新アーキテクチャ版）
  * この関数をGAS時間トリガーに設定してください
@@ -517,23 +635,34 @@ function processTargeting(targetingId, options) {
     } else {
       resolvedOptions.useExtra = !!resolvedOptions.useExtra;
     }
+    if (!resolvedOptions.workflowTrigger) {
+      resolvedOptions.workflowTrigger = 'automated';
+    }
 
-    // GitHub Actions ワークフローをトリガー（batch_id なし）
+    var globalServerlessEnabled = shouldUseServerlessFormSender_();
+    var targetingServerlessEnabled = isTargetingServerlessEnabled_(targetingConfig);
+
+    if (globalServerlessEnabled && targetingServerlessEnabled) {
+      console.log('条件チェック完了。Cloud Tasks 経由で Cloud Run Job を起動します');
+      return triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, resolvedOptions);
+    }
+
+    if (globalServerlessEnabled && !targetingServerlessEnabled) {
+      console.log('serverless flag is enabled globally but targeting is not opted in. falling back to GitHub Actions dispatch.');
+    }
+
     console.log('条件チェック完了。GitHub Actions 連続処理ワークフローを開始します');
-    
     const workflowResult = triggerFormSenderWorkflow(targetingId, resolvedOptions);
-    
     if (workflowResult && workflowResult.success) {
-      console.log(`GitHub Actions 連続処理ワークフローが正常に開始されました`);
+      console.log('GitHub Actions 連続処理ワークフローが正常に開始されました');
       return {
         success: true,
         message: '連続処理ワークフロー開始完了',
         targetingId: targetingId
       };
-    } else {
-      console.error('GitHub Actions ワークフローの開始に失敗しました');
-      return { success: false, message: 'ワークフロー開始失敗' };
     }
+    console.error('GitHub Actions ワークフローの開始に失敗しました');
+    return { success: false, message: 'ワークフロー開始失敗' };
     
   } catch (error) {
     // FORM_SENDER.md:286-289準拠: 詳細エラー分類とハンドリング
@@ -572,8 +701,10 @@ function resetSendQueueAllDailyExtra() {
 /**
  * targeting毎に当日キューを生成
  */
-function buildSendQueueForTargeting(targetingId = null) {
+function buildSendQueueForTargeting(targetingId = null, options) {
   try {
+    options = options || {};
+    const testMode = options.testMode === true;
     // targetingId が未指定のとき: CONFIG.QUEUE_TARGETING_IDS を優先
     if (targetingId === null || typeof targetingId === 'undefined') {
       const ids = Array.isArray(CONFIG.QUEUE_TARGETING_IDS) ? CONFIG.QUEUE_TARGETING_IDS : [];
@@ -582,7 +713,7 @@ function buildSendQueueForTargeting(targetingId = null) {
         let total = 0;
         const details = [];
         for (const id of ids) {
-          const r = buildSendQueueForTargeting(id);
+          const r = buildSendQueueForTargeting(id, options);
           if (r && r.success) total += Number(r.inserted || r.inserted_total || 0);
           details.push(Object.assign({ targeting_id: id }, r));
         }
@@ -607,12 +738,13 @@ function buildSendQueueForTargeting(targetingId = null) {
       throw new Error('clientシートのcompany_nameが空のためextraテーブルを利用できません');
     }
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    const shardCount = resolveShardCount_();
     // デバッグ: パラメータ要約
     const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
     console.log(JSON.stringify({
       level: 'info', event: 'queue_build_start', targeting_id: targetingId, date_jst: dateJst,
       param_summary: {
-        shards: 8, limit: 10000,
+        shards: shardCount, limit: 10000,
         targeting_sql_len: (t.targeting_sql || '').length,
         ng_companies_tokens: ngTokens.length
       }
@@ -621,15 +753,24 @@ function buildSendQueueForTargeting(targetingId = null) {
     // キュー上限は一律10000件（max_daily_sendsは送信成功数の上限としてRunner側で使用）
     const startedMs = Date.now();
     try {
-      const inserted = createQueueForTargeting(
-        targetingId,
-        dateJst,
-        t.targeting_sql || '',
-        (t.ng_companies || ''),  // 社名のカンマ区切りをそのまま渡す
-        10000,
-        8,
-        useExtra ? { useExtra: true, clientName } : undefined
-      );
+      const inserted = testMode
+        ? createQueueForTargetingTest(
+            targetingId,
+            dateJst,
+            t.targeting_sql || '',
+            (t.ng_companies || ''),
+            10000,
+            shardCount
+          )
+        : createQueueForTargeting(
+            targetingId,
+            dateJst,
+            t.targeting_sql || '',
+            (t.ng_companies || ''),
+            10000,
+            shardCount,
+            useExtra ? { useExtra: true, clientName } : undefined
+          );
       const elapsedMs = Date.now() - startedMs;
       console.log(JSON.stringify({ level: 'info', event: 'queue_build_done', targeting_id: targetingId, inserted: Number(inserted) || 0, elapsed_ms: elapsedMs }));
       return { success: true, inserted };
@@ -637,11 +778,12 @@ function buildSendQueueForTargeting(targetingId = null) {
       const msg = String(e || '');
       const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
       if (!isStmtTimeout) throw e;
-      // フォールバック: チャンク分割投入（Stage1→Stage2）
       console.warn(JSON.stringify({ level: 'warning', event: 'queue_build_fallback_chunked', targeting_id: targetingId, reason: 'statement_timeout' }));
-      const result = useExtra
-        ? buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''), clientName)
-        : buildSendQueueForTargetingChunked_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''));
+      const result = testMode
+        ? buildSendQueueForTargetingChunkedTest_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''))
+        : (useExtra
+            ? buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || ''), clientName)
+            : buildSendQueueForTargetingChunked_(targetingId, dateJst, t.targeting_sql || '', (t.ng_companies || '')));
       return result;
     }
   } catch (e) {
@@ -675,6 +817,8 @@ function buildSendQueueForAllTargetings() {
     let totalInserted = 0;
     const details = [];
 
+    const shardCount = resolveShardCount_();
+
     for (const t of targetList) {
       const targetingId = t.targeting_id || t.id || t;
       try {
@@ -698,7 +842,7 @@ function buildSendQueueForAllTargetings() {
         console.log(JSON.stringify({
           level: 'info', event: 'queue_build_start', targeting_id: targetingId, date_jst: dateJst,
           param_summary: {
-            shards: 8, limit: 10000,
+            shards: shardCount, limit: 10000,
             targeting_sql_len: (targeting.targeting_sql || '').length,
             ng_companies_tokens: ngTokens.length
           }
@@ -712,7 +856,7 @@ function buildSendQueueForAllTargetings() {
             targeting.targeting_sql || '',
             (targeting.ng_companies || ''),
             10000,
-            8,
+            shardCount,
             useExtra ? { useExtra: true, clientName } : undefined
           );
           n = Number(inserted) || 0;
@@ -785,6 +929,7 @@ function buildSendQueueForTargetingExtra(targetingId = null) {
     const cfg = getTargetingConfig(targetingId);
     if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
     const t = cfg.targeting;
+    const shardCount = resolveShardCount_();
     const clientName = (function(clientSection) {
       if (!clientSection || typeof clientSection.company_name !== 'string') return '';
       const trimmed = clientSection.company_name.trim();
@@ -794,7 +939,7 @@ function buildSendQueueForTargetingExtra(targetingId = null) {
     const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
     console.log(JSON.stringify({
       level: 'info', event: 'queue_build_start_extra', targeting_id: targetingId, date_jst: dateJst,
-      param_summary: { shards: 8, limit: 10000, targeting_sql_len: (t.targeting_sql || '').length, ng_companies_tokens: ngTokens.length }
+      param_summary: { shards: shardCount, limit: 10000, targeting_sql_len: (t.targeting_sql || '').length, ng_companies_tokens: ngTokens.length }
     }));
 
     const startedMs = Date.now();
@@ -805,7 +950,7 @@ function buildSendQueueForTargetingExtra(targetingId = null) {
         t.targeting_sql || '',
         (t.ng_companies || ''),
         10000,
-        8,
+        shardCount,
         { useExtra: true, clientName }
       );
       const elapsedMs = Date.now() - startedMs;
@@ -841,6 +986,7 @@ function buildSendQueueForAllTargetingsExtra() {
     }
     let processed = 0, failed = 0, totalInserted = 0; const details = [];
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    const shardCount = resolveShardCount_();
     for (const t of activeTargetings) {
       const targetingId = t.targeting_id || t.id || t;
       // フォールバックでも参照できるようスコープを外出し
@@ -902,7 +1048,7 @@ function buildSendQueueForAllTargetingsExtra() {
 function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, ngCompaniesCsv) {
   const MAX_TOTAL = 10000;
   let total = 0;
-  const shards = 8;
+  const shards = resolveShardCount_();
   let limit = CONFIG.CHUNK_LIMIT_INITIAL;
   const minLimit = CONFIG.CHUNK_LIMIT_MIN;
   let idWindow = CONFIG.CHUNK_ID_WINDOW_INITIAL;
@@ -967,7 +1113,7 @@ function buildSendQueueForTargetingChunked_(targetingId, dateJst, targetingSql, 
 function buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targetingSql, ngCompaniesCsv, clientName) {
   const MAX_TOTAL = 10000;
   let total = 0;
-  const shards = 8;
+  const shards = resolveShardCount_();
   const normalizedClientName = (function(name) {
     if (typeof name !== 'string') return '';
     const trimmed = name.trim();
@@ -1007,6 +1153,65 @@ function buildSendQueueForTargetingChunkedExtra_(targetingId, dateJst, targeting
         if (isStmtTimeout) {
           if (limit > minLimit) { limit = Math.max(minLimit, Math.floor(limit / 2)); Utilities.sleep(500); continue; }
           if (idWindow > minIdWindow) { idWindow = Math.max(minIdWindow, Math.floor(idWindow / 2)); Utilities.sleep(500); continue; }
+        }
+        return { success: false, error: msg, inserted_total: total, targeting_id: targetingId };
+      }
+    }
+  }
+  return { success: true, inserted_total: total, targeting_id: targetingId };
+}
+
+function buildSendQueueForTargetingChunkedTest_(targetingId, dateJst, targetingSql, ngCompaniesCsv) {
+  const MAX_TOTAL = 10000;
+  let total = 0;
+  const shards = resolveShardCount_();
+  let limit = CONFIG.CHUNK_LIMIT_INITIAL;
+  const minLimit = CONFIG.CHUNK_LIMIT_MIN;
+  let idWindow = CONFIG.CHUNK_ID_WINDOW_INITIAL;
+  const minIdWindow = CONFIG.CHUNK_ID_WINDOW_MIN;
+  const startedAll = Date.now();
+  for (let stage = 1; stage <= 2; stage++) {
+    let afterId = 0;
+    let guard = 0;
+    while (total < MAX_TOTAL && guard < 100) {
+      if (Date.now() - startedAll > CONFIG.CHUNK_TIME_BUDGET_MS) {
+        console.warn(JSON.stringify({ level: 'warning', event: 'queue_chunk_time_budget_exceeded_test', targeting_id: targetingId, stage, total, limit, idWindow }));
+        return { success: true, inserted_total: total, targeting_id: targetingId, time_budget_exceeded: true };
+      }
+      guard++;
+      const started = Date.now();
+      try {
+        const windowStart = afterId;
+        const res = createQueueForTargetingStepTest(targetingId, dateJst, targetingSql, ngCompaniesCsv, shards, limit, windowStart, stage, idWindow);
+        const elapsed = Date.now() - started;
+        const inserted = Number((res && res[0] && res[0].inserted) || 0);
+        const lastId = Number((res && res[0] && res[0].last_id) || windowStart);
+        const hasMore = !!(res && res[0] && res[0].has_more);
+        afterId = hasMore ? Math.max(lastId, windowStart) : (windowStart + idWindow);
+        total += inserted;
+        console.log(JSON.stringify({ level: 'info', event: 'queue_chunk_step_test', targeting_id: targetingId, stage, limit, after_id: afterId, inserted, total, elapsed_ms: elapsed, has_more: hasMore }));
+        if (total >= MAX_TOTAL) break;
+        if (!hasMore) {
+          continue;
+        }
+        if (elapsed < 3000 && limit < 4000) {
+          limit = Math.min(4000, Math.floor(limit * 1.25));
+        }
+      } catch (e) {
+        const msg = String(e || '');
+        const isStmtTimeout = /57014|statement timeout|canceling statement/i.test(msg);
+        console.warn(JSON.stringify({ level: 'warning', event: 'queue_chunk_step_failed_test', targeting_id: targetingId, stage, limit, after_id: afterId, error: msg }));
+        if (isStmtTimeout) {
+          if (limit > minLimit) {
+            limit = Math.max(minLimit, Math.floor(limit / 2));
+            Utilities.sleep(500);
+            continue;
+          }
+          if (idWindow > minIdWindow) {
+            idWindow = Math.max(minIdWindow, Math.floor(idWindow / 2));
+            Utilities.sleep(500);
+            continue;
+          }
         }
         return { success: false, error: msg, inserted_total: total, targeting_id: targetingId };
       }
@@ -1167,6 +1372,96 @@ function hasTargetCompaniesBasic(targetingId) {
  * @param {number} targetingId ターゲティングID
  * @returns {Object} ワークフロートリガー結果
  */
+function triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, options) {
+  var storage = StorageClient;
+  var uploadInfo = null;
+  try {
+    var clientConfig = targetingConfig;
+    var targeting = clientConfig.targeting || {};
+    var testMode = !!(options && options.testMode === true);
+    var useExtra = testMode ? false : !!((options && options.useExtra === true) || clientConfig.use_extra_table || (clientConfig.targeting && clientConfig.targeting.use_extra_table));
+    var runTotal = Math.max(1, parseInt(targeting.concurrent_workflow || 1, 10) || 1);
+    var parallelism = resolveParallelism_(runTotal);
+    var workers = resolveWorkersPerWorkflow_();
+    var shards = resolveShardCount_();
+    var runIndexBase = allocateRunIndexBase_(targetingId, runTotal);
+
+    var dispatcher = CloudRunDispatcherClient;
+    try {
+      dispatcher.validateConfig(clientConfig);
+    } catch (validationError) {
+      console.error('dispatcher validate-config でエラー:', validationError);
+      var validationMessage = String(validationError && validationError.message ? validationError.message : validationError);
+      return { success: false, message: validationMessage, error_type: 'validation_failed' };
+    }
+
+    var queueResult = buildSendQueueForTargeting(targetingId, { testMode: testMode });
+    if (!queueResult || queueResult.success !== true) {
+      console.error('send_queue 作成に失敗しました');
+      return { success: false, message: 'send_queue 作成失敗' };
+    }
+
+    uploadInfo = storage.uploadClientConfig(targetingId, clientConfig, { runId: Utilities.getUuid() });
+    var signedUrl = storage.generateSignedUrl(uploadInfo.bucket, uploadInfo.objectName, 54000);
+
+    var jobExecutionId = Utilities.getUuid();
+    var payload = {
+      execution_id: jobExecutionId,
+      targeting_id: targetingId,
+      client_config_ref: signedUrl,
+      client_config_object: uploadInfo.objectUri,
+      tables: (function() {
+        if (testMode) {
+          return {
+            use_extra_table: false,
+            company_table: 'companies',
+            send_queue_table: 'send_queue_test',
+            submissions_table: 'submissions_test'
+          };
+        }
+        return {
+          use_extra_table: useExtra,
+          company_table: useExtra ? 'companies_extra' : 'companies',
+          send_queue_table: useExtra ? 'send_queue_extra' : 'send_queue'
+        };
+      })(),
+      execution: {
+        run_total: runTotal,
+        parallelism: parallelism,
+        run_index_base: runIndexBase,
+        shards: shards,
+        workers_per_workflow: workers
+      },
+      test_mode: testMode,
+      branch: options && options.branch ? String(options.branch) : null,
+      workflow_trigger: (options && options.workflowTrigger) || 'automated',
+      metadata: {
+        triggered_at_jst: Utilities.formatDate(new Date(), 'Asia/Tokyo', "yyyy-MM-dd'T'HH:mm:ssXXX"),
+        gas_trigger: options && options.triggerName ? String(options.triggerName) : 'startFormSenderFromTrigger'
+      }
+    };
+
+    var result = dispatcher.enqueue(payload);
+    return {
+      success: true,
+      job_execution_id: jobExecutionId,
+      cloud_tasks_name: (result && result.name) || null,
+      payload: payload
+    };
+  } catch (error) {
+    if (uploadInfo && uploadInfo.bucket && uploadInfo.objectName) {
+      try {
+        storage.deleteObject(uploadInfo.bucket, uploadInfo.objectName);
+        console.log('Cloud Run dispatcher enqueue 失敗に伴い client_config をクリーンアップしました');
+      } catch (cleanupError) {
+        console.warn('client_config クリーンアップに失敗: ' + cleanupError);
+      }
+    }
+    console.error('Cloud Run Job トリガーでエラー:', error);
+    return { success: false, message: error.message };
+  }
+}
+
 function triggerFormSenderWorkflow(targetingId, options) {
   try {
     console.log(`GitHub Actions 連続処理ワークフローをトリガー: targetingId=${targetingId}`);
@@ -1377,34 +1672,91 @@ function getErrorType(errorMessage) {
  * @returns {Object} 停止処理結果
  */
 function stopAllRunningFormSenderTasks() {
+  if (shouldUseServerlessFormSender_()) {
+    return stopAllRunningFormSenderTasksServerless_();
+  }
+  return stopAllRunningFormSenderTasksLegacy_();
+}
+
+function stopAllRunningFormSenderTasksServerless_() {
   try {
     console.log('=== 進行中form_sender_task一括停止開始 ===');
-    
-    // 実行中のform-senderワークフローを取得
+    const response = CloudRunDispatcherClient.listRunningExecutions();
+    const executions = (response && response.executions) || [];
+
+    if (executions.length === 0) {
+      console.log('停止対象のform_sender_taskがありません');
+      return { success: true, message: '停止対象なし', stopped_count: 0 };
+    }
+    console.log(`停止対象のform_sender_task: ${executions.length}件`);
+
+    let successCount = 0;
+    let failureCount = 0;
+    const results = [];
+
+    for (const execution of executions) {
+      var cancelResult = null;
+      try {
+        cancelResult = CloudRunDispatcherClient.cancelExecution(execution.execution_id);
+        successCount++;
+        console.log(`Cloud Run execution 停止成功: execution_id=${execution.execution_id}`);
+      } catch (err) {
+        failureCount++;
+        cancelResult = { success: false, error: String(err) };
+        console.error(`Cloud Run execution 停止失敗: execution_id=${execution.execution_id}, エラー=${err}`);
+      }
+      results.push({
+        execution_id: execution.execution_id,
+        targeting_id: execution.targeting_id,
+        status: execution.status,
+        cancel_result: cancelResult
+      });
+      Utilities.sleep(200);
+    }
+
+    console.log(`=== form_sender_task一括停止完了: 成功=${successCount}件, 失敗=${failureCount}件 ===`);
+
+    return {
+      success: failureCount === 0,
+      message: `form_sender_task停止完了: 成功=${successCount}件, 失敗=${failureCount}件`,
+      total_tasks: executions.length,
+      stopped_count: successCount,
+      failed_count: failureCount,
+      details: results
+    };
+  } catch (error) {
+    console.error('form_sender_task一括停止エラー:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+function stopAllRunningFormSenderTasksLegacy_() {
+  try {
+    console.log('=== 進行中form_sender_task一括停止開始 ===');
+
     const runningTasks = getCancelableWorkflowRuns();
-    
+
     if (!runningTasks.success) {
       console.error('実行中ワークフロー取得失敗:', runningTasks.error);
       return { success: false, error: '実行中ワークフロー取得失敗', details: runningTasks.error };
     }
-    
+
     const cancelableRuns = runningTasks.runs || [];
-    
+
     if (cancelableRuns.length === 0) {
       console.log('停止対象のform_sender_taskがありません');
       return { success: true, message: '停止対象なし', stopped_count: 0 };
     }
-    
+
     console.log(`停止対象のform_sender_task: ${cancelableRuns.length}件`);
-    
-    // 各ワークフローランを停止
+
     let successCount = 0;
     let failureCount = 0;
     const results = [];
-    
+
     for (const run of cancelableRuns) {
       console.log(`ワークフローラン停止実行: ID=${run.id}, Name=${run.name}, Status=${run.status}`);
-      
+
       const cancelResult = cancelWorkflowRun(run.id);
       results.push({
         run_id: run.id,
@@ -1412,7 +1764,7 @@ function stopAllRunningFormSenderTasks() {
         status: run.status,
         cancel_result: cancelResult
       });
-      
+
       if (cancelResult.success) {
         successCount++;
         console.log(`ワークフローラン停止成功: ID=${run.id}`);
@@ -1420,13 +1772,12 @@ function stopAllRunningFormSenderTasks() {
         failureCount++;
         console.error(`ワークフローラン停止失敗: ID=${run.id}, エラー=${cancelResult.error}`);
       }
-      
-      // API制限を考慮して少し待機
+
       Utilities.sleep(500);
     }
-    
+
     console.log(`=== form_sender_task一括停止完了: 成功=${successCount}件, 失敗=${failureCount}件 ===`);
-    
+
     return {
       success: true,
       message: `form_sender_task停止完了: 成功=${successCount}件, 失敗=${failureCount}件`,
@@ -1435,7 +1786,7 @@ function stopAllRunningFormSenderTasks() {
       failed_count: failureCount,
       details: results
     };
-    
+
   } catch (error) {
     console.error('form_sender_task一括停止エラー:', error.message);
     return { success: false, error: error.message };
@@ -1448,47 +1799,112 @@ function stopAllRunningFormSenderTasks() {
  * @returns {Object} 停止処理結果
  */
 function stopSpecificFormSenderTask(targetingId) {
+  if (shouldUseServerlessFormSender_()) {
+    return stopSpecificFormSenderTaskServerless_(targetingId);
+  }
+  return stopSpecificFormSenderTaskLegacy_(targetingId);
+}
+
+function stopSpecificFormSenderTaskServerless_(targetingId) {
   try {
     console.log(`=== targeting_id ${targetingId} のform_sender_task停止開始 ===`);
-    
-    // 実行中のform-senderワークフローを取得
+
+    const response = CloudRunDispatcherClient.listRunningExecutions(targetingId);
+    const executions = (response && response.executions) || [];
+
+    if (executions.length === 0) {
+      console.log(`targeting_id ${targetingId} に関連する実行中タスクが見つかりません`);
+      return {
+        success: true,
+        message: `targeting_id ${targetingId} の実行中タスクなし`,
+        targeting_id: targetingId,
+        stopped_count: 0
+      };
+    }
+
+    console.log(`targeting_id ${targetingId} 関連の停止対象: ${executions.length}件`);
+
+    let successCount = 0;
+    let failureCount = 0;
+    const results = [];
+
+    for (const execution of executions) {
+      var cancelResult = null;
+      try {
+        cancelResult = CloudRunDispatcherClient.cancelExecution(execution.execution_id);
+        successCount++;
+        console.log(`Cloud Run execution 停止成功: execution_id=${execution.execution_id}`);
+      } catch (err) {
+        failureCount++;
+        cancelResult = { success: false, error: String(err) };
+        console.error(`Cloud Run execution 停止失敗: execution_id=${execution.execution_id}, エラー=${err}`);
+      }
+
+      results.push({
+        execution_id: execution.execution_id,
+        status: execution.status,
+        cancel_result: cancelResult
+      });
+
+      Utilities.sleep(200);
+    }
+
+    console.log(`=== targeting_id ${targetingId} のタスク停止完了: 成功=${successCount}件, 失敗=${failureCount}件 ===`);
+
+    return {
+      success: failureCount === 0,
+      message: `targeting_id ${targetingId} のタスク停止完了: 成功=${successCount}件, 失敗=${failureCount}件`,
+      targeting_id: targetingId,
+      total_tasks: executions.length,
+      stopped_count: successCount,
+      failed_count: failureCount,
+      details: results
+    };
+
+  } catch (error) {
+    console.error(`targeting_id ${targetingId} のタスク停止エラー:`, error.message);
+    return { success: false, error: error.message, targeting_id: targetingId };
+  }
+}
+
+function stopSpecificFormSenderTaskLegacy_(targetingId) {
+  try {
+    console.log(`=== targeting_id ${targetingId} のform_sender_task停止開始 ===`);
+
     const runningTasks = getCancelableWorkflowRuns();
-    
+
     if (!runningTasks.success) {
       console.error('実行中ワークフロー取得失敗:', runningTasks.error);
       return { success: false, error: '実行中ワークフロー取得失敗', targeting_id: targetingId };
     }
-    
+
     const allRuns = runningTasks.runs || [];
-    
-    // 特定のターゲティングIDに関連するランをフィルタリング
+
     const relatedRuns = allRuns.filter(run => {
-      // ワークフロー名やコミットメッセージから該当するtargeting_idを識別
       return run.head_commit?.message?.includes(`targeting_id=${targetingId}`) ||
              run.name?.includes(`targeting-${targetingId}`) ||
              run.display_title?.includes(`targeting_id=${targetingId}`);
     });
-    
+
     if (relatedRuns.length === 0) {
       console.log(`targeting_id ${targetingId} に関連する実行中タスクが見つかりません`);
-      return { 
-        success: true, 
-        message: `targeting_id ${targetingId} の実行中タスクなし`, 
+      return {
+        success: true,
+        message: `targeting_id ${targetingId} の実行中タスクなし`,
         targeting_id: targetingId,
-        stopped_count: 0 
+        stopped_count: 0
       };
     }
-    
+
     console.log(`targeting_id ${targetingId} 関連の停止対象: ${relatedRuns.length}件`);
-    
-    // 関連するワークフローランを停止
+
     let successCount = 0;
     let failureCount = 0;
     const results = [];
-    
+
     for (const run of relatedRuns) {
       console.log(`関連ワークフローラン停止実行: ID=${run.id}, targeting_id=${targetingId}`);
-      
+
       const cancelResult = cancelWorkflowRun(run.id);
       results.push({
         run_id: run.id,
@@ -1496,7 +1912,7 @@ function stopSpecificFormSenderTask(targetingId) {
         status: run.status,
         cancel_result: cancelResult
       });
-      
+
       if (cancelResult.success) {
         successCount++;
         console.log(`関連ワークフローラン停止成功: ID=${run.id}, targeting_id=${targetingId}`);
@@ -1504,13 +1920,12 @@ function stopSpecificFormSenderTask(targetingId) {
         failureCount++;
         console.error(`関連ワークフローラン停止失敗: ID=${run.id}, targeting_id=${targetingId}, エラー=${cancelResult.error}`);
       }
-      
-      // API制限を考慮して少し待機
+
       Utilities.sleep(500);
     }
-    
+
     console.log(`=== targeting_id ${targetingId} のタスク停止完了: 成功=${successCount}件, 失敗=${failureCount}件 ===`);
-    
+
     return {
       success: true,
       message: `targeting_id ${targetingId} のタスク停止完了: 成功=${successCount}件, 失敗=${failureCount}件`,
@@ -1520,7 +1935,7 @@ function stopSpecificFormSenderTask(targetingId) {
       failed_count: failureCount,
       details: results
     };
-    
+
   } catch (error) {
     console.error(`targeting_id ${targetingId} のタスク停止エラー:`, error.message);
     return { success: false, error: error.message, targeting_id: targetingId };
@@ -1640,32 +2055,97 @@ function cancelWorkflowRun(runId) {
  * @returns {Object} 実行中タスクの詳細情報
  */
 function getRunningFormSenderTasks() {
+  if (shouldUseServerlessFormSender_()) {
+    return getRunningFormSenderTasksServerless_();
+  }
+  return getRunningFormSenderTasksLegacy_();
+}
+
+function getRunningFormSenderTasksServerless_() {
+  try {
+    console.log('=== 実行中form_sender_task状況確認開始 (serverless) ===');
+
+    const response = CloudRunDispatcherClient.listRunningExecutions();
+    const executions = (response && response.executions) || [];
+
+    if (executions.length === 0) {
+      console.log('実行中のform_sender_taskはありません');
+      return { success: true, message: '実行中タスクなし', running_tasks: [] };
+    }
+
+    const taskDetails = executions.map(function(exec) {
+      const metadata = exec.metadata || {};
+      return {
+        execution_id: exec.execution_id,
+        run_id: exec.execution_id,
+        targeting_id: exec.targeting_id,
+        status: exec.status,
+        run_index_base: exec.run_index_base,
+        started_at: exec.started_at,
+        ended_at: exec.ended_at || null,
+        cloud_run_execution: metadata.cloud_run_execution || null,
+        cloud_run_operation: metadata.cloud_run_operation || null
+      };
+    });
+
+    const byTargetingId = {};
+    const unknownTargeting = [];
+
+    taskDetails.forEach(function(task) {
+      if (typeof task.targeting_id === 'number' && !isNaN(task.targeting_id)) {
+        if (!byTargetingId[task.targeting_id]) {
+          byTargetingId[task.targeting_id] = [];
+        }
+        byTargetingId[task.targeting_id].push(task);
+      } else {
+        unknownTargeting.push(task);
+      }
+    });
+
+    console.log(`実行中form_sender_task: 合計=${executions.length}件`);
+    console.log(`targeting_id識別済み: ${Object.keys(byTargetingId).length}種類`);
+    console.log(`targeting_id不明: ${unknownTargeting.length}件`);
+
+    return {
+      success: true,
+      message: `実行中form_sender_task: ${executions.length}件`,
+      total_running: executions.length,
+      by_targeting_id: byTargetingId,
+      unknown_targeting: unknownTargeting,
+      all_tasks: taskDetails
+    };
+
+  } catch (error) {
+    console.error('実行中タスク状況確認エラー:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+function getRunningFormSenderTasksLegacy_() {
   try {
     console.log('=== 実行中form_sender_task状況確認開始 ===');
-    
+
     const runningTasks = getCancelableWorkflowRuns();
-    
+
     if (!runningTasks.success) {
       return { success: false, error: '実行中タスク取得失敗', details: runningTasks.error };
     }
-    
+
     const runs = runningTasks.runs || [];
-    
+
     if (runs.length === 0) {
       console.log('実行中のform_sender_taskはありません');
       return { success: true, message: '実行中タスクなし', running_tasks: [] };
     }
-    
-    // 実行中タスクの詳細情報を整理
+
     const taskDetails = runs.map(run => {
-      // targeting_idを可能な限り抽出
       let targetingId = null;
-      
+
       if (run.head_commit?.message) {
         const match = run.head_commit.message.match(/targeting_id=(\d+)/);
-        if (match) targetingId = parseInt(match[1]);
+        if (match) targetingId = parseInt(match[1], 10);
       }
-      
+
       return {
         run_id: run.id,
         name: run.name,
@@ -1677,11 +2157,10 @@ function getRunningFormSenderTasks() {
         html_url: run.html_url
       };
     });
-    
-    // targeting_id別に分類
+
     const byTargetingId = {};
     const unknownTargeting = [];
-    
+
     taskDetails.forEach(task => {
       if (task.targeting_id !== null) {
         if (!byTargetingId[task.targeting_id]) {
@@ -1692,11 +2171,11 @@ function getRunningFormSenderTasks() {
         unknownTargeting.push(task);
       }
     });
-    
+
     console.log(`実行中form_sender_task: 合計=${runs.length}件`);
     console.log(`targeting_id識別済み: ${Object.keys(byTargetingId).length}種類`);
     console.log(`targeting_id不明: ${unknownTargeting.length}件`);
-    
+
     return {
       success: true,
       message: `実行中form_sender_task: ${runs.length}件`,
@@ -1705,7 +2184,7 @@ function getRunningFormSenderTasks() {
       unknown_targeting: unknownTargeting,
       all_tasks: taskDetails
     };
-    
+
   } catch (error) {
     console.error('実行中タスク状況確認エラー:', error.message);
     return { success: false, error: error.message };

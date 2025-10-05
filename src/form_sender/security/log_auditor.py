@@ -11,6 +11,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
+from utils.env import is_github_actions, should_sanitize_logs
+
 class ViolationLevel(Enum):
     """セキュリティ違反レベル"""
     CRITICAL = "critical"  # 即座にブロック
@@ -32,11 +34,11 @@ class LogAuditor:
     """ログ出力前の自動セキュリティ監査システム"""
     
     def __init__(self):
-        self.is_github_actions = os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
+        self.is_github_actions = is_github_actions()
         self.is_production = os.getenv('ENVIRONMENT', '').lower() == 'production'
         
         # GitHub Actions環境では最も厳格な監査を実行
-        self.strict_mode = self.is_github_actions or self.is_production
+        self.strict_mode = should_sanitize_logs() or self.is_production
         
         self._setup_violation_patterns()
     

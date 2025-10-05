@@ -14,6 +14,7 @@ IsolatedFormWorker で送信→結果を mark_done RPC で確定する。
 
 import argparse
 import asyncio
+import base64
 import json
 import logging
 import multiprocessing as mp
@@ -34,21 +35,284 @@ from form_sender.security.log_sanitizer import setup_sanitized_logging
 from form_sender.utils.error_classifier import ErrorClassifier
 from form_sender.utils.client_data_loader import load_client_data_simple
 from config.manager import get_worker_config
+from utils.env import should_sanitize_logs
+
+JOB_EXECUTION_ID = os.getenv("JOB_EXECUTION_ID") or os.getenv("CLOUD_RUN_EXECUTION")
+
+
+def _get_env_int(name: str) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("環境変数 %s に整数以外の値が設定されています: %s", name, value)
+        return None
+
+
+def _is_truthy(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def build_run_id(base_identifier: Optional[str], run_index: Optional[int], attempt: Optional[int]) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    components = []
+    if base_identifier:
+        scrubbed = base_identifier.strip().replace(" ", "_")
+        components.append(scrubbed)
+    else:
+        components.append("local")
+    if run_index is not None:
+        components.append(f"ri{run_index}")
+    if attempt is not None:
+        components.append(f"a{attempt}")
+    components.append(timestamp)
+    return "-".join(components)
+
+
+def _resolve_run_id() -> str:
+    job_execution_id = os.getenv("JOB_EXECUTION_ID") or os.getenv("CLOUD_RUN_EXECUTION")
+    run_index = _get_env_int("FORM_SENDER_RUN_INDEX")
+    attempt = _get_env_int("CLOUD_RUN_TASK_ATTEMPT")
+    if attempt is None:
+        attempt = _get_env_int("CLOUD_RUN_TASK_RETRY_ATTEMPT")
+
+    base_identifier = job_execution_id or os.getenv("GITHUB_RUN_ID")
+    run_id = build_run_id(base_identifier, run_index, attempt)
+    if base_identifier:
+        return run_id
+    return run_id  # local fallback already handled inside build_run_id
+
+
+def _resolve_worker_count(requested: int, company_id: Optional[int]) -> int:
+    if company_id is not None:
+        return 1
+
+    max_workers_cap = _get_env_int("FORM_SENDER_MAX_WORKERS")
+    if max_workers_cap is None:
+        max_workers_cap = 4
+
+    workers_from_meta = _get_env_int("FORM_SENDER_WORKERS_FROM_META")
+    candidate = requested
+    if workers_from_meta is not None:
+        candidate = min(candidate, workers_from_meta)
+
+    candidate = min(candidate, max_workers_cap)
+    return max(1, candidate)
+
+
+def _update_job_execution_status(status: str) -> None:
+    if not JOB_EXECUTION_ID:
+        return
+    if status not in {"succeeded", "failed", "cancelled"}:
+        logger.warning("job execution status %s is not recognized; ignoring", status)
+        return
+
+    try:
+        supabase = _build_supabase_client()
+        current_resp = (
+            supabase
+            .table('job_executions')
+            .select('status')
+            .eq('execution_id', JOB_EXECUTION_ID)
+            .limit(1)
+            .execute()
+        )
+        current_data = getattr(current_resp, 'data', None) or []
+        current_status = None
+        if isinstance(current_data, list) and current_data:
+            current_status = current_data[0].get('status')
+
+        if current_status in {'failed', 'cancelled'} and status == 'succeeded':
+            logger.info(
+                "job_execution %s already in terminal state %s; skipping success overwrite",
+                JOB_EXECUTION_ID,
+                current_status,
+            )
+            return
+
+        response = (
+            supabase
+            .table('job_executions')
+            .update({
+                'status': status,
+                'ended_at': datetime.now(timezone.utc).isoformat()
+            })
+            .eq('execution_id', JOB_EXECUTION_ID)
+            .execute()
+        )
+        updated_rows = getattr(response, 'data', None) or []
+        if not updated_rows:
+            logger.warning("job_execution %s update responded with no rows", JOB_EXECUTION_ID)
+        else:
+            logger.info("Updated job_executions status to %s", status)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Failed to update job execution status to %s: %s", status, exc)
+
+
+_failure_recorded = False
+
+
+def _mark_job_failed_once() -> None:
+    global _failure_recorded
+    if not JOB_EXECUTION_ID:
+        return
+
+    if _failure_recorded:
+        logger.info(
+            "job_execution %s already recorded as failed; skipping duplicate update",
+            JOB_EXECUTION_ID,
+        )
+        return
+
+    _failure_recorded = True
+    _update_job_execution_status('failed')
+
+
+def _load_job_execution_meta() -> Dict[str, Any]:
+    encoded = os.getenv("JOB_EXECUTION_META")
+    if not encoded:
+        return {}
+    try:
+        decoded = base64.b64decode(encoded)
+        return json.loads(decoded.decode("utf-8"))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("JOB_EXECUTION_META の解析に失敗しました: %s", exc)
+        return {}
+
+
+def _is_test_mode_enabled() -> bool:
+    if _is_truthy(os.getenv("FORM_SENDER_TEST_MODE")):
+        return True
+    table_mode_env = (os.environ.get('FORM_SENDER_TABLE_MODE') or '').strip().lower()
+    if table_mode_env == 'test':
+        return True
+    if USE_TEST_TABLE:
+        return True
+    meta = _load_job_execution_meta()
+    test_flag = meta.get("test_mode")
+    if isinstance(test_flag, bool):
+        return test_flag
+    if isinstance(test_flag, str):
+        return _is_truthy(test_flag)
+    return False
+
+
+def _resolve_total_shards(default: int = 8) -> int:
+    env_value = _get_env_int("FORM_SENDER_TOTAL_SHARDS")
+    if env_value and env_value > 0:
+        return env_value
+
+    meta = _load_job_execution_meta()
+    meta_value = meta.get("shards")
+    if isinstance(meta_value, int) and meta_value > 0:
+        return meta_value
+
+    try:
+        rcfg = get_worker_config().get('runner', {})
+        cfg_value = int(rcfg.get('shard_num', default))
+        if cfg_value > 0:
+            return cfg_value
+    except Exception:
+        pass
+
+    return default
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = setup_sanitized_logging(__name__)
 
-# ============ Table / RPC Switching (companies vs companies_extra) ============
-# GitHub Actions から渡される環境変数で切替。既定は従来テーブル。
-COMPANY_TABLE = os.environ.get('COMPANY_TABLE', 'companies').strip() or 'companies'
-SEND_QUEUE_TABLE = os.environ.get('SEND_QUEUE_TABLE', 'send_queue').strip() or 'send_queue'
-USE_EXTRA_TABLE = (COMPANY_TABLE == 'companies_extra') or (SEND_QUEUE_TABLE == 'send_queue_extra')
+# ============ Table / RPC Switching (companies vs companies_extra/test) ============
+# GitHub Actions / Cloud Run から渡される環境変数で切替。CLI からも上書き可能。
+# 値は main() 内で apply_table_mode() を呼び出した後に決定される。
+TABLE_MODE = 'default'
+COMPANY_TABLE = 'companies'
+SEND_QUEUE_TABLE = 'send_queue'
+SUBMISSIONS_TABLE = 'submissions'
+USE_EXTRA_TABLE = False
+USE_TEST_TABLE = False
+FN_CLAIM = 'claim_next_batch'
+FN_MARK_DONE = 'mark_done'
+FN_REQUEUE = 'requeue_stale_assigned'
 
-# RPC名の切替（*_extra 未デプロイ環境では、後段のフォールバックがシグネチャ不一致のみを許容）
-FN_CLAIM = 'claim_next_batch_extra' if USE_EXTRA_TABLE else 'claim_next_batch'
-FN_MARK_DONE = 'mark_done_extra' if USE_EXTRA_TABLE else 'mark_done'
-FN_REQUEUE = 'requeue_stale_assigned_extra' if USE_EXTRA_TABLE else 'requeue_stale_assigned'
 
+def _resolve_table_mode(cli_mode: Optional[str]) -> str:
+    candidates = [
+        (cli_mode or '').strip().lower(),
+        (os.environ.get('FORM_SENDER_TABLE_MODE') or '').strip().lower(),
+    ]
+
+    meta = _load_job_execution_meta()
+    meta_mode = meta.get('table_mode')
+    if isinstance(meta_mode, str):
+        candidates.append(meta_mode.strip().lower())
+
+    if _is_truthy(os.getenv('FORM_SENDER_TEST_MODE')):
+        candidates.insert(0, 'test')
+
+    env_mode_hint = _infer_mode_from_env_tables()
+    if env_mode_hint:
+        candidates.append(env_mode_hint)
+
+    for value in candidates:
+        if value in {'default', 'extra', 'test'}:
+            return 'test' if value == 'test' else ('extra' if value == 'extra' else 'default')
+    return 'default'
+
+
+def _infer_mode_from_env_tables() -> Optional[str]:
+    company = (os.environ.get('COMPANY_TABLE') or '').strip().lower()
+    send_queue = (os.environ.get('SEND_QUEUE_TABLE') or '').strip().lower()
+    submissions = (os.environ.get('SUBMISSIONS_TABLE') or '').strip().lower()
+
+    tables = {company, send_queue, submissions}
+    if any(table.endswith('_test') for table in tables if table):
+        return 'test'
+    if any(table.endswith('_extra') or table in {'companies_extra', 'send_queue_extra', 'submissions_extra'} for table in tables if table):
+        return 'extra'
+    return None
+
+
+def apply_table_mode(cli_mode: Optional[str] = None) -> None:
+    global TABLE_MODE, COMPANY_TABLE, SEND_QUEUE_TABLE, SUBMISSIONS_TABLE
+    global USE_EXTRA_TABLE, USE_TEST_TABLE, FN_CLAIM, FN_MARK_DONE, FN_REQUEUE
+
+    mode = _resolve_table_mode(cli_mode)
+    TABLE_MODE = mode
+    USE_EXTRA_TABLE = mode == 'extra'
+    USE_TEST_TABLE = mode == 'test'
+
+    if USE_EXTRA_TABLE:
+        COMPANY_TABLE = os.environ.get('COMPANY_TABLE', 'companies_extra').strip() or 'companies_extra'
+        SEND_QUEUE_TABLE = os.environ.get('SEND_QUEUE_TABLE', 'send_queue_extra').strip() or 'send_queue_extra'
+        SUBMISSIONS_TABLE = os.environ.get('SUBMISSIONS_TABLE', 'submissions_extra').strip() or 'submissions_extra'
+        FN_CLAIM = 'claim_next_batch_extra'
+        FN_MARK_DONE = 'mark_done_extra'
+        FN_REQUEUE = 'requeue_stale_assigned_extra'
+    elif USE_TEST_TABLE:
+        COMPANY_TABLE = 'companies'
+        SEND_QUEUE_TABLE = 'send_queue_test'
+        SUBMISSIONS_TABLE = 'submissions_test'
+        FN_CLAIM = (os.environ.get('SUPABASE_FN_CLAIM') or '').strip() or 'claim_next_batch_test'
+        FN_MARK_DONE = (os.environ.get('SUPABASE_FN_MARK_DONE') or '').strip() or 'mark_done_test'
+        FN_REQUEUE = (os.environ.get('SUPABASE_FN_REQUEUE') or '').strip() or 'requeue_stale_assigned_test'
+    else:
+        COMPANY_TABLE = os.environ.get('COMPANY_TABLE', 'companies').strip() or 'companies'
+        SEND_QUEUE_TABLE = os.environ.get('SEND_QUEUE_TABLE', 'send_queue').strip() or 'send_queue'
+        SUBMISSIONS_TABLE = os.environ.get('SUBMISSIONS_TABLE', 'submissions').strip() or 'submissions'
+        FN_CLAIM = 'claim_next_batch'
+        FN_MARK_DONE = 'mark_done'
+        FN_REQUEUE = 'requeue_stale_assigned'
+
+    os.environ['FORM_SENDER_TABLE_MODE'] = TABLE_MODE
+    os.environ['COMPANY_TABLE'] = COMPANY_TABLE
+    os.environ['SEND_QUEUE_TABLE'] = SEND_QUEUE_TABLE
+    os.environ['SUBMISSIONS_TABLE'] = SUBMISSIONS_TABLE
+    os.environ['FORM_SENDER_TABLE_MODE_RESOLVED'] = TABLE_MODE
+    os.environ['USE_EXTRA_TABLE'] = '1' if USE_EXTRA_TABLE else '0'
+    os.environ['USE_TEST_TABLE'] = '1' if USE_TEST_TABLE else '0'
 
 class ExtraClientMismatchError(RuntimeError):
     """companies_extra.client と期待値の不一致を表す内部例外。"""
@@ -227,7 +491,7 @@ def _install_logging_policy_for_ci():
     - ワーカー配下は WARNING 以上でも出ないように（ERRORは許可）
     """
     try:
-        if os.getenv('GITHUB_ACTIONS', '').lower() == 'true':
+        if should_sanitize_logs():
             root = logging.getLogger()
             # 二重追加防止（idで判定）
             if not any(isinstance(f, _LifecycleOnlyFilter) for f in getattr(root, 'filters', [])):
@@ -354,13 +618,25 @@ def _build_failure_classify_detail(error_type: Optional[str], base_detail: Optio
 
 
 def _build_supabase_client():
-    url = os.environ.get('SUPABASE_URL')
-    key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+    use_test_credentials = _is_test_mode_enabled()
+    if use_test_credentials:
+        url_env = 'SUPABASE_URL_TEST'
+        key_env = 'SUPABASE_SERVICE_ROLE_KEY_TEST'
+    else:
+        url_env = 'SUPABASE_URL'
+        key_env = 'SUPABASE_SERVICE_ROLE_KEY'
+
+    url = os.environ.get(url_env)
+    key = os.environ.get(key_env)
     if not url or not key:
+        if use_test_credentials:
+            raise RuntimeError('Test mode requires SUPABASE_URL_TEST / SUPABASE_SERVICE_ROLE_KEY_TEST to be set')
         raise RuntimeError('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY is required')
-    # 基本妥当性検証（https強制）
+
     if not str(url).startswith('https://'):
-        raise ValueError('SUPABASE_URL must start with https://')
+        raise ValueError(f'{url_env} must start with https://')
+
+    logger.info("Supabase client initialized for %s mode", "test" if use_test_credentials else "production")
     return create_client(url, key)
 
 def _extract_max_daily_sends(client_data: Dict[str, Any]) -> Optional[int]:
@@ -672,7 +948,7 @@ def _get_success_count_today_jst(supabase, targeting_id: int, target_date: date)
 
         start_utc, end_utc = jst_utc_bounds(target_date)
         resp = (
-            supabase.table('submissions')
+            supabase.table(SUBMISSIONS_TABLE)
             .select('id', count='exact')
             .eq('targeting_id', targeting_id)
             .eq('success', True)
@@ -912,7 +1188,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
         try:
             start_utc, end_utc = jst_utc_bounds(target_date)
             dup = (
-                supabase.table('submissions')
+                supabase.table(SUBMISSIONS_TABLE)
                 .select('id', count='exact')
                 .eq('targeting_id', targeting_id)
                 .eq('company_id', company_id)
@@ -1380,13 +1656,16 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
             # --- 大量並列時の空シャード対策（全シャードプローブ + シャードローテーション） ---
             try:
                 rcfg = get_worker_config().get('runner', {})
-                shard_num = int(rcfg.get('shard_num', 8))
+            except Exception:
+                rcfg = {}
+
+            shard_num = _resolve_total_shards(int(rcfg.get('shard_num', 8)) if isinstance(rcfg, dict) else 8)
+            try:
                 shard_rotation_enabled = bool(rcfg.get('shard_rotation_enabled', True))
                 no_work_probe_seconds = int(rcfg.get('shard_no_work_probe_seconds', 45))
                 unsharded_probe_attempts = int(rcfg.get('shard_unsharded_probe_attempts', 1))
                 shard_rotation_strategy = str(rcfg.get('shard_rotation_strategy', 'sequential'))
             except Exception:
-                shard_num = 8
                 shard_rotation_enabled = True
                 no_work_probe_seconds = 45
                 unsharded_probe_attempts = 1
@@ -1549,6 +1828,7 @@ def main():
     p.add_argument('--shard-id', type=int, default=None)
     p.add_argument('--max-processed', type=int, default=None, help='Process this many companies then exit (for local testing)')
     p.add_argument('--company-id', type=int, default=None, help='Process only this company id (bypass queue claim)')
+    p.add_argument('--table-mode', type=str, default=None, help='Force table mode (default|extra|test)')
     args = p.parse_args()
 
     config_path = _resolve_client_config_path(args.config_file)
@@ -1567,44 +1847,73 @@ def main():
     except RuntimeError:
         pass
 
-    run_id = os.environ.get('GITHUB_RUN_ID') or f'local-{int(time.time())}'
+    apply_table_mode(args.table_mode)
+
+    run_id = _resolve_run_id()
+    logger.info("Using run_id=%s", run_id)
 
     # 親プロセスにも抑制ポリシーを適用
     _install_logging_policy_for_ci()
 
     procs: List[mp.Process] = []
-    # company_id 指定時は重複処理を避けるためワーカーは1に制限
-    # 1〜4にクランプ（外部からの過大指定を抑止）
-    worker_count = 1 if args.company_id is not None else min(4, max(1, args.num_workers))
-    for wid in range(worker_count):
-        pr = mp.Process(
-            target=_worker_entry,
-            args=(wid, args.targeting_id, config_path, headless_opt, t_date, args.shard_id, run_id, args.max_processed, args.company_id),
-            name=f'fs-worker-{wid}'
-        )
-        pr.daemon = False
-        pr.start()
-        procs.append(pr)
+    overall_status = 'succeeded'
 
-    # 親はシグナル待ちして子を巻き取る
-    def _term(signum, frame):
+    try:
+        # company_id 指定時は重複処理を避けるためワーカーは1に制限
+        # 1〜4にクランプ（外部からの過大指定を抑止）
+        worker_count = _resolve_worker_count(args.num_workers, args.company_id)
+        logger.info("Worker count resolved to %s (requested=%s)", worker_count, args.num_workers)
+        for wid in range(worker_count):
+            pr = mp.Process(
+                target=_worker_entry,
+                args=(wid, args.targeting_id, config_path, headless_opt, t_date, args.shard_id, run_id, args.max_processed, args.company_id),
+                name=f'fs-worker-{wid}'
+            )
+            pr.daemon = False
+            pr.start()
+            procs.append(pr)
+
+        # 親はシグナル待ちして子を巻き取る
+        def _term(signum, frame):
+            nonlocal overall_status
+            for pr in procs:
+                try:
+                    pr.terminate()
+                except Exception:
+                    pass
+            for pr in procs:
+                try:
+                    pr.join(timeout=10)
+                except Exception:
+                    pass
+            overall_status = 'cancelled'
+            _update_job_execution_status('cancelled')
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, _term)
+        signal.signal(signal.SIGTERM, _term)
+
         for pr in procs:
-            try:
-                pr.terminate()
-            except Exception:
-                pass
+            pr.join()
+
+        # child exit status を集計
         for pr in procs:
+            if pr.exitcode not in (0, None):
+                overall_status = 'failed'
+                break
+
+    except Exception:
+        overall_status = 'failed'
+        raise
+    finally:
+        if overall_status == 'failed':
             try:
-                pr.join(timeout=10)
-            except Exception:
-                pass
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _term)
-    signal.signal(signal.SIGTERM, _term)
-
-    for pr in procs:
-        pr.join()
+                _mark_job_failed_once()
+            except Exception:  # pragma: no cover - just in case logging already done inside
+                logger.exception("Failed to persist job failure state")
+        else:
+            # succeeded/cancelled は従来通り全タスクで冪等に反映（キャンセル時はシグナルハンドラで発行済み）
+            _update_job_execution_status(overall_status)
 
 
 if __name__ == '__main__':
