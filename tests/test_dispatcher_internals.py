@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from dispatcher.config import DispatcherSettings
 from dispatcher.schemas import ExecutionConfig, FormSenderTask, Metadata, TableConfig
 from dispatcher.service import DispatcherService
-from dispatcher.gcp import SignedUrlManager
+from dispatcher.gcp import CloudRunJobRunner, SignedUrlManager
 
 
 def _task_payload_dict(
