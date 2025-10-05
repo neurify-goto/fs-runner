@@ -84,11 +84,17 @@ begin
        left join public.submissions_test s_hist
          on s_hist.targeting_id = $2
         and s_hist.company_id = c.id
+       left join public.submissions_test s_fail_recent
+         on s_fail_recent.company_id = c.id
+        and s_fail_recent.submitted_at >= (($1::timestamp - interval ''7 days'') AT TIME ZONE ''Asia/Tokyo'')
+        and s_fail_recent.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
+        and coalesce(s_fail_recent.success, false) = false
        where c.form_url is not null
          and c.black is null
          and coalesce(c.prohibition_detected, false) = false
          and c.duplication is null
-         and s_hist.id is null';
+         and s_hist.id is null
+         and s_fail_recent.id is null';
 
   -- targeting_sql は事前にGAS側でサニタイズ・整形済みを前提（WHERE句断片）
   if p_targeting_sql is not null and length(trim(p_targeting_sql)) > 0 then
@@ -161,6 +167,11 @@ begin
                  and s_recent14.company_id = c.id
                  and s_recent14.submitted_at >= (($1::timestamp - interval ''14 days'') AT TIME ZONE ''Asia/Tokyo'')
                  and s_recent14.submitted_at <  (($1::timestamp) AT TIME ZONE ''Asia/Tokyo'')
+           left join public.submissions_test s_fail_recent_all
+                  on s_fail_recent_all.company_id = c.id
+                 and s_fail_recent_all.submitted_at >= (($1::timestamp - interval ''7 days'') AT TIME ZONE ''Asia/Tokyo'')
+                 and s_fail_recent_all.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
+                 and coalesce(s_fail_recent_all.success, false) = false
            join hist h
              on h.company_id = c.id
           where c.form_url is not null
@@ -169,6 +180,7 @@ begin
             and c.duplication is null
             and s_today.id is null
             and s_recent14.id is null
+            and s_fail_recent_all.id is null
             and coalesce(h.has_success, false) = false';
 
     -- targeting_sql を同様に適用
