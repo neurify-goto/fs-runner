@@ -539,6 +539,14 @@ function getTargetingConfig(targetingId) {
       }
     }
 
+    if (typeof targetingColMap['use_serverless'] !== 'number') {
+      if (typeof targetingColMap['useserverless'] === 'number') {
+        targetingColMap['use_serverless'] = targetingColMap['useserverless'];
+      } else if (typeof targetingColMap['use serverless'] === 'number') {
+        targetingColMap['use_serverless'] = targetingColMap['use serverless'];
+      }
+    }
+
     try {
       console.log(JSON.stringify({
         level: 'debug',
@@ -625,6 +633,16 @@ function getTargetingConfig(targetingId) {
       return false;
     })(extraColIndex >= 0 ? targetingRow[extraColIndex] : false);
 
+    const serverlessColIndex = typeof targetingColMap['use_serverless'] === 'number' ? targetingColMap['use_serverless'] : -1;
+    const useServerless = (function(value) {
+      if (value === true || value === 1) return true;
+      if (typeof value === 'string') {
+        const lowered = value.toLowerCase();
+        return lowered === 'true' || lowered === '1';
+      }
+      return false;
+    })(serverlessColIndex >= 0 ? targetingRow[serverlessColIndex] : false);
+
     try {
       console.log(JSON.stringify({
         level: 'debug',
@@ -632,7 +650,10 @@ function getTargetingConfig(targetingId) {
         targeting_id: targetingId,
         extra_col_index: extraColIndex,
         extra_raw_value: extraColIndex >= 0 ? targetingRow[extraColIndex] : null,
-        use_extra_table: useExtraTable
+        use_extra_table: useExtraTable,
+        use_serverless_col_index: serverlessColIndex,
+        use_serverless_raw_value: serverlessColIndex >= 0 ? targetingRow[serverlessColIndex] : null,
+        use_serverless: useServerless
       }));
     } catch (e) {}
     
@@ -671,7 +692,9 @@ function getTargetingConfig(targetingId) {
       active: targetingRow[targetingColMap['active']] === true || targetingRow[targetingColMap['active']] === 'TRUE',
       description: targetingRow[targetingColMap['description'] || -1] || '',
       use_extra_table: useExtraTable,
-      
+      useServerless: useServerless,
+      use_serverless: useServerless,
+
       // clientシートからの情報をネスト構造化
       client: {
         // 必須フィールド（既に検証済みなので安全に取得）
@@ -716,6 +739,7 @@ function getTargetingConfig(targetingId) {
         send_end_time: targetingRow[targetingColMap['send_end_time'] || -1] || '18:00',
         send_days_of_week: parseSendDaysOfWeek(targetingRow[targetingColMap['send_days_of_week'] || -1]),
         use_extra_table: useExtraTable,
+        use_serverless: useServerless,
         // 追加: 並列起動数（新規 M 列）
         concurrent_workflow: (function() {
           try {

@@ -9,6 +9,8 @@ import logging
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
 
+from utils.env import is_github_actions, should_sanitize_logs
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,10 +113,10 @@ class LogSanitizer:
         # URL中の機密パラメータ
         self.sensitive_url_params = ["token", "key", "secret", "password", "auth"]
         
-        # GitHub Actions環境での追加マスキング設定
-        import os
-        self.is_github_actions = os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
-        if self.is_github_actions:
+        # GitHub Actions / Cloud Run 等のCI環境での追加マスキング設定
+        self.is_github_actions = is_github_actions()
+        self.strict_mode = should_sanitize_logs()
+        if self.strict_mode:
             # CI/CD環境では更に厳格なマスキングを適用
             self.github_actions_patterns = [
                 # record_id以外の数値IDも完全マスク
@@ -295,7 +297,7 @@ class LogSanitizer:
         sanitized = self.sanitize_string(text)
         
         # GitHub Actions環境でのみ追加処理
-        if self.is_github_actions:
+        if self.strict_mode:
             # record_idのみを保護しながら他のIDをマスク
             # まずrecord_idを一時的に保護
             import re

@@ -75,6 +75,24 @@ class ValidationConfigManager:
             'allowed_values': github_config.get('allowed_values', ['true', 'false']),
             'error_msg': github_config.get('error_msg', 'GITHUB_ACTIONS must be true or false')
         }
+
+    def get_form_sender_env_validation(self) -> Dict[str, Any]:
+        env_config = self.validation_config.get("environment_variables", {})
+        fs_env = env_config.get("FORM_SENDER_ENV", {})
+        return {
+            'required': fs_env.get('required', False),
+            'allowed_values': fs_env.get('allowed_values', ['cloud_run', 'github_actions', 'local']),
+            'error_msg': fs_env.get('error_msg', 'FORM_SENDER_ENV must be a supported value'),
+        }
+
+    def get_form_sender_log_sanitize_validation(self) -> Dict[str, Any]:
+        env_config = self.validation_config.get("environment_variables", {})
+        log_cfg = env_config.get("FORM_SENDER_LOG_SANITIZE", {})
+        return {
+            'required': log_cfg.get('required', False),
+            'allowed_values': log_cfg.get('allowed_values', ['0', '1', 'true', 'false', 'yes', 'no']),
+            'error_msg': log_cfg.get('error_msg', 'FORM_SENDER_LOG_SANITIZE must be boolean-like'),
+        }
     
     def validate_supabase_key(self, key: str) -> bool:
         """Supabaseキーの検証
@@ -135,6 +153,18 @@ class ValidationConfigManager:
             return True  # オプショナルで値なしはOK
             
         return value.lower() in config['allowed_values']
+
+    def validate_form_sender_env(self, value: str) -> bool:
+        config = self.get_form_sender_env_validation()
+        if not value and not config['required']:
+            return True
+        return value.lower() in [v.lower() for v in config['allowed_values']]
+
+    def validate_form_sender_log_sanitize(self, value: str) -> bool:
+        config = self.get_form_sender_log_sanitize_validation()
+        if not value and not config['required']:
+            return True
+        return value.lower() in [v.lower() for v in config['allowed_values']]
     
     def get_form_sender_config(self) -> Dict[str, Any]:
         """Form Sender設定を取得"""
@@ -189,6 +219,16 @@ def validate_environment_variable(var_name: str, value: str) -> tuple[bool, str]
     elif var_name == "GITHUB_ACTIONS":
         is_valid = manager.validate_github_actions_flag(value)
         config = manager.get_github_actions_validation()
+        return is_valid, config['error_msg'] if not is_valid else ""
+    
+    elif var_name == "FORM_SENDER_ENV":
+        is_valid = manager.validate_form_sender_env(value)
+        config = manager.get_form_sender_env_validation()
+        return is_valid, config['error_msg'] if not is_valid else ""
+    
+    elif var_name == "FORM_SENDER_LOG_SANITIZE":
+        is_valid = manager.validate_form_sender_log_sanitize(value)
+        config = manager.get_form_sender_log_sanitize_validation()
         return is_valid, config['error_msg'] if not is_valid else ""
     
     # 未定義の環境変数は常にValid

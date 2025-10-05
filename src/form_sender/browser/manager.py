@@ -17,6 +17,7 @@ from playwright.async_api import (
 )
 from playwright_stealth import Stealth
 from form_sender.utils.cookie_blocker import install_cookie_routes, install_init_script, try_reject_banners
+from utils.env import is_github_actions
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ class BrowserManager:
         """Playwrightブラウザを初期化して起動する"""
         try:
             logger.info(f"Worker {self.worker_id}: Initializing Playwright browser")
-            is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
+            github_actions_env = is_github_actions()
 
             # playwright-stealth のバージョン検出と起動
             if self._stealth_enabled:
@@ -97,11 +98,11 @@ class BrowserManager:
                         logger.warning(f"Worker {self.worker_id}: Stealth unavailable, using plain Playwright (v2 err: {e_v2}; v1 err: {e_v1})")
             else:
                 self.playwright = await async_playwright().start()
-            if is_github_actions:
+            if github_actions_env:
                 await asyncio.sleep(0.5)
 
-            browser_args = self._get_browser_args(is_github_actions)
-            launch_timeout = 60000 if is_github_actions else 30000
+            browser_args = self._get_browser_args(github_actions_env)
+            launch_timeout = 60000 if github_actions_env else 30000
 
             # 環境変数で強制切替を許可（ローカル検証の安定化用）
             env_headless = os.getenv('PLAYWRIGHT_HEADLESS', '').lower()
@@ -120,7 +121,7 @@ class BrowserManager:
                 slow_kw = {"slow_mo": int(slow_env)}
 
             # macOS の GUI 実行ではシステムの Chrome を優先利用（安定化）
-            use_chrome_channel = (platform.system().lower() == 'darwin' and not use_headless and not is_github_actions)
+            use_chrome_channel = (platform.system().lower() == 'darwin' and not use_headless and not github_actions_env)
             launch_succeeded = False
             last_err: Optional[Exception] = None
 
@@ -148,7 +149,7 @@ class BrowserManager:
                 )
 
             # 環境に関わらず、起動直後は短い待機を入れて安定化
-            await asyncio.sleep(0.5 if not is_github_actions else 1.0)
+            await asyncio.sleep(0.5 if not github_actions_env else 1.0)
 
             logger.info(f"Worker {self.worker_id}: Browser initialized successfully")
             return True

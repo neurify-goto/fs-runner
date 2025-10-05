@@ -20,6 +20,7 @@ from .form_extractor import FormExtractor
 from .groq_client import GroqClient
 from .prohibition_detector import ProhibitionDetector
 from .prompt_generator import PromptGenerator
+from utils.env import is_github_actions
 
 logger = logging.getLogger(__name__)
 
@@ -243,8 +244,8 @@ class FormAnalyzerWorker:
     async def process_batch(self, batch_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """バッチ処理実行"""
         # GitHub Actions環境では統計情報を制限
-        is_github_actions = os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
-        if is_github_actions:
+        github_actions_env = is_github_actions()
+        if github_actions_env:
             logger.info("フォーム解析バッチ処理開始")
         else:
             logger.info(f"フォーム解析バッチ処理開始: {len(batch_data)}件")
@@ -255,8 +256,8 @@ class FormAnalyzerWorker:
             record_id = company_data.get('record_id')
             company_name = company_data.get('company_name', '')
             # GitHub Actions環境ではrecord_idログを制限
-            is_github_actions = os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
-            if is_github_actions:
+            github_actions_env = is_github_actions()
+            if github_actions_env:
                 logger.info(f"企業処理 {i+1}/{len(batch_data)}")
             else:
                 logger.info(f"企業処理 {i+1}/{len(batch_data)} - Record ID {record_id}")
@@ -265,7 +266,7 @@ class FormAnalyzerWorker:
                 results.append(result)
                 if result.get('prohibition_detected'):
                     prohibited_count += 1
-                if is_github_actions:
+                if github_actions_env:
                     logger.info(f"企業処理完了 {i+1}/{len(batch_data)} - {result['status']}")
                 else:
                     logger.info(f"企業処理完了 {i+1}/{len(batch_data)} - Record ID {record_id} - {result['status']}")
@@ -319,8 +320,8 @@ class FormAnalyzerWorker:
             event_data = self.get_github_event_data()
             batch_data = event_data.get('batch_data', [])
             # GitHub Actions環境では統計情報を制限
-            is_github_actions = os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
-            if is_github_actions:
+            github_actions_env = is_github_actions()
+            if github_actions_env:
                 logger.info("フォーム解析タスクデータ取得完了")
             else:
                 logger.info(f"フォーム解析タスク数: {len(batch_data)}")

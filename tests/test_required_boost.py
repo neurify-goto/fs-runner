@@ -12,7 +12,8 @@ class FakeElement:
 
 class FakeElementScorer:
     async def calculate_element_score(self, element, field_patterns, field_name):
-        return 60, {'score_breakdown': {}}
+        # 強いシグナルを一つ含めて boost の発火条件を満たす
+        return 60, {'score_breakdown': {'name': 1}}
 
     async def _detect_required_status(self, element, parallel_groups=None):
         return True

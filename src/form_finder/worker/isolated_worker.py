@@ -7,7 +7,6 @@
 import asyncio
 import logging
 import multiprocessing as mp
-import os
 import queue
 import signal
 import time
@@ -27,6 +26,7 @@ from form_sender.security.log_sanitizer import sanitize_for_log
 
 # 設定
 from config.manager import get_form_explorer_config
+from utils.env import is_github_actions
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class IsolatedFormFinderWorker:
             logger.info(f"Worker {self.worker_id}: Initializing Playwright browser for form finding")
 
             # GitHub Actions環境検知
-            is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
+            github_actions_env = is_github_actions()
 
             # Playwright初期化
             self.playwright = await async_playwright().start()
@@ -117,7 +117,7 @@ class IsolatedFormFinderWorker:
             ]
 
             # GitHub Actions環境でのメモリ最適化
-            if is_github_actions:
+            if github_actions_env:
                 browser_args.extend([
                     '--memory-pressure-off',
                     '--disable-background-networking',

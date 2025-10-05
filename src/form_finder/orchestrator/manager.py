@@ -9,7 +9,6 @@ import asyncio
 import json
 import logging
 import multiprocessing as mp
-import os
 import signal
 import time
 import threading
@@ -27,6 +26,7 @@ from form_sender.communication.queue_manager import (
 )
 from form_sender.security.log_sanitizer import sanitize_for_log
 from config.manager import get_worker_config
+from utils.env import is_github_actions
 
 logger = logging.getLogger(__name__)
 
@@ -689,10 +689,13 @@ class ConfigurableFormFinderOrchestrator(FormFinderOrchestrator):
             if form_finder_config:
                 num_workers = form_finder_config.get("num_workers", 2)
                 # GitHub Actions環境の場合はより適切な値を使用
-                if os.getenv("GITHUB_ACTIONS") == "true":
+                if is_github_actions():
                     github_workers = form_finder_config.get("github_actions_workers", 2)
                     num_workers = min(github_workers, 3)  # 安全のため最大3
-                    logger.info(f"GitHub Actions detected, using {num_workers} form_finder workers")
+                    logger.info(
+                        "GitHub Actions detected, using %s form_finder workers",
+                        num_workers,
+                    )
             else:
                 # フォールバック：既存のmulti_process設定
                 multi_process_config = worker_config.get("multi_process", {})

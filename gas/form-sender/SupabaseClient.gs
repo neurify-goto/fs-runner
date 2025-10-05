@@ -155,6 +155,37 @@ function createQueueForTargetingStep(targetingId, targetDateJst, targetingSql, n
   return callRpc_(fn, payload);
 }
 
+function resetSendQueueAllTestRpc_() {
+  return callRpc_('reset_send_queue_all_test', {});
+}
+
+function createQueueForTargetingTest(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, maxDailySends, shards) {
+  const payload = {
+    p_target_date: targetDateJst,
+    p_targeting_id: Number(targetingId),
+    p_targeting_sql: targetingSql || '',
+    p_ng_companies: ngCompaniesCsv || '',
+    p_max_daily: Number(maxDailySends || 0),
+    p_shards: Number(shards || 8)
+  };
+  return callRpc_('create_queue_for_targeting_test', payload);
+}
+
+function createQueueForTargetingStepTest(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, shards, limitPerCall, afterId, stage, idWindow) {
+  const payload = {
+    p_target_date: targetDateJst,
+    p_targeting_id: Number(targetingId),
+    p_targeting_sql: targetingSql || '',
+    p_ng_companies: ngCompaniesCsv || '',
+    p_shards: Number(shards || 8),
+    p_limit: Number(limitPerCall || 2000),
+    p_after_id: Number(afterId || 0),
+    p_stage: Number(stage || 1),
+    p_id_window: Number(idWindow || 50000)
+  };
+  return callRpc_('create_queue_for_targeting_step_test', payload);
+}
+
 /**
  * ng_companies 列の入力方針（重要）
  * - 入力は「企業名（company_name）のカンマ区切り」のみを受け付ける方針です。
