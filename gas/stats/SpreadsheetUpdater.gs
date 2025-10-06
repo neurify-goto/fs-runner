@@ -857,37 +857,42 @@ function updateTargetingSubmissionsStats() {
     const todayBatchTime = todayBatchEndTime.getTime() - todayBatchStartTime.getTime();
     console.log(`本日統計一括取得完了: ${Object.keys(allTodayStats).length}件の本日統計を取得, 処理時間: ${todayBatchTime}ms`);
     
-    // 各行のsubmissions統計を設定（通算＋本日）
-    const totalAllColumnValues = [];
-    const successAllColumnValues = [];
-    const totalTodayColumnValues = [];
-    const successTodayColumnValues = [];
-    
+    // 各列の既存値を取得し、非更新行では元の値を保持する
+    const totalAllRange = targetingSheet.getRange(2, totalAllColumnIndex, dataRowCount, 1);
+    const totalAllColumnValues = totalAllRange.getValues();
+
+    const successAllRange = targetingSheet.getRange(2, successAllColumnIndex, dataRowCount, 1);
+    const successAllColumnValues = successAllRange.getValues();
+
+    const totalTodayRange = targetingSheet.getRange(2, totalTodayColumnIndex, dataRowCount, 1);
+    const totalTodayColumnValues = totalTodayRange.getValues();
+
+    const successTodayRange = targetingSheet.getRange(2, successTodayColumnIndex, dataRowCount, 1);
+    const successTodayColumnValues = successTodayRange.getValues();
+
     let successCount = 0;
     let invalidCount = 0;
     let inactiveCount = 0;
-    
+
     for (let i = 0; i < dataRowCount; i++) {
       const rowNumber = i + 2; // 実際の行番号（1-based, ヘッダー行を除く）
       const targetingId = idValues[i];
       const isActiveRow = activeFlags[i];
       
       if (isNaN(targetingId) || targetingId <= 0) {
-        console.log(`行 ${rowNumber}: id が無効な値 (${targetingId}) - 空文字を設定`);
-        totalAllColumnValues.push(['']);
-        successAllColumnValues.push(['']);
-        totalTodayColumnValues.push(['']);
-        successTodayColumnValues.push(['']);
+        console.log(`行 ${rowNumber}: id が無効な値 (${targetingId}) - 全統計列をクリア`);
+        totalAllColumnValues[i][0] = '';
+        successAllColumnValues[i][0] = '';
+        totalTodayColumnValues[i][0] = '';
+        successTodayColumnValues[i][0] = '';
         invalidCount++;
         continue;
       }
       
       if (!isActiveRow) {
-        console.log(`行 ${rowNumber} (targeting_id=${targetingId}): active=FALSE のため統計更新対象外`);
-        totalAllColumnValues.push(['']);
-        successAllColumnValues.push(['']);
-        totalTodayColumnValues.push(['']);
-        successTodayColumnValues.push(['']);
+        console.log(`行 ${rowNumber} (targeting_id=${targetingId}): active=FALSE のため本日統計をクリア（通算値は保持）`);
+        totalTodayColumnValues[i][0] = '';
+        successTodayColumnValues[i][0] = '';
         inactiveCount++;
         continue;
       }
@@ -907,10 +912,10 @@ function updateTargetingSubmissionsStats() {
         ? Math.round((todaySuccessSubmissionsCount / todayTotalCount) * 10000) / 100
         : 0;
 
-      totalAllColumnValues.push([totalCount]);
-      successAllColumnValues.push([successSubmissionsCount]);
-      totalTodayColumnValues.push([todayTotalCount]);
-      successTodayColumnValues.push([todaySuccessSubmissionsCount]);
+      totalAllColumnValues[i][0] = totalCount;
+      successAllColumnValues[i][0] = successSubmissionsCount;
+      totalTodayColumnValues[i][0] = todayTotalCount;
+      successTodayColumnValues[i][0] = todaySuccessSubmissionsCount;
 
       console.log(
         `行 ${rowNumber} (targeting_id=${targetingId}): 通算(${totalCount}, ${successSubmissionsCount}) 本日(${todayTotalCount}, ${todaySuccessSubmissionsCount}) 成功率(参照値 ${todaySuccessRate}%)`
@@ -919,16 +924,9 @@ function updateTargetingSubmissionsStats() {
     }
     
     // 通算・本日の統計列を一括更新（値のみ）
-    const totalAllRange = targetingSheet.getRange(2, totalAllColumnIndex, dataRowCount, 1);
     totalAllRange.setValues(totalAllColumnValues);
-
-    const successAllRange = targetingSheet.getRange(2, successAllColumnIndex, dataRowCount, 1);
     successAllRange.setValues(successAllColumnValues);
-    
-    const totalTodayRange = targetingSheet.getRange(2, totalTodayColumnIndex, dataRowCount, 1);
     totalTodayRange.setValues(totalTodayColumnValues);
-    
-    const successTodayRange = targetingSheet.getRange(2, successTodayColumnIndex, dataRowCount, 1);
     successTodayRange.setValues(successTodayColumnValues);
 
     // 本日送信成功率はスプレッドシート側の通常計算に委ねるため更新しない
