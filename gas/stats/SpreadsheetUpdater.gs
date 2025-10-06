@@ -13,7 +13,8 @@ const SPREADSHEET_CONFIG = {
 // targetingシート設定（列ヘッダーをもとに出力列を判定）
 const TARGETING_SHEET_CONFIG = {
   HEADER_ROW_INDEX: 1,
-  ID_COLUMN_HEADER: 'id'
+  ID_COLUMN_HEADER: 'id',
+  ACTIVE_COLUMN_HEADER: 'active'
 };
 
 const TARGETING_COLUMN_HEADERS = {
@@ -64,6 +65,25 @@ function resolveTargetingColumnIndex(headerIndexMap, headerName) {
     throw new Error(`targetingシートのヘッダー「${headerName}」が見つかりません`);
   }
   return columnIndex;
+}
+
+/**
+ * targetingシートのactive列の値を真偽値に変換
+ * @param {*} value セルの値
+ * @returns {boolean} activeならtrue
+ */
+function isTargetingRowActive(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'y';
+  }
+  return false;
 }
 
 // セル配置設定（1行目：タイトル行、2行目以降：統計データ）
@@ -746,6 +766,12 @@ function updateTargetingSubmissionsStats() {
       headerIndexMap,
       TARGETING_SHEET_CONFIG.ID_COLUMN_HEADER
     );
+    const activeColumnIndex = Object.prototype.hasOwnProperty.call(
+      headerIndexMap,
+      TARGETING_SHEET_CONFIG.ACTIVE_COLUMN_HEADER
+    )
+      ? headerIndexMap[TARGETING_SHEET_CONFIG.ACTIVE_COLUMN_HEADER]
+      : null;
     const totalAllColumnIndex = resolveTargetingColumnIndex(
       headerIndexMap,
       TARGETING_COLUMN_HEADERS.SUBMISSIONS_TOTAL_ALL
@@ -772,6 +798,7 @@ function updateTargetingSubmissionsStats() {
       JSON.stringify(
         {
           id: idColumnIndex,
+          active: activeColumnIndex,
           totalAll: totalAllColumnIndex,
           successAll: successAllColumnIndex,
           totalToday: totalTodayColumnIndex,
@@ -796,18 +823,25 @@ function updateTargetingSubmissionsStats() {
     // targeting_id列のデータを取得（ヘッダー名で判定）
     const idRange = targetingSheet.getRange(2, idColumnIndex, dataRowCount, 1);
     const idValues = idRange.getValues().map(row => parseInt(row[0]));
+    let activeFlags;
+    if (activeColumnIndex) {
+      const activeRange = targetingSheet.getRange(2, activeColumnIndex, dataRowCount, 1);
+      activeFlags = activeRange.getValues().map(row => isTargetingRowActive(row[0]));
+    } else {
+      console.log(`targetingシートにヘッダー「${TARGETING_SHEET_CONFIG.ACTIVE_COLUMN_HEADER}」が存在しないため、全行をactive扱いとします`);
+      activeFlags = new Array(dataRowCount).fill(true);
+    }
     
     console.log(`targetingシートの列「${TARGETING_SHEET_CONFIG.ID_COLUMN_HEADER}」から取得したid一覧: [${idValues.join(', ')}] (${dataRowCount}行)`);
     
-    // 有効なtargeting_idのみを抽出（NaN、0以下を除外）
-    const validTargetingIds = idValues.filter(id => !isNaN(id) && id > 0);
-    console.log(`有効なtargeting_id: ${validTargetingIds.length}件 (${validTargetingIds.join(', ')})`);
+    const activeTargetingIds = idValues.filter((id, index) => !isNaN(id) && id > 0 && activeFlags[index]);
+    console.log(`active扱いのtargeting_id: ${activeTargetingIds.length}件 (${activeTargetingIds.join(', ')})`);
     
     // 【通算統計の一括取得】
     console.log('通算統計の一括取得を実行中...');
     const batchStartTime = new Date();
     
-    const allStats = getAllSubmissionsStatsByTargeting(validTargetingIds);
+    const allStats = getAllSubmissionsStatsByTargeting(activeTargetingIds);
     
     const batchEndTime = new Date();
     const batchTime = batchEndTime.getTime() - batchStartTime.getTime();
@@ -817,7 +851,7 @@ function updateTargetingSubmissionsStats() {
     console.log('本日統計の一括取得を実行中（UTC→JST変換対応）...');
     const todayBatchStartTime = new Date();
     
-    const allTodayStats = getAllSubmissionsStatsByTargetingToday(validTargetingIds);
+    const allTodayStats = getAllSubmissionsStatsByTargetingToday(activeTargetingIds);
     
     const todayBatchEndTime = new Date();
     const todayBatchTime = todayBatchEndTime.getTime() - todayBatchStartTime.getTime();
@@ -831,10 +865,12 @@ function updateTargetingSubmissionsStats() {
     
     let successCount = 0;
     let invalidCount = 0;
+    let inactiveCount = 0;
     
     for (let i = 0; i < dataRowCount; i++) {
       const rowNumber = i + 2; // 実際の行番号（1-based, ヘッダー行を除く）
       const targetingId = idValues[i];
+      const isActiveRow = activeFlags[i];
       
       if (isNaN(targetingId) || targetingId <= 0) {
         console.log(`行 ${rowNumber}: id が無効な値 (${targetingId}) - 空文字を設定`);
@@ -843,6 +879,16 @@ function updateTargetingSubmissionsStats() {
         totalTodayColumnValues.push(['']);
         successTodayColumnValues.push(['']);
         invalidCount++;
+        continue;
+      }
+      
+      if (!isActiveRow) {
+        console.log(`行 ${rowNumber} (targeting_id=${targetingId}): active=FALSE のため統計更新対象外`);
+        totalAllColumnValues.push(['']);
+        successAllColumnValues.push(['']);
+        totalTodayColumnValues.push(['']);
+        successTodayColumnValues.push(['']);
+        inactiveCount++;
         continue;
       }
       
@@ -890,7 +936,7 @@ function updateTargetingSubmissionsStats() {
     const jstTime = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss');
     
     console.log(`targeting submissions統計更新完了 (${jstTime})`);
-    console.log(`更新対象: ${dataRowCount}行, 成功: ${successCount}行, 無効値: ${invalidCount}行`);
+    console.log(`更新対象: ${dataRowCount}行, 成功: ${successCount}行, 無効値: ${invalidCount}行, inactive: ${inactiveCount}行`);
     console.log(`処理時間: 通算統計取得 ${batchTime}ms, 本日統計取得 ${todayBatchTime}ms`);
     
     return {
@@ -900,6 +946,7 @@ function updateTargetingSubmissionsStats() {
       totalRows: dataRowCount,
       successRows: successCount,
       invalidRows: invalidCount,
+      inactiveRows: inactiveCount,
       batchProcessingTime: batchTime,
       todayBatchProcessingTime: todayBatchTime,
       targetingIds: idValues
