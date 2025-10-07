@@ -63,7 +63,7 @@
    - `job_executions.sql`
    - `send_queue_test.sql`
    - `submissions_test.sql`
-   - （既存環境も再適用推奨）`submissions.sql` / `submissions_test.sql` に部分インデックス `idx_submissions*_company_recent_failures` が追加されました。直近7日以内の送信失敗除外ロジックで利用します。
+   - （既存環境も再適用推奨）`submissions.sql` / `submissions_test.sql` に部分インデックス `idx_submissions*_company_recent_failures` が追加されました。直近30日以内の送信失敗除外ロジックで利用します。
 2. **RPC / Function**
    - `create_queue_for_targeting_test`
    - `create_queue_for_targeting_step_test`
@@ -71,7 +71,7 @@
    - `mark_done_test`
    - `reset_send_queue_all_test`
    - `requeue_stale_assigned_test`
-   - 直近7日以内に送信失敗した企業は `create_queue_for_targeting_step*` の Stage1/2 で自動除外されます。追加の設定は不要ですが、Supabase テーブルに新しい部分インデックスを適用しておく必要があります。
+   - 直近30日以内に送信失敗した企業は `create_queue_for_targeting_step*` の Stage1/2 で自動除外されます。追加の設定は不要ですが、Supabase テーブルに新しい部分インデックスを適用しておく必要があります。
 3. **ロール権限**
    - Cloud Run Job/dispatcher に使用する Service Role Key が上記テーブル・関数へアクセス可能であること。
 
