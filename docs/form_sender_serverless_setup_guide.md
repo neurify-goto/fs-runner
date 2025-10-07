@@ -71,7 +71,7 @@
    - `mark_done_test`
    - `reset_send_queue_all_test`
    - `requeue_stale_assigned_test`
-   - 直近30日以内に送信失敗した企業は `create_queue_for_targeting_step*` の Stage1/2 で自動除外されます。追加の設定は不要ですが、Supabase テーブルに新しい部分インデックスを適用しておく必要があります。
+   - 直近30日以内に送信失敗した企業は `create_queue_for_targeting_step*` の Stage1/2 で自動除外されます（`*_extra` 系は従来通り 7 日基準）。追加の設定は不要ですが、Supabase テーブルに新しい部分インデックスを適用しておく必要があります。
 3. **ロール権限**
    - Cloud Run Job/dispatcher に使用する Service Role Key が上記テーブル・関数へアクセス可能であること。
 
