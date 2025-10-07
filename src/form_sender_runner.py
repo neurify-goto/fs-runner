@@ -205,6 +205,34 @@ def _mark_job_failed_once() -> None:
     _update_job_execution_status('failed')
 
 
+def _update_job_execution_metadata(patch: Dict[str, Any]) -> None:
+    """Update job_executions.metadata with partial patch."""
+    if not JOB_EXECUTION_ID or not patch:
+        return
+    try:
+        supabase = _build_supabase_client()
+        current_resp = (
+            supabase
+            .table('job_executions')
+            .select('metadata')
+            .eq('execution_id', JOB_EXECUTION_ID)
+            .limit(1)
+            .execute()
+        )
+        current_meta: Dict[str, Any] = {}
+        data = getattr(current_resp, 'data', None)
+        if isinstance(data, list) and data:
+            maybe_meta = data[0].get('metadata')
+            if isinstance(maybe_meta, dict):
+                current_meta = dict(maybe_meta)
+        merged = dict(current_meta)
+        merged.update(patch)
+        supabase.table('job_executions').update({'metadata': merged}).eq('execution_id', JOB_EXECUTION_ID).execute()
+        logger.info("Patched job_executions metadata with keys=%s", list(patch.keys()))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Failed to update job execution metadata: %s", exc)
+
+
 def _load_job_execution_meta() -> Dict[str, Any]:
     encoded = os.getenv("JOB_EXECUTION_META")
     if not encoded:
@@ -1654,7 +1682,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     return True
 
 
-def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_opt: Optional[bool], target_date: date, shard_id: Optional[int], run_id: str, max_processed: Optional[int], fixed_company_id: Optional[int]):
+def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_opt: Optional[bool], target_date: date, shard_id: Optional[int], run_id: str, max_processed: Optional[int], fixed_company_id: Optional[int], empty_finish_flag=None):
     # child process
     try:
         # 子プロセスにも抑制ポリシーを適用
@@ -1676,8 +1704,11 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                 runner_cfg = get_worker_config().get('runner', {})
                 backoff_initial = int(runner_cfg.get('backoff_initial', 2))
                 backoff_max = int(runner_cfg.get('backoff_max', 60))
+                empty_exit_seconds = int(runner_cfg.get('empty_exit_seconds', 60))
+                empty_exit_attempts = int(runner_cfg.get('empty_exit_attempts', 3))
             except Exception:
                 backoff_initial, backoff_max = 2, 60
+                empty_exit_seconds, empty_exit_attempts = 60, 3
             backoff = backoff_initial
             processed = 0
             # 連続アイドル検出: 一定時間連続で claim が空振りの場合は安全に終了
@@ -1686,6 +1717,8 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
             except Exception:
                 idle_limit = 900
             last_work_ts = _time.time()
+            empty_since_ts: Optional[float] = None
+            empty_attempts = 0
             # --- 大量並列時の空シャード対策（全シャードプローブ + シャードローテーション） ---
             try:
                 rcfg = get_worker_config().get('runner', {})
@@ -1777,10 +1810,11 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                         jitter_ratio = 0.2
                     jitter = backoff * jitter_ratio
                     sleep_for = max(0.1, backoff + random.uniform(-jitter, jitter))
-                    # まずは既定のスリープ前に、空シャード対策のフォールバックを評価
                     now_ts = _time.time()
                     if no_work_start_ts is None:
                         no_work_start_ts = now_ts
+                    fallback_rotated = False
+                    forced_probe_success = False
                     # 指定シャードで一定時間以上無作業なら、全シャードプローブを実施
                     if (current_shard_id is not None) and (now_ts - no_work_start_ts >= no_work_probe_seconds):
                         probed = False
@@ -1822,6 +1856,56 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                                 pass
                             # 次の試行に備えてタイマーをリセット
                             no_work_start_ts = now_ts
+                            fallback_rotated = True
+                            empty_attempts = 0
+                            empty_since_ts = now_ts
+
+                    now_ts = _time.time()
+                    empty_attempts += 1
+                    if empty_since_ts is None:
+                        empty_since_ts = now_ts
+                    should_exit_empty = False
+                    if empty_exit_attempts > 0 and empty_attempts >= empty_exit_attempts:
+                        should_exit_empty = True
+                    if not should_exit_empty and empty_exit_seconds > 0 and empty_since_ts is not None and (now_ts - empty_since_ts) >= empty_exit_seconds:
+                        should_exit_empty = True
+                    if should_exit_empty:
+                        if not fallback_rotated:
+                            # ensure at least one global probe before giving up
+                            try:
+                                ok_any = await _process_one(
+                                    supabase,
+                                    worker,
+                                    targeting_id,
+                                    client_data,
+                                    target_date,
+                                    run_id,
+                                    None,
+                                    fixed_company_id,
+                                )
+                            except Exception:
+                                ok_any = False
+                            if ok_any:
+                                forced_probe_success = True
+                                backoff = backoff_initial
+                                last_work_ts = _time.time()
+                                no_work_start_ts = None
+                                empty_since_ts = None
+                                empty_attempts = 0
+                                processed += 1
+                                continue
+                        try:
+                            _get_lifecycle_logger().info(
+                                f"queue_empty_exit: worker_id={worker_id}, targeting_id={targeting_id}, attempts={empty_attempts}, elapsed={int(now_ts - (empty_since_ts or now_ts))}, forced_probe_success={forced_probe_success}"
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            if empty_finish_flag is not None:
+                                empty_finish_flag.value = 1
+                        except Exception:
+                            pass
+                        return
 
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, backoff_max)
@@ -1840,6 +1924,8 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                     processed += 1
                     last_work_ts = _time.time()
                     no_work_start_ts = None
+                    empty_since_ts = None
+                    empty_attempts = 0
                     # テスト用: 規定数に達したら終了
                     if max_processed is not None and processed >= max_processed:
                         return
@@ -1897,6 +1983,7 @@ def main():
     _install_logging_policy_for_ci()
 
     procs: List[mp.Process] = []
+    empty_finish_flag = mp.Value('i', 0)
     overall_status = 'succeeded'
 
     try:
@@ -1907,7 +1994,7 @@ def main():
         for wid in range(worker_count):
             pr = mp.Process(
                 target=_worker_entry,
-                args=(wid, args.targeting_id, config_path, headless_opt, t_date, args.shard_id, run_id, args.max_processed, args.company_id),
+                args=(wid, args.targeting_id, config_path, headless_opt, t_date, args.shard_id, run_id, args.max_processed, args.company_id, empty_finish_flag),
                 name=f'fs-worker-{wid}'
             )
             pr.daemon = False
@@ -1953,6 +2040,14 @@ def main():
             except Exception:  # pragma: no cover - just in case logging already done inside
                 logger.exception("Failed to persist job failure state")
         else:
+            if overall_status == 'succeeded' and empty_finish_flag.value:
+                try:
+                    _update_job_execution_metadata({
+                        'empty_finish': True,
+                        'empty_finish_at': datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception:
+                    logger.exception("Failed to record queue empty metadata")
             # succeeded/cancelled は従来通り全タスクで冪等に反映（キャンセル時はシグナルハンドラで発行済み）
             _update_job_execution_status(overall_status)
 
