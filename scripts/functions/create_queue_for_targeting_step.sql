@@ -75,10 +75,10 @@ begin
            from public.companies c
            left join public.submissions s_hist
              on s_hist.targeting_id = $2 and s_hist.company_id = c.id
-           left join public.submissions s_fail_recent
-             on s_fail_recent.company_id = c.id
-            and s_fail_recent.submitted_at >= (($1::timestamp - interval ''7 days'') AT TIME ZONE ''Asia/Tokyo'')
-            and s_fail_recent.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
+          left join public.submissions s_fail_recent
+            on s_fail_recent.company_id = c.id
+           and s_fail_recent.submitted_at >= (($1::timestamp - interval ''30 days'') AT TIME ZONE ''Asia/Tokyo'')
+           and s_fail_recent.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
             and coalesce(s_fail_recent.success, false) = false
         where c.id > $6 and c.id <= ($6 + $7)
           and c.form_url is not null
@@ -156,10 +156,10 @@ begin
                  and s_recent14.company_id = c.id
                  and s_recent14.submitted_at >= (($1::timestamp - interval ''14 days'') AT TIME ZONE ''Asia/Tokyo'')
                  and s_recent14.submitted_at <  (($1::timestamp) AT TIME ZONE ''Asia/Tokyo'')
-          left join public.submissions s_fail_recent_all
-                 on s_fail_recent_all.company_id = c.id
-                and s_fail_recent_all.submitted_at >= (($1::timestamp - interval ''7 days'') AT TIME ZONE ''Asia/Tokyo'')
-                and s_fail_recent_all.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
+         left join public.submissions s_fail_recent_all
+                on s_fail_recent_all.company_id = c.id
+               and s_fail_recent_all.submitted_at >= (($1::timestamp - interval ''30 days'') AT TIME ZONE ''Asia/Tokyo'')
+               and s_fail_recent_all.submitted_at <  (($1::timestamp + interval ''1 day'') AT TIME ZONE ''Asia/Tokyo'')
                 and coalesce(s_fail_recent_all.success, false) = false
           join hist h on h.company_id = c.id
         where c.id > $6 and c.id <= ($6 + $7)
