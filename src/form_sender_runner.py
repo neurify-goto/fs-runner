@@ -24,7 +24,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta, date
 from functools import lru_cache
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from supabase import create_client
 import random
@@ -1072,8 +1072,22 @@ def _within_business_hours(client_data: Dict[str, Any]) -> bool:
         return True
 
 
-async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, client_data: Dict[str, Any], target_date: date, run_id: str, shard_id: Optional[int] = None, fixed_company_id: Optional[int] = None) -> bool:
-    """1件専有→処理→確定。処理が無ければFalseを返す。"""
+async def _process_one(
+    supabase,
+    worker: IsolatedFormWorker,
+    targeting_id: int,
+    client_data: Dict[str, Any],
+    target_date: date,
+    run_id: str,
+    shard_id: Optional[int] = None,
+    fixed_company_id: Optional[int] = None,
+) -> Tuple[bool, bool]:
+    """1件専有→処理→確定。
+
+    Returns:
+        had_work: True if何らかの処理・再割当てを行った
+        had_error: True if RPC などのエラーが発生し、キュー空判定には利用できない
+    """
     expected_extra_client = _extract_extra_client_name(client_data)
     matched_extra_client: Optional[str] = None
     # 1) claim（固定 company_id が指定された場合は claim をスキップ）
@@ -1125,10 +1139,10 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             except Exception:
                 sleep_s = 2
             await asyncio.sleep(sleep_s)
-            return False
+            return False, True
 
         if not rows:
-            return False
+            return False, False
 
         company_id = rows[0].get('company_id')
         # claim 時点の assigned_at（関数戻り値に含まれない環境では None）
@@ -1241,7 +1255,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                     )
                 except Exception:
                     pass
-                return True
+                return True, False
         except Exception:
             # 判定エラー時は通常処理を継続（安全側）
             pass
@@ -1302,7 +1316,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                     )
                 except Exception:
                     pass
-                return True
+                return True, False
         except Exception as e_dup:
             # Fail-closed: 重複確認が失敗した場合は送信を中止し、キューを即時requeue（可能な範囲で）。
             logger.warning(f"duplicate check failed for company_id={company_id} (suppressed): {e_dup}")
@@ -1329,12 +1343,12 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 except Exception:
                     pass
                 # ここでは mark_done は呼ばない（再試行のため）。
-                return True  # 処理はした（requeue済）と見なす
+                return True, False  # 処理はした（requeue済）と見なす
             except Exception as e_rq:
                 # 即時requeueも失敗した場合は、assigned のまま放置し、stale requeue に委ねる
                 logger.error(f"requeue after dupcheck failure error (company_id={company_id}): {e_rq}")
                 # 送信は行わない。
-                return True
+                return True, False
         # black が NULL 以外（true/false含む）は処理対象外（要件: false はデータ上ほぼ存在しない想定）
         if company.get('black') is not None:
             raise RuntimeError('company blacklisted')
@@ -1395,7 +1409,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             )
         except Exception:
             pass
-        return True
+        return True, False
     except Exception as e:
         logger.error(f"fetch company error ({company_id}): {e}")
         # mark failed quickly（代表コードで詳細分類を付与）
@@ -1442,7 +1456,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
             )
         except Exception:
             pass
-        return True
+        return True, False
 
     # 3) process via worker
     if not company.get('form_url'):
@@ -1496,7 +1510,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
                 await ctx.clear_cookies()
         except Exception:
             pass
-        return True
+        return True, False
 
     # 3-a) 営業禁止事前チェックはワーカー側に統合（同一ページアクセスで実施）
 
@@ -1679,7 +1693,7 @@ async def _process_one(supabase, worker: IsolatedFormWorker, targeting_id: int, 
     except Exception as e:
         logger.error(f"mark_done RPC error ({company_id}): {e}")
 
-    return True
+    return True, False
 
 
 def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_opt: Optional[bool], target_date: date, shard_id: Optional[int], run_id: str, max_processed: Optional[int], fixed_company_id: Optional[int], empty_finish_flag=None):
@@ -1799,7 +1813,7 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                             return
                     except Exception as e:
                         logger.warning(f"daily cap check failed: {e}")
-                had_work = await _process_one(
+                had_work, had_error = await _process_one(
                     supabase, worker, targeting_id, client_data, target_date, run_id, current_shard_id, fixed_company_id
                 )
                 if not had_work:
@@ -1811,69 +1825,69 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                     jitter = backoff * jitter_ratio
                     sleep_for = max(0.1, backoff + random.uniform(-jitter, jitter))
                     now_ts = _time.time()
-                    if no_work_start_ts is None:
-                        no_work_start_ts = now_ts
-                    fallback_rotated = False
-                    forced_probe_success = False
-                    # 指定シャードで一定時間以上無作業なら、全シャードプローブを実施
-                    if (current_shard_id is not None) and (now_ts - no_work_start_ts >= no_work_probe_seconds):
-                        probed = False
-                        try:
-                            attempts = max(1, unsharded_probe_attempts)
-                        except Exception:
-                            attempts = 1
-                        for _ in range(attempts):
-                            ok_any = await _process_one(
-                                supabase, worker, targeting_id, client_data, target_date, run_id, None, fixed_company_id
-                            )
-                            if ok_any:
-                                # 1件でも処理できたら即リセットして継続（シャード固定は維持）
-                                probed = True
-                                last_work_ts = _time.time()
-                                backoff = backoff_initial
-                                no_work_start_ts = None
-                                processed += 1
-                                break
-                        if probed:
-                            # フォールバックで1件処理できた場合はスリープやアイドル判定をスキップして次ループへ
-                            continue
-                        if not probed and shard_rotation_enabled and shard_num > 1:
-                            # シャードをローテーション（シーケンシャルまたは乱択）
-                            prev = current_shard_id
-                            if shard_rotation_strategy == 'random':
-                                try:
-                                    nxt_candidates = [i for i in range(shard_num) if i != (prev or 0)]
-                                    current_shard_id = random.choice(nxt_candidates) if nxt_candidates else prev
-                                except Exception:
-                                    current_shard_id = ((prev or 0) + 1) % shard_num
-                            else:
-                                current_shard_id = ((prev or 0) + 1) % shard_num
-                            try:
-                                _get_lifecycle_logger().info(
-                                    f"shard_rotate: worker_id={worker_id}, targeting_id={targeting_id}, from={prev}, to={current_shard_id}"
-                                )
-                            except Exception:
-                                pass
-                            # 次の試行に備えてタイマーをリセット
+                    if had_error:
+                        empty_attempts = 0
+                        empty_since_ts = None
+                        no_work_start_ts = None
+                        fallback_rotated = False
+                    else:
+                        if no_work_start_ts is None:
                             no_work_start_ts = now_ts
-                            fallback_rotated = True
-                            empty_attempts = 0
-                            empty_since_ts = now_ts
-
-                    now_ts = _time.time()
-                    empty_attempts += 1
-                    if empty_since_ts is None:
-                        empty_since_ts = now_ts
-                    should_exit_empty = False
-                    if empty_exit_attempts > 0 and empty_attempts >= empty_exit_attempts:
-                        should_exit_empty = True
-                    if not should_exit_empty and empty_exit_seconds > 0 and empty_since_ts is not None and (now_ts - empty_since_ts) >= empty_exit_seconds:
-                        should_exit_empty = True
-                    if should_exit_empty:
-                        if not fallback_rotated:
-                            # ensure at least one global probe before giving up
+                        fallback_rotated = False
+                        forced_probe_success = False
+                        if (current_shard_id is not None) and (now_ts - no_work_start_ts >= no_work_probe_seconds):
+                            probed = False
                             try:
-                                ok_any = await _process_one(
+                                attempts = max(1, unsharded_probe_attempts)
+                            except Exception:
+                                attempts = 1
+                            for _ in range(attempts):
+                                ok_any, ok_error = await _process_one(
+                                    supabase, worker, targeting_id, client_data, target_date, run_id, None, fixed_company_id
+                                )
+                                if ok_error:
+                                    continue
+                                if ok_any:
+                                    probed = True
+                                    last_work_ts = _time.time()
+                                    backoff = backoff_initial
+                                    no_work_start_ts = None
+                                    processed += 1
+                                    break
+                            if probed:
+                                continue
+                            if not probed and shard_rotation_enabled and shard_num > 1:
+                                prev = current_shard_id
+                                if shard_rotation_strategy == 'random':
+                                    try:
+                                        nxt_candidates = [i for i in range(shard_num) if i != (prev or 0)]
+                                        current_shard_id = random.choice(nxt_candidates) if nxt_candidates else prev
+                                    except Exception:
+                                        current_shard_id = ((prev or 0) + 1) % shard_num
+                                else:
+                                    current_shard_id = ((prev or 0) + 1) % shard_num
+                                try:
+                                    _get_lifecycle_logger().info(
+                                        f"shard_rotate: worker_id={worker_id}, targeting_id={targeting_id}, from={prev}, to={current_shard_id}"
+                                    )
+                                except Exception:
+                                    pass
+                                no_work_start_ts = now_ts
+                                fallback_rotated = True
+                                empty_attempts = 0
+                                empty_since_ts = now_ts
+
+                        if not fallback_rotated:
+                            empty_attempts += 1
+                            if empty_since_ts is None:
+                                empty_since_ts = now_ts
+                            should_exit_empty = False
+                            if empty_exit_attempts > 0 and empty_attempts >= empty_exit_attempts:
+                                should_exit_empty = True
+                            if not should_exit_empty and empty_exit_seconds > 0 and empty_since_ts is not None and (now_ts - empty_since_ts) >= empty_exit_seconds:
+                                should_exit_empty = True
+                            if should_exit_empty:
+                                probe_work, probe_error = await _process_one(
                                     supabase,
                                     worker,
                                     targeting_id,
@@ -1883,42 +1897,46 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                                     None,
                                     fixed_company_id,
                                 )
-                            except Exception:
-                                ok_any = False
-                            if ok_any:
-                                forced_probe_success = True
-                                backoff = backoff_initial
-                                last_work_ts = _time.time()
-                                no_work_start_ts = None
-                                empty_since_ts = None
-                                empty_attempts = 0
-                                processed += 1
-                                continue
-                        try:
-                            _get_lifecycle_logger().info(
-                                f"queue_empty_exit: worker_id={worker_id}, targeting_id={targeting_id}, attempts={empty_attempts}, elapsed={int(now_ts - (empty_since_ts or now_ts))}, forced_probe_success={forced_probe_success}"
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            if empty_finish_flag is not None:
-                                empty_finish_flag.value = 1
-                        except Exception:
-                            pass
-                        return
+                                if probe_error:
+                                    empty_attempts = 0
+                                    empty_since_ts = None
+                                    should_exit_empty = False
+                                elif probe_work:
+                                    forced_probe_success = True
+                                    backoff = backoff_initial
+                                    last_work_ts = _time.time()
+                                    no_work_start_ts = None
+                                    empty_since_ts = None
+                                    empty_attempts = 0
+                                    processed += 1
+                                    continue
+                                if should_exit_empty:
+                                    try:
+                                        _get_lifecycle_logger().info(
+                                            f"queue_empty_exit: worker_id={worker_id}, targeting_id={targeting_id}, attempts={empty_attempts}, elapsed={int(now_ts - (empty_since_ts or now_ts))}, forced_probe_success={forced_probe_success}"
+                                        )
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if empty_finish_flag is not None:
+                                            empty_finish_flag.value = 1
+                                    except Exception:
+                                        pass
+                                    return
 
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, backoff_max)
-                    # アイドル継続判定
-                    try:
-                        now_ts = _time.time()
-                        if idle_limit > 0 and (now_ts - last_work_ts) >= idle_limit:
-                            _get_lifecycle_logger().info(
-                                f"no_work_timeout: worker_id={worker_id}, targeting_id={targeting_id}, idle_for_sec={int(now_ts - last_work_ts)}"
-                            )
-                            return
-                    except Exception:
-                        pass
+                    if not had_error:
+                        try:
+                            now_ts = _time.time()
+                            if idle_limit > 0 and (now_ts - last_work_ts) >= idle_limit:
+                                _get_lifecycle_logger().info(
+                                    f"no_work_timeout: worker_id={worker_id}, targeting_id={targeting_id}, idle_for_sec={int(now_ts - last_work_ts)}"
+                                )
+                                return
+                        except Exception:
+                            pass
+                    continue
                 else:
                     backoff = backoff_initial
                     processed += 1
