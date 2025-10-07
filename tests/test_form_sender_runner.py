@@ -7,13 +7,16 @@ from src import form_sender_runner as runner
 
 
 class _FakeQuery:
-    def __init__(self, supabase, mode=None):
+    def __init__(self, supabase, table_name, mode=None):
         self._supabase = supabase
         self._mode = mode
         self._payload = None
+        self._table = table_name
+        self._columns = ()
 
     def select(self, *_args, **_kwargs):
         self._mode = "select"
+        self._columns = _args
         return self
 
     def update(self, payload):
@@ -29,9 +32,16 @@ class _FakeQuery:
 
     def execute(self):
         if self._mode == "select":
-            return types.SimpleNamespace(data=[{"status": self._supabase.status}])
+            if self._table == "job_executions":
+                if self._columns and any("metadata" in col for col in self._columns if isinstance(col, str)):
+                    return types.SimpleNamespace(data=[{"metadata": self._supabase.metadata}])
+                return types.SimpleNamespace(data=[{"status": self._supabase.status}])
+            raise AssertionError("Unexpected table for select")
         if self._mode == "update":
-            self._supabase.status = self._payload["status"]
+            if "status" in self._payload:
+                self._supabase.status = self._payload["status"]
+            if "metadata" in self._payload:
+                self._supabase.metadata = self._payload["metadata"]
             self._supabase.last_update = self._payload
             return types.SimpleNamespace(data=[self._payload])
         raise AssertionError("Unexpected mode")
@@ -41,9 +51,10 @@ class _FakeSupabase:
     def __init__(self, status="running"):
         self.status = status
         self.last_update = None
+        self.metadata = {}
 
     def table(self, _name):
-        return _FakeQuery(self)
+        return _FakeQuery(self, _name)
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +97,17 @@ def test_mark_job_failed_once_only_updates_first_time(monkeypatch):
     supabase.last_update = None
     runner._mark_job_failed_once()
     assert supabase.last_update is None
+
+
+def test_update_job_execution_metadata_merges(monkeypatch):
+    supabase = _FakeSupabase(status="running")
+    supabase.metadata = {"foo": "bar"}
+    monkeypatch.setattr(runner, "_build_supabase_client", lambda: supabase)
+    runner.JOB_EXECUTION_ID = "exec-789"
+
+    runner._update_job_execution_metadata({"empty_finish": True})
+
+    assert supabase.metadata == {"foo": "bar", "empty_finish": True}
 
 
 def test_resolve_worker_count_respects_cpu_profile(monkeypatch):
