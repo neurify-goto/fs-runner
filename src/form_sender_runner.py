@@ -21,24 +21,46 @@ import multiprocessing as mp
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone, timedelta, date
 from functools import lru_cache
 from typing import Optional, Dict, Any, List, Tuple
+from urllib.parse import urljoin
 
 from supabase import create_client
 import random
 import time as _time
 import hashlib
+import requests
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 from form_sender.worker.isolated_worker import IsolatedFormWorker
 from form_sender.security.log_sanitizer import setup_sanitized_logging
 from form_sender.utils.error_classifier import ErrorClassifier
 from form_sender.utils.client_data_loader import load_client_data_simple
 from config.manager import get_worker_config
-from utils.env import should_sanitize_logs
+from utils.env import should_sanitize_logs, get_runtime_environment, is_gcp_batch
+from utils.gcp_batch import (
+    BatchMeta,
+    calculate_run_index,
+    calculate_shard_index,
+    extract_batch_meta,
+    get_preemption_config,
+)
 
 JOB_EXECUTION_ID = os.getenv("JOB_EXECUTION_ID") or os.getenv("CLOUD_RUN_EXECUTION")
+
+DISPATCHER_BASE_URL_ENV = "FORM_SENDER_DISPATCHER_BASE_URL"
+DISPATCHER_AUDIENCE_ENV = "FORM_SENDER_DISPATCHER_AUDIENCE"
+_SIGNED_URL_REFRESH_PATH = "/v1/form-sender/signed-url/refresh"
+
+_CURRENT_BATCH_META: Optional[BatchMeta] = None
+_CURRENT_RUN_INDEX: Optional[int] = None
+_CURRENT_BATCH_ATTEMPT: Optional[int] = None
+_PREEMPTION_STOP: Optional[threading.Event] = None
+_PREEMPTION_THREAD: Optional[threading.Thread] = None
 
 
 def _get_env_int(name: str) -> Optional[int]:
@@ -58,6 +80,17 @@ def _is_truthy(value: Optional[str]) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _coerce_to_int(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def build_run_id(base_identifier: Optional[str], run_index: Optional[int], attempt: Optional[int]) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     components = []
@@ -75,17 +108,37 @@ def build_run_id(base_identifier: Optional[str], run_index: Optional[int], attem
 
 
 def _resolve_run_id() -> str:
+    global _CURRENT_RUN_INDEX, _CURRENT_BATCH_ATTEMPT
+
     job_execution_id = os.getenv("JOB_EXECUTION_ID") or os.getenv("CLOUD_RUN_EXECUTION")
-    run_index = _get_env_int("FORM_SENDER_RUN_INDEX")
+    base_identifier = job_execution_id or os.getenv("GITHUB_RUN_ID")
+
+    env_run_index = _get_env_int("FORM_SENDER_RUN_INDEX")
     attempt = _get_env_int("CLOUD_RUN_TASK_ATTEMPT")
     if attempt is None:
         attempt = _get_env_int("CLOUD_RUN_TASK_RETRY_ATTEMPT")
 
-    base_identifier = job_execution_id or os.getenv("GITHUB_RUN_ID")
+    meta = _load_job_execution_meta()
+    run_index_base = _coerce_to_int(meta.get("run_index_base"))
+    batch_meta = _get_batch_meta()
+
+    computed_run_index = calculate_run_index(run_index_base, batch_meta.task_index)
+    run_index = computed_run_index if computed_run_index is not None else env_run_index
+
+    if run_index is not None:
+        os.environ["FORM_SENDER_RUN_INDEX"] = str(run_index)
+
+    if attempt is None and batch_meta.attempt is not None:
+        attempt = batch_meta.attempt
+
+    if attempt is not None:
+        os.environ["CLOUD_RUN_TASK_ATTEMPT"] = str(attempt)
+
+    _CURRENT_RUN_INDEX = run_index
+    _CURRENT_BATCH_ATTEMPT = attempt
+
     run_id = build_run_id(base_identifier, run_index, attempt)
-    if base_identifier:
-        return run_id
-    return run_id  # local fallback already handled inside build_run_id
+    return run_id
 
 
 def _resolve_worker_count(requested: int, company_id: Optional[int]) -> int:
@@ -226,7 +279,18 @@ def _update_job_execution_metadata(patch: Dict[str, Any]) -> None:
             if isinstance(maybe_meta, dict):
                 current_meta = dict(maybe_meta)
         merged = dict(current_meta)
-        merged.update(patch)
+        for key, value in patch.items():
+            if value is None:
+                continue
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                nested = dict(merged[key])
+                for nested_key, nested_value in value.items():
+                    if nested_value is None:
+                        continue
+                    nested[nested_key] = nested_value
+                merged[key] = nested
+            else:
+                merged[key] = value
         supabase.table('job_executions').update({'metadata': merged}).eq('execution_id', JOB_EXECUTION_ID).execute()
         logger.info("Patched job_executions metadata with keys=%s", list(patch.keys()))
     except Exception as exc:  # pylint: disable=broad-except
@@ -243,6 +307,211 @@ def _load_job_execution_meta() -> Dict[str, Any]:
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("JOB_EXECUTION_META の解析に失敗しました: %s", exc)
         return {}
+
+
+def _get_batch_meta() -> BatchMeta:
+    global _CURRENT_BATCH_META
+    if _CURRENT_BATCH_META is None:
+        _CURRENT_BATCH_META = extract_batch_meta()
+    return _CURRENT_BATCH_META
+
+
+def _record_batch_attempt_start(run_index: Optional[int]) -> None:
+    meta = _get_batch_meta()
+    if meta.attempt is None and meta.task_index is None and run_index is None:
+        return
+
+    payload: Dict[str, Any] = {
+        "batch_attempt": meta.attempt,
+        "current_task_index": meta.task_index,
+        "current_run_index": run_index,
+        "last_attempt_started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _update_job_execution_metadata({"batch": payload})
+
+
+def _record_batch_attempt_finish(status: str, run_index: Optional[int]) -> None:
+    meta = _get_batch_meta()
+    if meta.attempt is None and run_index is None:
+        return
+
+    payload: Dict[str, Any] = {
+        "batch_attempt": meta.attempt,
+        "current_run_index": run_index,
+        "last_attempt_finished_at": datetime.now(timezone.utc).isoformat(),
+        "last_attempt_status": status,
+    }
+    _update_job_execution_metadata({"batch": payload})
+
+
+def _preemption_monitor_loop(
+    stop_event: threading.Event,
+    endpoint: str,
+    header_name: str,
+    header_value: str,
+    initial_backoff: int,
+    max_backoff: int,
+) -> None:
+    backoff = max(1, initial_backoff)
+    max_backoff = max(backoff, max_backoff)
+    while not stop_event.is_set():
+        try:
+            response = requests.get(
+                endpoint,
+                headers={header_name: header_value},
+                timeout=5,
+            )
+            if response.status_code == 200:
+                text = (response.text or "").strip().lower()
+                if text in {"true", "1", "preempted"}:
+                    logger.warning("Spot preemption detected for current Batch task")
+                    _update_job_execution_metadata({
+                        "batch": {
+                            "preempted": True,
+                            "last_preempted_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    })
+                    return
+            elif response.status_code in {410, 412}:
+                # As per metadata docs, these may indicate preemption depending on rollout
+                logger.warning("Spot preemption metadata returned status %s", response.status_code)
+                _update_job_execution_metadata({
+                    "batch": {
+                        "preempted": True,
+                        "last_preempted_at": datetime.now(timezone.utc).isoformat(),
+                        "preemption_status_code": response.status_code,
+                    }
+                })
+                return
+        except requests.RequestException as exc:  # pragma: no cover - network errors are best-effort
+            logger.debug("Preemption metadata polling failed: %s", exc)
+
+        if stop_event.wait(backoff):
+            break
+        backoff = min(max_backoff, backoff * 2)
+
+
+def _start_preemption_monitor() -> None:
+    global _PREEMPTION_STOP, _PREEMPTION_THREAD
+    if _PREEMPTION_THREAD is not None:
+        return
+    if not is_gcp_batch():
+        return
+
+    config = get_preemption_config()
+    endpoint = str(config.get("endpoint", ""))
+    header_name = str(config.get("header_name", "Metadata-Flavor"))
+    header_value = str(config.get("header_value", "Google"))
+    initial_backoff = int(config.get("initial_backoff_seconds", 1) or 1)
+    max_backoff = int(config.get("max_backoff_seconds", 30) or 30)
+
+    if not endpoint:
+        return
+
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_preemption_monitor_loop,
+        name="gcp-preemption-monitor",
+        args=(stop_event, endpoint, header_name, header_value, initial_backoff, max_backoff),
+        daemon=True,
+    )
+    _PREEMPTION_STOP = stop_event
+    _PREEMPTION_THREAD = thread
+    thread.start()
+
+
+def _stop_preemption_monitor() -> None:
+    global _PREEMPTION_STOP, _PREEMPTION_THREAD
+    if _PREEMPTION_STOP is not None:
+        _PREEMPTION_STOP.set()
+    if _PREEMPTION_THREAD is not None and _PREEMPTION_THREAD.is_alive():
+        try:
+            _PREEMPTION_THREAD.join(timeout=5)
+        except Exception:  # pragma: no cover - best-effort stop
+            pass
+    _PREEMPTION_STOP = None
+    _PREEMPTION_THREAD = None
+
+
+def _needs_signed_url_refresh(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        response = requests.head(url, timeout=5, allow_redirects=True)
+        if response.status_code >= 400:
+            return True
+        return False
+    except requests.RequestException:
+        return True
+
+
+def _request_signed_url_refresh(client_config_object: str) -> Optional[str]:
+    base_url = os.getenv(DISPATCHER_BASE_URL_ENV)
+    if not base_url:
+        logger.warning("Dispatcher base URL is not configured; skip signed URL refresh")
+        return None
+
+    audience = os.getenv(DISPATCHER_AUDIENCE_ENV) or base_url
+    refresh_url = urljoin(base_url.rstrip('/') + '/', _SIGNED_URL_REFRESH_PATH.lstrip('/'))
+
+    try:
+        auth_request = google_requests.Request()
+        token = id_token.fetch_id_token(auth_request, audience)
+    except Exception as exc:  # pragma: no cover - token fetch depends on metadata server
+        logger.warning("Failed to fetch ID token for signed URL refresh: %s", exc)
+        return None
+
+    payload: Dict[str, Any] = {"client_config_object": client_config_object}
+    if JOB_EXECUTION_ID:
+        payload["execution_id"] = JOB_EXECUTION_ID
+
+    try:
+        response = requests.post(
+            refresh_url,
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        if response.status_code >= 300:
+            logger.warning(
+                "Dispatcher signed URL refresh failed: status=%s, body=%s",
+                response.status_code,
+                response.text,
+            )
+            return None
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network / JSON errors are best-effort
+        logger.warning("Dispatcher signed URL refresh request error: %s", exc)
+        return None
+
+    new_url = data.get("signed_url") if isinstance(data, dict) else None
+    if isinstance(new_url, str) and new_url:
+        _update_job_execution_metadata({
+            "batch": {
+                "latest_signed_url": new_url,
+                "signed_url_refreshed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        })
+        logger.info("Obtained refreshed client_config signed URL from dispatcher")
+        return new_url
+
+    logger.warning("Dispatcher signed URL refresh response did not contain signed_url")
+    return None
+
+
+def _refresh_client_config_url_if_needed(current_url: str, client_config_object: str) -> str:
+    if not current_url or not client_config_object:
+        return current_url
+    if not is_gcp_batch():
+        return current_url
+    if not _needs_signed_url_refresh(current_url):
+        return current_url
+
+    refreshed = _request_signed_url_refresh(client_config_object)
+    if refreshed:
+        os.environ["FORM_SENDER_CLIENT_CONFIG_URL"] = refreshed
+        return refreshed
+    return current_url
 
 
 def _is_test_mode_enabled() -> bool:
@@ -1968,6 +2237,12 @@ def main():
     p.add_argument('--table-mode', type=str, default=None, help='Force table mode (default|extra|test)')
     args = p.parse_args()
 
+    client_config_object = os.getenv("FORM_SENDER_CLIENT_CONFIG_OBJECT", "")
+    current_signed_url = os.getenv("FORM_SENDER_CLIENT_CONFIG_URL", "")
+    refreshed_url = _refresh_client_config_url_if_needed(current_signed_url, client_config_object)
+    if refreshed_url and refreshed_url != current_signed_url:
+        logger.info("Using refreshed client_config signed URL provided by dispatcher")
+
     config_path = _resolve_client_config_path(args.config_file)
 
     headless_opt = None
@@ -1988,6 +2263,9 @@ def main():
 
     run_id = _resolve_run_id()
     logger.info("Using run_id=%s", run_id)
+
+    _record_batch_attempt_start(_CURRENT_RUN_INDEX)
+    _start_preemption_monitor()
 
     cpu_class = (os.getenv("FORM_SENDER_CPU_CLASS") or "standard").strip().lower()
     os.environ["FORM_SENDER_CPU_CLASS"] = cpu_class
@@ -2052,6 +2330,11 @@ def main():
         overall_status = 'failed'
         raise
     finally:
+        try:
+            _record_batch_attempt_finish(overall_status, _CURRENT_RUN_INDEX)
+        except Exception:  # pragma: no cover - metadata write best-effort
+            logger.exception("Failed to record batch attempt completion metadata")
+        _stop_preemption_monitor()
         if overall_status == 'failed':
             try:
                 _mark_job_failed_once()

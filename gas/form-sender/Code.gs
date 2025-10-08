@@ -92,9 +92,103 @@ const CONFIG = {
 // 実行プロセス内の軽量キャッシュ（1実行中のみ有効）
 var __HOLIDAY_CACHE = {};
 
+function parseBooleanProperty_(value) {
+  if (value === null || typeof value === 'undefined') {
+    return false;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+  var normalized = String(value).trim().toLowerCase();
+  return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+}
+
+function resolveExecutionModePriority_() {
+  var props = PropertiesService.getScriptProperties();
+  var priority = [];
+  if (parseBooleanProperty_(props.getProperty('USE_GCP_BATCH'))) {
+    priority.push('batch');
+  }
+  if (parseBooleanProperty_(props.getProperty('USE_SERVERLESS_FORM_SENDER'))) {
+    priority.push('serverless');
+  }
+  priority.push('github');
+  return priority;
+}
+
+function getScriptPropertyInt_(key, fallback) {
+  var props = PropertiesService.getScriptProperties();
+  var raw = props.getProperty(key);
+  if (raw === null || typeof raw === 'undefined') {
+    return fallback;
+  }
+  var parsed = parseInt(raw, 10);
+  if (!isFinite(parsed)) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function getScriptPropertyString_(key, fallback) {
+  var props = PropertiesService.getScriptProperties();
+  var raw = props.getProperty(key);
+  if (raw === null || typeof raw === 'undefined' || String(raw).trim() === '') {
+    return fallback;
+  }
+  return String(raw);
+}
+
+function resolveTargetingExecutionMode_(targetingConfig) {
+  var flags = {
+    batchEnabled: false,
+    serverlessEnabled: false
+  };
+
+  function collect(obj, keys) {
+    if (!obj || typeof obj !== 'object') {
+      return [];
+    }
+    return keys
+      .map(function(key) { return obj[key]; })
+      .filter(function(value) { return typeof value !== 'undefined'; });
+  }
+
+  var batchCandidates = [];
+  batchCandidates = batchCandidates.concat(collect(targetingConfig, ['useGcpBatch', 'use_gcp_batch']));
+  batchCandidates = batchCandidates.concat(collect(targetingConfig.targeting || {}, ['useGcpBatch', 'use_gcp_batch']));
+  batchCandidates = batchCandidates.concat(collect(targetingConfig.batch || {}, ['enabled']));
+  flags.batchEnabled = batchCandidates.some(parseBooleanProperty_);
+
+  flags.serverlessEnabled = isTargetingServerlessEnabled_(targetingConfig);
+  return flags;
+}
+
+function readTargetingField_(targetingConfig, keys) {
+  if (!Array.isArray(keys)) {
+    keys = [keys];
+  }
+  var sources = [targetingConfig, targetingConfig ? targetingConfig.targeting : null, targetingConfig ? targetingConfig.batch : null];
+  for (var i = 0; i < sources.length; i++) {
+    var source = sources[i];
+    if (!source || typeof source !== 'object') {
+      continue;
+    }
+    for (var j = 0; j < keys.length; j++) {
+      var key = keys[j];
+      if (typeof source[key] !== 'undefined' && source[key] !== null) {
+        return source[key];
+      }
+    }
+  }
+  return undefined;
+}
+
 function shouldUseServerlessFormSender_() {
-  var flag = PropertiesService.getScriptProperties().getProperty('USE_SERVERLESS_FORM_SENDER');
-  return String(flag || '').toLowerCase() === 'true';
+  var priority = resolveExecutionModePriority_();
+  return priority.indexOf('serverless') !== -1 || priority.indexOf('batch') !== -1;
 }
 
 function isTargetingServerlessEnabled_(targetingConfig) {
@@ -102,30 +196,122 @@ function isTargetingServerlessEnabled_(targetingConfig) {
     return false;
   }
 
-  var candidates = [
-    targetingConfig.useServerless,
-    targetingConfig.use_serverless
-  ];
-
+  var candidates = [];
+  candidates.push(targetingConfig.useServerless);
+  candidates.push(targetingConfig.use_serverless);
   if (targetingConfig.targeting) {
     candidates.push(targetingConfig.targeting.useServerless);
     candidates.push(targetingConfig.targeting.use_serverless);
   }
+  return candidates.some(parseBooleanProperty_);
+}
 
-  for (var i = 0; i < candidates.length; i++) {
-    var value = candidates[i];
-    if (value === true || value === 1) {
-      return true;
+function ceilTo256_(value) {
+  return Math.ceil(value / 256) * 256;
+}
+
+function calculateBatchResourceProfile_(workers) {
+  var vcpu = Math.max(1, workers);
+  var memoryMb = ceilTo256_((workers * 3072) + 2048);
+  return {
+    vcpu: vcpu,
+    memoryMb: memoryMb
+  };
+}
+
+function parseCustomMachineProfile_(machineType) {
+  if (typeof machineType !== 'string') {
+    return null;
+  }
+  var match = machineType.match(/custom-(\d+)-(\d+)/i);
+  if (!match) {
+    return null;
+  }
+  var vcpu = parseInt(match[1], 10);
+  var memoryMb = parseInt(match[2], 10);
+  if (!isFinite(vcpu) || !isFinite(memoryMb)) {
+    return null;
+  }
+  return {
+    vcpu: vcpu,
+    memoryMb: memoryMb
+  };
+}
+
+function buildBatchPayload_(targetingConfig, workers, parallelism) {
+  var scriptProps = PropertiesService.getScriptProperties();
+  var defaultMaxParallelism = getScriptPropertyInt_('FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT', 100);
+  var defaultPreferSpot = parseBooleanProperty_(scriptProps.getProperty('FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT') || 'true');
+  var defaultAllowOnDemand = parseBooleanProperty_(scriptProps.getProperty('FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT') || 'true');
+  var machineTypeOverride = getScriptPropertyString_('FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE', null);
+  var defaultTtlHours = getScriptPropertyInt_('FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH', 48);
+  var defaultRefreshSeconds = getScriptPropertyInt_('FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH', 21600);
+
+  var maxParallelOverride = readTargetingField_(targetingConfig, ['batch_max_parallelism', 'batchMaxParallelism']);
+  var preferSpotOverride = readTargetingField_(targetingConfig, ['batch_prefer_spot', 'batchPreferSpot']);
+  var fallbackOverride = readTargetingField_(targetingConfig, ['batch_allow_on_demand_fallback', 'batchAllowOnDemandFallback']);
+  var machineTypeField = readTargetingField_(targetingConfig, ['batch_machine_type', 'batchMachineType']);
+  var ttlOverride = readTargetingField_(targetingConfig, ['batch_signed_url_ttl_hours', 'batchSignedUrlTtlHours']);
+
+  var maxParallelism = null;
+  if (typeof maxParallelOverride !== 'undefined') {
+    var parsedMax = parseInt(maxParallelOverride, 10);
+    if (isFinite(parsedMax) && parsedMax > 0) {
+      maxParallelism = parsedMax;
     }
-    if (typeof value === 'string') {
-      var normalized = value.toLowerCase();
-      if (normalized === 'true' || normalized === '1') {
-        return true;
-      }
+  }
+  if (!isFinite(maxParallelism) || maxParallelism === null) {
+    maxParallelism = defaultMaxParallelism;
+  }
+
+  var preferSpot = defaultPreferSpot;
+  if (typeof preferSpotOverride !== 'undefined') {
+    preferSpot = parseBooleanProperty_(preferSpotOverride);
+  }
+
+  var allowOnDemand = defaultAllowOnDemand;
+  if (typeof fallbackOverride !== 'undefined') {
+    allowOnDemand = parseBooleanProperty_(fallbackOverride);
+  }
+
+  var resourceProfile = calculateBatchResourceProfile_(workers);
+  var machineType = machineTypeField || machineTypeOverride;
+  if (!machineType) {
+    machineType = 'n2d-custom-' + resourceProfile.vcpu + '-' + resourceProfile.memoryMb;
+  }
+
+  var parsedMachine = parseCustomMachineProfile_(machineType);
+  var memoryWarning = false;
+  if (parsedMachine && parsedMachine.memoryMb < resourceProfile.memoryMb) {
+    memoryWarning = true;
+  }
+
+  var ttlHours = defaultTtlHours;
+  if (typeof ttlOverride !== 'undefined') {
+    var parsedTtl = parseInt(ttlOverride, 10);
+    if (isFinite(parsedTtl) && parsedTtl >= 1 && parsedTtl <= 168) {
+      ttlHours = parsedTtl;
     }
   }
 
-  return false;
+  var payload = {
+    enabled: true,
+    max_parallelism: Math.max(1, Math.min(maxParallelism, parallelism || maxParallelism)),
+    prefer_spot: !!preferSpot,
+    allow_on_demand_fallback: !!allowOnDemand,
+    machine_type: machineType,
+    signed_url_ttl_hours: ttlHours,
+    signed_url_refresh_threshold_seconds: defaultRefreshSeconds,
+    vcpu_per_worker: 1,
+    memory_per_worker_mb: 3072
+  };
+
+  if (memoryWarning) {
+    payload.memory_warning = true;
+    payload.computed_memory_mb = resourceProfile.memoryMb;
+  }
+
+  return payload;
 }
 
 function resolveShardCount_() {
@@ -639,16 +825,35 @@ function processTargeting(targetingId, options) {
       resolvedOptions.workflowTrigger = 'automated';
     }
 
-    var globalServerlessEnabled = shouldUseServerlessFormSender_();
-    var targetingServerlessEnabled = isTargetingServerlessEnabled_(targetingConfig);
+    var executionPriority = resolveExecutionModePriority_();
+    var targetingModes = resolveTargetingExecutionMode_(targetingConfig);
+    var selectedMode = 'github';
+    for (var i = 0; i < executionPriority.length; i++) {
+      var modeCandidate = executionPriority[i];
+      if (modeCandidate === 'batch' && targetingModes.batchEnabled) {
+        selectedMode = 'batch';
+        break;
+      }
+      if (modeCandidate === 'serverless' && targetingModes.serverlessEnabled) {
+        selectedMode = 'serverless';
+        break;
+      }
+      if (modeCandidate === 'github') {
+        selectedMode = 'github';
+        break;
+      }
+    }
 
-    if (globalServerlessEnabled && targetingServerlessEnabled) {
-      console.log('条件チェック完了。Cloud Tasks 経由で Cloud Run Job を起動します');
+    if (selectedMode === 'batch') {
+      console.log('条件チェック完了。Cloud Tasks 経由で Cloud Batch ジョブを起動します');
+      resolvedOptions.executionMode = 'batch';
       return triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, resolvedOptions);
     }
 
-    if (globalServerlessEnabled && !targetingServerlessEnabled) {
-      console.log('serverless flag is enabled globally but targeting is not opted in. falling back to GitHub Actions dispatch.');
+    if (selectedMode === 'serverless') {
+      console.log('条件チェック完了。Cloud Tasks 経由で Cloud Run Job を起動します');
+      resolvedOptions.executionMode = 'serverless';
+      return triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, resolvedOptions);
     }
 
     console.log('条件チェック完了。GitHub Actions 連続処理ワークフローを開始します');
@@ -1405,6 +1610,8 @@ function triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, opti
     var signedUrl = storage.generateSignedUrl(uploadInfo.bucket, uploadInfo.objectName, 54000);
 
     var jobExecutionId = Utilities.getUuid();
+    var executionMode = (options && options.executionMode) || 'cloud_run';
+    var dispatcherMode = executionMode === 'batch' ? 'batch' : 'cloud_run';
     var payload = {
       execution_id: jobExecutionId,
       targeting_id: targetingId,
@@ -1438,8 +1645,15 @@ function triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, opti
       metadata: {
         triggered_at_jst: Utilities.formatDate(new Date(), 'Asia/Tokyo', "yyyy-MM-dd'T'HH:mm:ssXXX"),
         gas_trigger: options && options.triggerName ? String(options.triggerName) : 'startFormSenderFromTrigger'
-      }
+      },
+      mode: dispatcherMode
     };
+
+    if (dispatcherMode === 'batch') {
+      var batchPayload = buildBatchPayload_(targetingConfig, workers, payload.execution.parallelism);
+      payload.batch = batchPayload;
+      payload.execution.parallelism = Math.min(payload.execution.parallelism, batchPayload.max_parallelism);
+    }
 
     var result = dispatcher.enqueue(payload);
     return {
@@ -1695,20 +1909,22 @@ function stopAllRunningFormSenderTasksServerless_() {
     const results = [];
 
     for (const execution of executions) {
+      var executionMode = execution.execution_mode || (execution.metadata && execution.metadata.execution_mode) || 'cloud_run';
       var cancelResult = null;
       try {
         cancelResult = CloudRunDispatcherClient.cancelExecution(execution.execution_id);
         successCount++;
-        console.log(`Cloud Run execution 停止成功: execution_id=${execution.execution_id}`);
+        console.log(`Cloud dispatcher execution 停止成功: execution_id=${execution.execution_id}, mode=${executionMode}`);
       } catch (err) {
         failureCount++;
         cancelResult = { success: false, error: String(err) };
-        console.error(`Cloud Run execution 停止失敗: execution_id=${execution.execution_id}, エラー=${err}`);
+        console.error(`Cloud dispatcher execution 停止失敗: execution_id=${execution.execution_id}, mode=${executionMode}, エラー=${err}`);
       }
       results.push({
         execution_id: execution.execution_id,
         targeting_id: execution.targeting_id,
         status: execution.status,
+        execution_mode: executionMode,
         cancel_result: cancelResult
       });
       Utilities.sleep(200);
@@ -1829,20 +2045,22 @@ function stopSpecificFormSenderTaskServerless_(targetingId) {
     const results = [];
 
     for (const execution of executions) {
+      var executionMode = execution.execution_mode || (execution.metadata && execution.metadata.execution_mode) || 'cloud_run';
       var cancelResult = null;
       try {
         cancelResult = CloudRunDispatcherClient.cancelExecution(execution.execution_id);
         successCount++;
-        console.log(`Cloud Run execution 停止成功: execution_id=${execution.execution_id}`);
+        console.log(`Cloud dispatcher execution 停止成功: execution_id=${execution.execution_id}, mode=${executionMode}`);
       } catch (err) {
         failureCount++;
         cancelResult = { success: false, error: String(err) };
-        console.error(`Cloud Run execution 停止失敗: execution_id=${execution.execution_id}, エラー=${err}`);
+        console.error(`Cloud dispatcher execution 停止失敗: execution_id=${execution.execution_id}, mode=${executionMode}, エラー=${err}`);
       }
 
       results.push({
         execution_id: execution.execution_id,
         status: execution.status,
+        execution_mode: executionMode,
         cancel_result: cancelResult
       });
 

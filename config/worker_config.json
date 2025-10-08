@@ -20,8 +20,8 @@
     "max_pending_tasks": 90,
     "task_timeout": 300,
     "result_collection_timeout": 30,
-    "_comment_memory": "Form-Sender: 3GB/ワーカー - Playwright重DOM操作 + Bot保護回避処理 + フォーム送信 + 長時間セッション維持",
-    "memory_per_worker_mb": 3072,
+    "_comment_memory": "Form-Sender: 2GB/ワーカー - Playwright DOM 操作 + Bot 保護回避処理 + フォーム送信",
+    "memory_per_worker_mb": 2048,
     "db_batch_writing": {
       "batch_size": 100,
       "buffer_timeout_seconds": 120,

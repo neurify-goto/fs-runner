@@ -18,6 +18,10 @@ def test_runtime_environment_priority(monkeypatch):
     monkeypatch.setenv("GITHUB_ACTIONS", "false")
     assert env.get_runtime_environment() == "cloud_run"
 
+    env.reset_cache()
+    monkeypatch.setenv("FORM_SENDER_ENV", "gcp_batch")
+    assert env.get_runtime_environment() == "gcp_batch"
+
 
 def test_should_sanitize_logs_prefers_explicit_flag(monkeypatch):
     env.reset_cache()
@@ -35,6 +39,11 @@ def test_should_sanitize_logs_prefers_explicit_flag(monkeypatch):
     monkeypatch.setenv("FORM_SENDER_LOG_SANITIZE", "yes")
     assert env.should_sanitize_logs() is True
 
+    env.reset_cache()
+    monkeypatch.delenv("FORM_SENDER_LOG_SANITIZE", raising=False)
+    monkeypatch.setenv("FORM_SENDER_ENV", "gcp_batch")
+    assert env.should_sanitize_logs() is True
+
 
 def test_is_ci_environment(monkeypatch):
     env.reset_cache()
@@ -49,4 +58,8 @@ def test_is_ci_environment(monkeypatch):
     env.reset_cache()
     monkeypatch.setenv("FORM_SENDER_ENV", "cloud_run")
     monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    assert env.is_ci_environment() is True
+
+    env.reset_cache()
+    monkeypatch.setenv("FORM_SENDER_ENV", "gcp_batch")
     assert env.is_ci_environment() is True

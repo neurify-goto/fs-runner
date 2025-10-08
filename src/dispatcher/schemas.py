@@ -3,7 +3,7 @@ from __future__ import annotations
 from base64 import b64encode
 from datetime import datetime, timezone
 import re
-from typing import Optional
+from typing import Optional, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, HttpUrl, root_validator, validator
@@ -40,6 +40,24 @@ class Metadata(BaseModel):
     gas_trigger: Optional[str] = None
 
 
+class BatchOptions(BaseModel):
+    enabled: bool = Field(default=False)
+    max_parallelism: Optional[int] = Field(default=None, ge=1)
+    prefer_spot: bool = Field(default=True)
+    allow_on_demand_fallback: bool = Field(default=True)
+    machine_type: Optional[str] = None
+    signed_url_ttl_hours: Optional[int] = Field(default=None, ge=1, le=168)
+    signed_url_refresh_threshold_seconds: Optional[int] = Field(default=None, ge=60)
+    vcpu_per_worker: Optional[int] = Field(default=None, ge=1)
+    memory_per_worker_mb: Optional[int] = Field(default=None, ge=1024)
+
+
+class SignedUrlRefreshRequest(BaseModel):
+    client_config_object: str
+    execution_id: Optional[str] = None
+    signed_url_ttl_hours: Optional[int] = Field(default=None, ge=1, le=168)
+
+
 class FormSenderTask(BaseModel):
     execution_id: Optional[str] = Field(default=None)
     targeting_id: int
@@ -52,6 +70,8 @@ class FormSenderTask(BaseModel):
     workflow_trigger: str = Field(default="automated")
     metadata: Metadata = Field(default_factory=Metadata)
     cpu_class: Optional[str] = Field(default=None)
+    mode: Literal["cloud_run", "batch"] = Field(default="cloud_run")
+    batch: Optional[BatchOptions] = Field(default=None)
 
     @validator("client_config_object")
     def validate_gcs_uri(cls, value: str) -> str:  # type: ignore[override]
@@ -93,6 +113,21 @@ class FormSenderTask(BaseModel):
             raise ValueError("cpu_class must be 'standard' or 'low'")
         return normalized
 
+    @root_validator
+    def normalize_batch_mode(cls, values):  # type: ignore[override]
+        batch = values.get("batch")
+        mode = values.get("mode") or "cloud_run"
+        if batch is None:
+            if mode not in {"cloud_run", "batch"}:
+                values["mode"] = "cloud_run"
+            return values
+
+        if batch.enabled or mode == "batch":
+            values["mode"] = "batch"
+        else:
+            values["mode"] = "cloud_run"
+        return values
+
     def job_execution_meta(self) -> str:
         import json
 
@@ -114,3 +149,14 @@ class FormSenderTask(BaseModel):
         bucket = parsed.netloc
         blob_name = parsed.path.lstrip("/")
         return bucket, blob_name
+
+    def batch_enabled(self) -> bool:
+        return self.mode == "batch"
+
+    def effective_parallelism(self) -> int:
+        base_parallelism = self.execution.parallelism
+        if not self.batch_enabled():
+            return base_parallelism
+        if self.batch and self.batch.max_parallelism:
+            return max(1, min(base_parallelism, self.batch.max_parallelism))
+        return base_parallelism

@@ -1,0 +1,87 @@
+name: Deploy Cloud Batch Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply Terraform changes"
+        default: "false"
+        required: false
+  push:
+    branches:
+      - main
+    paths:
+      - "infrastructure/gcp/batch/**"
+      - "Dockerfile"
+      - "src/**"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: asia-northeast1
+  ARTIFACT_REPO: form-sender-runner
+  TERRAFORM_WORKDIR: infrastructure/gcp/batch
+  IMAGE_NAME: asia-northeast1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/form-sender-runner/playwright
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_TERRAFORM_SERVICE_ACCOUNT }}
+
+      - name: Configure Docker authentication
+        run: |
+          gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+
+      - name: Build runner container image
+        run: |
+          docker build -t ${IMAGE_NAME}:$GITHUB_SHA .
+
+      - name: Push runner container image
+        run: |
+          docker push ${IMAGE_NAME}:$GITHUB_SHA
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.7.5
+
+      - name: Terraform Init
+        working-directory: ${{ env.TERRAFORM_WORKDIR }}
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TERRAFORM_WORKDIR }}
+        run: |
+          terraform plan \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="gcs_bucket=${PROJECT_ID}-form-sender-client-config" \
+            -var="artifact_repo=${ARTIFACT_REPO}"
+
+      - name: Terraform Apply
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.apply == 'true'
+        working-directory: ${{ env.TERRAFORM_WORKDIR }}
+        run: |
+          terraform apply -auto-approve \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="gcs_bucket=${PROJECT_ID}-form-sender-client-config" \
+            -var="artifact_repo=${ARTIFACT_REPO}"
+
+      - name: Publish summary
+        run: |
+          echo "## Cloud Batch Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: ${IMAGE_NAME}:$GITHUB_SHA" >> $GITHUB_STEP_SUMMARY
+          echo "- Terraform apply: ${{ github.event.inputs.apply || 'false' }}" >> $GITHUB_STEP_SUMMARY

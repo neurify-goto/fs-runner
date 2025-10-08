@@ -18,6 +18,35 @@ class DispatcherSettings:
     client_config_bucket: Optional[str] = None
     git_token_secret: Optional[str] = None
     default_cpu_class: str = "standard"
+    dispatcher_base_url: str = ""
+    dispatcher_audience: str = ""
+    signed_url_ttl_hours_batch: int = 48
+    signed_url_refresh_threshold_seconds_batch: int = 21600
+    batch_project_id: Optional[str] = None
+    batch_location: Optional[str] = None
+    batch_job_template: Optional[str] = None
+    batch_task_group: Optional[str] = None
+    batch_service_account_email: Optional[str] = None
+    batch_container_image: Optional[str] = None
+    batch_container_entrypoint: Optional[str] = None
+    batch_machine_type_default: Optional[str] = None
+    batch_vcpu_per_worker_default: int = 1
+    batch_memory_per_worker_mb_default: int = 2048
+
+    def require_batch_configuration(self) -> None:
+        required_fields = {
+            "batch_project_id": "FORM_SENDER_BATCH_PROJECT_ID",
+            "batch_location": "FORM_SENDER_BATCH_LOCATION",
+            "batch_job_template": "FORM_SENDER_BATCH_JOB_TEMPLATE",
+            "batch_task_group": "FORM_SENDER_BATCH_TASK_GROUP",
+            "batch_service_account_email": "FORM_SENDER_BATCH_SERVICE_ACCOUNT",
+            "batch_container_image": "FORM_SENDER_BATCH_CONTAINER_IMAGE",
+        }
+        missing = [env for attr, env in required_fields.items() if not getattr(self, attr)]
+        if missing:
+            raise RuntimeError(
+                "Batch execution requires the following environment variables: " + ", ".join(missing)
+            )
 
     @classmethod
     def from_env(cls) -> "DispatcherSettings":
@@ -39,6 +68,20 @@ class DispatcherSettings:
             client_config_bucket=os.getenv("FORM_SENDER_CLIENT_CONFIG_BUCKET"),
             git_token_secret=os.getenv("FORM_SENDER_GIT_TOKEN_SECRET"),
             default_cpu_class=os.getenv("FORM_SENDER_CPU_CLASS_DEFAULT", "standard"),
+            dispatcher_base_url=require("FORM_SENDER_DISPATCHER_BASE_URL"),
+            dispatcher_audience=require("FORM_SENDER_DISPATCHER_AUDIENCE"),
+            signed_url_ttl_hours_batch=int(os.getenv("FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH", "48")),
+            signed_url_refresh_threshold_seconds_batch=int(os.getenv("FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH", "21600")),
+            batch_project_id=os.getenv("FORM_SENDER_BATCH_PROJECT_ID") or os.getenv("DISPATCHER_PROJECT_ID"),
+            batch_location=os.getenv("FORM_SENDER_BATCH_LOCATION") or os.getenv("DISPATCHER_LOCATION"),
+            batch_job_template=os.getenv("FORM_SENDER_BATCH_JOB_TEMPLATE"),
+            batch_task_group=os.getenv("FORM_SENDER_BATCH_TASK_GROUP"),
+            batch_service_account_email=os.getenv("FORM_SENDER_BATCH_SERVICE_ACCOUNT"),
+            batch_container_image=os.getenv("FORM_SENDER_BATCH_CONTAINER_IMAGE"),
+            batch_container_entrypoint=os.getenv("FORM_SENDER_BATCH_ENTRYPOINT"),
+            batch_machine_type_default=os.getenv("FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT"),
+            batch_vcpu_per_worker_default=int(os.getenv("FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT", "1")),
+            batch_memory_per_worker_mb_default=int(os.getenv("FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT", "2048")),
         )
 
 

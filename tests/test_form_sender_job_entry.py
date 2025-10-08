@@ -1,6 +1,9 @@
 import importlib
+import json
+import os
 import sys
 from pathlib import Path
+import base64
 
 import pytest
 
@@ -222,3 +225,42 @@ def test_prepare_workspace_detaches_commit(monkeypatch, tmp_path):
 
     assert calls[1][0] == ("git", "fetch", "--depth=1", "origin", commit)
     assert calls[2][0] == ("git", "checkout", "--force", "--detach", commit)
+
+
+def test_main_preserves_cloud_run_env(monkeypatch, tmp_path):
+    meta = {
+        "run_index_base": 0,
+        "shards": 8,
+        "workers_per_workflow": 4,
+        "test_mode": False,
+    }
+    encoded_meta = base64.b64encode(json.dumps(meta).encode("utf-8")).decode("utf-8")
+
+    env = {
+        "FORM_SENDER_ENV": "cloud_run",
+        "FORM_SENDER_CLIENT_CONFIG_URL": "https://example.invalid/config.json",
+        "FORM_SENDER_CLIENT_CONFIG_OBJECT": "gs://bucket/config.json",
+        "FORM_SENDER_CLIENT_CONFIG_PATH": str(tmp_path / "client.json"),
+        "FORM_SENDER_TARGETING_ID": "42",
+        "FORM_SENDER_TOTAL_SHARDS": "8",
+        "FORM_SENDER_MAX_WORKERS": "4",
+        "JOB_EXECUTION_META": encoded_meta,
+        "JOB_EXECUTION_ID": "exec-321",
+        "CLOUD_RUN_TASK_INDEX": "1",
+    }
+
+    module = _reload_module(monkeypatch, env)
+
+    monkeypatch.setattr(module, "fetch_client_config", lambda url: {"client": {}, "targeting": {"concurrent_workflow": 1}})
+    monkeypatch.setattr(module, "transform_client_config", lambda config: config)
+    monkeypatch.setattr(module, "atomic_write_json", lambda path, data: None)
+    monkeypatch.setattr(module, "_refresh_client_config_url_if_needed", lambda url, obj: url)
+    monkeypatch.setattr(module, "prepare_workspace", lambda git_ref, git_token: tmp_path)
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "delete_client_config_object", lambda uri: None)
+    monkeypatch.setattr(module, "cleanup_workspace", lambda workspace: None)
+    monkeypatch.setattr(module, "_update_job_execution_status", lambda status: None)
+
+    module.main()
+
+    assert os.environ.get("FORM_SENDER_ENV") == "cloud_run"

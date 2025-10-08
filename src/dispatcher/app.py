@@ -8,7 +8,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from form_sender.config_validation import ClientConfigValidationError, transform_client_config
 
-from .schemas import FormSenderTask
+from .schemas import FormSenderTask, SignedUrlRefreshRequest
 from .service import DispatcherService
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,17 @@ async def enqueue_form_sender(task: FormSenderTask) -> Dict[str, Any]:
         raise
     except Exception as exc:  # pylint: disable=broad-except
         logger.exception("Dispatcher failed to enqueue task")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/form-sender/signed-url/refresh")
+async def refresh_signed_url(payload: SignedUrlRefreshRequest) -> Dict[str, Any]:
+    try:
+        return await run_in_threadpool(service.refresh_signed_url, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("Dispatcher failed to refresh signed URL")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

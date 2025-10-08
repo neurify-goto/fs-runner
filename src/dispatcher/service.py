@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 
 from .config import DispatcherSettings, get_settings
-from .gcp import CloudRunJobRunner, SecretManager, SignedUrlManager
-from .schemas import FormSenderTask
+from .gcp import CloudBatchJobRunner, CloudRunJobRunner, SecretManager, SignedUrlManager
+from .schemas import FormSenderTask, SignedUrlRefreshRequest
 from .supabase_client import JobExecutionRepository
 
 
@@ -21,6 +21,7 @@ class DispatcherService:
         )
         self._signed_url_manager = SignedUrlManager(storage_client=self._build_storage_client(), settings=self._settings)
         self._job_runner = CloudRunJobRunner(settings=self._settings)
+        self._batch_runner: Optional[CloudBatchJobRunner] = None
         self._secret_manager = SecretManager() if self._settings.git_token_secret else None
 
     @staticmethod
@@ -47,14 +48,48 @@ class DispatcherService:
         task_data["execution_id"] = job_execution_id
         env_vars = self._build_env(task, job_execution_id, signed_url)
 
+        execution_mode = "batch" if task.batch_enabled() else "cloud_run"
+
         record = self._supabase.insert_execution(
             job_execution_id=job_execution_id,
             payload=task_data,
             cloud_run_operation=None,
             cloud_run_execution=None,
+            execution_mode=execution_mode,
         )
 
         try:
+            if execution_mode == "batch":
+                batch_runner = self._ensure_batch_runner()
+                job, batch_meta = batch_runner.run_job(
+                    task=task,
+                    env_vars=env_vars,
+                    task_count=task.execution.run_total,
+                    parallelism=task.effective_parallelism(),
+                )
+                metadata = dict(record.get("metadata") or {})
+                metadata.update(
+                    {
+                        "execution_mode": "batch",
+                        "batch_job_name": job.name,
+                        "batch_array_size": task.execution.run_total,
+                        "batch_parallelism": batch_meta.get("parallelism"),
+                        "batch_machine_type": batch_meta.get("machine_type"),
+                        "batch_cpu_milli": batch_meta.get("cpu_milli"),
+                        "batch_memory_mb": batch_meta.get("memory_mb"),
+                        "batch_prefer_spot": batch_meta.get("prefer_spot"),
+                        "batch_allow_on_demand": batch_meta.get("allow_on_demand"),
+                    }
+                )
+                if job.task_groups:
+                    metadata["batch_task_group"] = job.task_groups[0].name
+                record = self._supabase.update_metadata(job_execution_id, metadata)
+                return {
+                    "status": "queued",
+                    "job_execution_id": record["execution_id"],
+                    "batch_job_name": job.name,
+                }
+
             operation = self._job_runner.run_job(
                 task=task,
                 env_vars=env_vars,
@@ -70,6 +105,7 @@ class DispatcherService:
         metadata = dict(record.get("metadata") or {})
         metadata.update(
             {
+                "execution_mode": "cloud_run",
                 "cloud_run_operation": getattr(operation, "name", None),
                 "cloud_run_execution": execution_name,
             }
@@ -87,7 +123,7 @@ class DispatcherService:
             "FORM_SENDER_CLIENT_CONFIG_URL": signed_url,
             "FORM_SENDER_CLIENT_CONFIG_OBJECT": task.client_config_object,
             "FORM_SENDER_CLIENT_CONFIG_PATH": self._settings.default_client_config_path,
-            "FORM_SENDER_ENV": "cloud_run",
+            "FORM_SENDER_ENV": "gcp_batch" if task.batch_enabled() else "cloud_run",
             "FORM_SENDER_LOG_SANITIZE": "1",
             "FORM_SENDER_WORKFLOW_TRIGGER": task.workflow_trigger,
             "FORM_SENDER_TOTAL_SHARDS": str(task.execution.shards),
@@ -100,6 +136,8 @@ class DispatcherService:
             "JOB_EXECUTION_ID": job_execution_id,
             "JOB_EXECUTION_META": task.job_execution_meta(),
             "FORM_SENDER_CPU_CLASS": cpu_class,
+            "FORM_SENDER_DISPATCHER_BASE_URL": self._settings.dispatcher_base_url,
+            "FORM_SENDER_DISPATCHER_AUDIENCE": self._settings.dispatcher_audience,
         }
 
         if task.tables.submissions_table:
@@ -132,19 +170,31 @@ class DispatcherService:
             }
 
         metadata = record.get("metadata") or {}
+        execution_mode = metadata.get("execution_mode", "cloud_run")
         execution_name = metadata.get("cloud_run_execution")
         operation_name = metadata.get("cloud_run_operation")
+        batch_job_name = metadata.get("batch_job_name")
 
-        if not execution_name and not operation_name:
-            raise HTTPException(status_code=400, detail="execution missing Cloud Run identifiers")
-
-        try:
-            self._job_runner.cancel_execution(
-                execution_name=execution_name,
-                operation_name=operation_name,
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            raise HTTPException(status_code=502, detail=f"Failed to cancel execution: {exc}") from exc
+        if execution_mode == "batch":
+            if not batch_job_name:
+                raise HTTPException(status_code=400, detail="execution missing Batch identifiers")
+            try:
+                batch_runner = self._ensure_batch_runner()
+                batch_runner.delete_job(batch_job_name)
+            except HTTPException:
+                raise
+            except Exception as exc:  # pylint: disable=broad-except
+                raise HTTPException(status_code=502, detail=f"Failed to cancel batch job: {exc}") from exc
+        else:
+            if not execution_name and not operation_name:
+                raise HTTPException(status_code=400, detail="execution missing Cloud Run identifiers")
+            try:
+                self._job_runner.cancel_execution(
+                    execution_name=execution_name,
+                    operation_name=operation_name,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                raise HTTPException(status_code=502, detail=f"Failed to cancel execution: {exc}") from exc
 
         ended_at = datetime.now(timezone.utc).isoformat()
         self._supabase.update_status(execution_id, "cancelled", ended_at=ended_at)
@@ -154,6 +204,34 @@ class DispatcherService:
             "status": "cancelled",
             "execution": self._public_execution(record),
         }
+
+    def refresh_signed_url(self, request: SignedUrlRefreshRequest) -> Dict[str, str]:
+        try:
+            signed_url = self._signed_url_manager.refresh_for_object(
+                request.client_config_object,
+                ttl_hours=request.signed_url_ttl_hours,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        if request.execution_id:
+            metadata_patch = {
+                "batch": {
+                    "latest_signed_url": signed_url,
+                    "signed_url_refreshed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            }
+            self._supabase.update_metadata(request.execution_id, metadata_patch)
+
+        return {"status": "ok", "signed_url": signed_url}
+
+    def _ensure_batch_runner(self) -> CloudBatchJobRunner:
+        if self._batch_runner is None:
+            try:
+                self._batch_runner = CloudBatchJobRunner(settings=self._settings)
+            except RuntimeError as exc:  # pragma: no cover - configuration error
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return self._batch_runner
 
     @staticmethod
     def _public_execution(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -170,4 +248,5 @@ class DispatcherService:
             "shards": record.get("shards"),
             "workers_per_workflow": record.get("workers_per_workflow"),
             "metadata": metadata,
+            "execution_mode": metadata.get("execution_mode", "cloud_run"),
         }

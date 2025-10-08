@@ -81,7 +81,7 @@ class ValidationConfigManager:
         fs_env = env_config.get("FORM_SENDER_ENV", {})
         return {
             'required': fs_env.get('required', False),
-            'allowed_values': fs_env.get('allowed_values', ['cloud_run', 'github_actions', 'local']),
+            'allowed_values': fs_env.get('allowed_values', ['cloud_run', 'github_actions', 'gcp_batch', 'local']),
             'error_msg': fs_env.get('error_msg', 'FORM_SENDER_ENV must be a supported value'),
         }
 

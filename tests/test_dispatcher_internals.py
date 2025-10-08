@@ -1,6 +1,6 @@
 import base64
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Dict, Any
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -9,7 +9,7 @@ pytest.importorskip("fastapi")
 from fastapi import HTTPException
 
 from dispatcher.config import DispatcherSettings
-from dispatcher.schemas import ExecutionConfig, FormSenderTask, Metadata, TableConfig
+from dispatcher.schemas import ExecutionConfig, FormSenderTask, Metadata, SignedUrlRefreshRequest, TableConfig
 from dispatcher.service import DispatcherService
 from dispatcher.gcp import CloudRunJobRunner, SignedUrlManager
 
@@ -456,16 +456,17 @@ def test_handle_form_sender_task_preserves_execution_id(monkeypatch):
 
     inserted_records: list[dict] = []
 
-    def _insert_execution(job_execution_id, payload, cloud_run_operation, cloud_run_execution=None):
+    def _insert_execution(job_execution_id, payload, cloud_run_operation, cloud_run_execution=None, execution_mode="cloud_run"):
         inserted_records.append(
             {
                 "job_execution_id": job_execution_id,
                 "payload": payload,
                 "cloud_run_operation": cloud_run_operation,
                 "cloud_run_execution": cloud_run_execution,
+                "execution_mode": execution_mode,
             }
         )
-        return {"execution_id": job_execution_id, "metadata": {}}
+        return {"execution_id": job_execution_id, "metadata": {"execution_mode": execution_mode}}
 
     service = object.__new__(DispatcherService)
     service._settings = settings
@@ -498,6 +499,7 @@ def test_handle_form_sender_task_preserves_execution_id(monkeypatch):
     assert inserted_records
     assert inserted_records[0]["job_execution_id"] == provided_execution_id
     assert inserted_records[0]["payload"]["execution_id"] == provided_execution_id
+    assert inserted_records[0]["execution_mode"] == "cloud_run"
     assert captured_env["JOB_EXECUTION_ID"] == provided_execution_id
 
 
@@ -515,13 +517,17 @@ def test_dispatcher_list_executions_returns_public_fields():
             "parallelism": 2,
             "shards": 8,
             "workers_per_workflow": 4,
-            "metadata": {"cloud_run_execution": "projects/demo/locations/asia-northeast1/jobs/form-sender-runner/executions/foo"},
+            "metadata": {
+                "cloud_run_execution": "projects/demo/locations/asia-northeast1/jobs/form-sender-runner/executions/foo",
+                "execution_mode": "cloud_run",
+            },
         }
     ]
     service._supabase = SimpleNamespace(list_executions=lambda status, targeting_id: executions)
     result = service.list_executions()
     assert result["executions"][0]["execution_id"] == "exec-1"
     assert result["executions"][0]["metadata"]["cloud_run_execution"].endswith("/executions/foo")
+    assert result["executions"][0]["execution_mode"] == "cloud_run"
 
 
 def test_dispatcher_cancel_execution_success(monkeypatch):
@@ -531,7 +537,10 @@ def test_dispatcher_cancel_execution_success(monkeypatch):
         get_execution=lambda exec_id: {
             "execution_id": exec_id,
             "status": "running",
-            "metadata": {"cloud_run_execution": "projects/demo/locations/asia/jobs/form-sender-runner/executions/foo"},
+            "metadata": {
+                "cloud_run_execution": "projects/demo/locations/asia/jobs/form-sender-runner/executions/foo",
+                "execution_mode": "cloud_run",
+            },
         },
         update_status=lambda exec_id, status, ended_at=None: updates.append((exec_id, status, ended_at)),
         list_executions=lambda status, targeting_id: [],
@@ -559,6 +568,41 @@ def test_dispatcher_cancel_execution_requires_identifier():
     assert exc.value.status_code == 400
 
 
+def test_dispatcher_cancel_execution_batch_missing_identifier():
+    service = object.__new__(DispatcherService)
+    service._supabase = SimpleNamespace(
+        get_execution=lambda exec_id: {"execution_id": exec_id, "status": "running", "metadata": {"execution_mode": "batch"}},
+        list_executions=lambda status, targeting_id: [],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        service.cancel_execution("exec-batch-missing")
+    assert exc.value.status_code == 400
+
+
+def test_dispatcher_cancel_execution_batch_success():
+    deleted: list[str] = []
+    service = object.__new__(DispatcherService)
+    service._supabase = SimpleNamespace(
+        get_execution=lambda exec_id: {
+            "execution_id": exec_id,
+            "status": "running",
+            "metadata": {"execution_mode": "batch", "batch_job_name": "projects/demo/locations/asia/jobs/form"},
+        },
+        update_status=lambda *args, **kwargs: None,
+        list_executions=lambda status, targeting_id: [],
+    )
+
+    def _ensure_runner(self):
+        return SimpleNamespace(delete_job=lambda name: deleted.append(name))
+
+    service._ensure_batch_runner = MethodType(_ensure_runner, service)
+
+    response = service.cancel_execution("exec-batch")
+    assert response["status"] == "cancelled"
+    assert deleted == ["projects/demo/locations/asia/jobs/form"]
+
+
 def test_dispatcher_cancel_execution_noop_for_non_running():
     service = object.__new__(DispatcherService)
     service._job_runner = SimpleNamespace(cancel_execution=lambda **kwargs: None)
@@ -569,3 +613,95 @@ def test_dispatcher_cancel_execution_noop_for_non_running():
 
     response = service.cancel_execution("exec-2")
     assert response["status"] == "noop"
+
+
+def test_refresh_signed_url_updates_metadata():
+    service = object.__new__(DispatcherService)
+    refreshed_urls: list[tuple[str, Dict[str, Any]]] = []
+    service._signed_url_manager = SimpleNamespace(
+        refresh_for_object=lambda uri, ttl_hours=None: "https://example.com/new-url"
+    )
+    service._supabase = SimpleNamespace(
+        update_metadata=lambda execution_id, metadata: refreshed_urls.append((execution_id, metadata))
+    )
+
+    request = SignedUrlRefreshRequest(
+        client_config_object="gs://bucket/config.json",
+        execution_id="exec-123",
+        signed_url_ttl_hours=72,
+    )
+
+    result = service.refresh_signed_url(request)
+
+    assert result["signed_url"] == "https://example.com/new-url"
+    assert refreshed_urls[0][0] == "exec-123"
+    assert refreshed_urls[0][1]["batch"]["latest_signed_url"] == "https://example.com/new-url"
+
+
+def test_handle_form_sender_task_batch(monkeypatch):
+    issue_time = datetime.now(timezone.utc)
+    payload = _task_payload_dict(issue_time)
+    payload["mode"] = "batch"
+    payload["batch"] = {
+        "enabled": True,
+        "max_parallelism": 2,
+        "prefer_spot": True,
+        "allow_on_demand_fallback": False,
+        "machine_type": "n2d-custom-4-10240",
+    }
+    task = FormSenderTask.parse_obj(payload)
+
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender-runner",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="form-sender",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+    )
+
+    inserted: list[str] = []
+
+    def _insert(job_execution_id, payload, cloud_run_operation, cloud_run_execution=None, execution_mode="cloud_run"):
+        inserted.append(execution_mode)
+        return {"execution_id": job_execution_id, "metadata": {"execution_mode": execution_mode}}
+
+    service = object.__new__(DispatcherService)
+    service._settings = settings
+    service._supabase = SimpleNamespace(
+        find_active_execution=lambda targeting_id, run_index_base: None,
+        insert_execution=_insert,
+        update_status=lambda *args, **kwargs: None,
+        update_metadata=lambda execution_id, metadata: {"execution_id": execution_id, "metadata": metadata},
+    )
+    service._signed_url_manager = SimpleNamespace(ensure_fresh=lambda task: "https://example.com/config.json")
+
+    def _ensure_runner(self):
+        job = SimpleNamespace(name="projects/proj/locations/asia-northeast1/jobs/form-sender/jobs/job123", task_groups=[SimpleNamespace(name="group0")])
+        meta = {
+            "machine_type": "n2d-custom-4-10240",
+            "cpu_milli": 4000,
+            "memory_mb": 10240,
+            "prefer_spot": True,
+            "allow_on_demand": False,
+            "parallelism": 2,
+        }
+        return SimpleNamespace(run_job=lambda **kwargs: (job, meta))
+
+    service._ensure_batch_runner = MethodType(_ensure_runner, service)
+    service._job_runner = None
+    service._secret_manager = None
+    service._build_env = MethodType(lambda self, task_obj, job_execution_id, signed_url: {"JOB_EXECUTION_ID": job_execution_id}, service)
+
+    response = service.handle_form_sender_task(task)
+
+    assert response["status"] == "queued"
+    assert "batch_job_name" in response
+    assert inserted == ["batch"]

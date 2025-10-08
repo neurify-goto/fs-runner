@@ -1,0 +1,16 @@
+{
+  "env_aliases": {
+    "task_index": ["BATCH_TASK_INDEX", "CLOUD_RUN_TASK_INDEX"],
+    "attempt": ["BATCH_TASK_ATTEMPT", "CLOUD_RUN_TASK_ATTEMPT"],
+    "array_size": ["BATCH_TASK_COUNT", "CLOUD_RUN_TASK_COUNT"],
+    "machine_type": ["BATCH_MACHINE_TYPE_OVERRIDE"],
+    "signed_url_ttl_hours": ["FORM_SENDER_SIGNED_URL_TTL_HOURS"]
+  },
+  "preemption": {
+    "endpoint": "http://metadata.google.internal/computeMetadata/v1/instance/preempted",
+    "header_name": "Metadata-Flavor",
+    "header_value": "Google",
+    "initial_backoff_seconds": 1,
+    "max_backoff_seconds": 30
+  }
+}

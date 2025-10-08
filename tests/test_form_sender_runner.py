@@ -62,6 +62,11 @@ def _reset_globals(monkeypatch):
     original_job_execution_id = runner.JOB_EXECUTION_ID
     original_failure_flag = runner._failure_recorded
     original_cpu_class = os.environ.get("FORM_SENDER_CPU_CLASS")
+    original_batch_meta = runner._CURRENT_BATCH_META
+    original_run_index = runner._CURRENT_RUN_INDEX
+    original_batch_attempt = runner._CURRENT_BATCH_ATTEMPT
+    original_preemption_stop = runner._PREEMPTION_STOP
+    original_preemption_thread = runner._PREEMPTION_THREAD
     runner._get_cpu_profile_settings.cache_clear()
     try:
         yield
@@ -69,6 +74,11 @@ def _reset_globals(monkeypatch):
         runner.JOB_EXECUTION_ID = original_job_execution_id
         runner._failure_recorded = original_failure_flag
         runner._get_cpu_profile_settings.cache_clear()
+        runner._CURRENT_BATCH_META = original_batch_meta
+        runner._CURRENT_RUN_INDEX = original_run_index
+        runner._CURRENT_BATCH_ATTEMPT = original_batch_attempt
+        runner._PREEMPTION_STOP = original_preemption_stop
+        runner._PREEMPTION_THREAD = original_preemption_thread
         if original_cpu_class is None:
             os.environ.pop("FORM_SENDER_CPU_CLASS", None)
         else:

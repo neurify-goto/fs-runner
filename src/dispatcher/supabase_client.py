@@ -6,6 +6,16 @@ from typing import Any, Dict, List, Optional
 from supabase import Client, create_client
 
 
+def _merge_metadata(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (patch or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_metadata(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 class JobExecutionRepository:
     def __init__(self, url: str, key: str) -> None:
         self._client: Client = create_client(url, key)
@@ -30,6 +40,7 @@ class JobExecutionRepository:
         payload: Dict[str, Any],
         cloud_run_operation: Optional[str],
         cloud_run_execution: Optional[str] = None,
+        execution_mode: str = "cloud_run",
     ) -> Dict[str, Any]:
         record = {
             "execution_id": job_execution_id,
@@ -42,22 +53,41 @@ class JobExecutionRepository:
             "workers_per_workflow": payload["execution"]["workers_per_workflow"],
             "status": "running",
             "started_at": datetime.now(timezone.utc).isoformat(),
+            "execution_mode": execution_mode,
             "metadata": {
                 "workflow_trigger": payload.get("workflow_trigger"),
                 "branch": payload.get("branch"),
                 "cloud_run_operation": cloud_run_operation,
                 "cloud_run_execution": cloud_run_execution,
                 "test_mode": payload.get("test_mode", False),
+                "execution_mode": execution_mode,
             },
         }
         response = self._client.table("job_executions").insert(record).execute()
         return response.data[0]
 
     def update_metadata(self, job_execution_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        current = self.get_execution(job_execution_id)
+        existing_meta: Dict[str, Any] = {}
+        execution_mode: Optional[str] = None
+        if current:
+            existing_meta = current.get("metadata") or {}
+            execution_mode = current.get("execution_mode") or existing_meta.get("execution_mode")
+
+        merged_meta = _merge_metadata(existing_meta, metadata)
+        if merged_meta.get("execution_mode"):
+            execution_mode = merged_meta.get("execution_mode")
+        elif metadata.get("execution_mode"):
+            execution_mode = metadata["execution_mode"]
+
+        update_payload: Dict[str, Any] = {"metadata": merged_meta}
+        if execution_mode:
+            update_payload["execution_mode"] = execution_mode
+            merged_meta["execution_mode"] = execution_mode
         response = (
             self._client
             .table("job_executions")
-            .update({"metadata": metadata})
+            .update(update_payload)
             .eq("execution_id", job_execution_id)
             .select("*")
             .execute()
