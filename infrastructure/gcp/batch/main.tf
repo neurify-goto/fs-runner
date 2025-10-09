@@ -25,6 +25,13 @@ locals {
   bucket_name       = var.gcs_bucket
   artifact_repo_id  = var.artifact_repo
   batch_sa_account  = var.batch_service_account_id
+  batch_env_defaults = {
+    FORM_SENDER_ENV                    = "gcp_batch"
+    FORM_SENDER_LOG_SANITIZE           = "1"
+    FORM_SENDER_DISPATCHER_BASE_URL    = var.dispatcher_base_url
+    FORM_SENDER_DISPATCHER_AUDIENCE    = var.dispatcher_audience
+  }
+  batch_environment_variables = merge(local.batch_env_defaults, var.batch_template_env)
 }
 
 resource "google_service_account" "batch_runner" {
@@ -32,16 +39,27 @@ resource "google_service_account" "batch_runner" {
   display_name = "Form Sender Cloud Batch Runner"
 }
 
+resource "google_project_service" "batch_services" {
+  for_each = toset([
+    "batch.googleapis.com",
+    "artifactregistry.googleapis.com",
+    "secretmanager.googleapis.com",
+    "compute.googleapis.com",
+    "logging.googleapis.com",
+    "storage.googleapis.com",
+  ])
+
+  project = var.project_id
+  service = each.value
+
+  disable_on_destroy = false
+}
+
 resource "google_project_iam_member" "batch_runner_secret_access" {
   for_each = toset(var.supabase_secret_names)
   project  = var.project_id
   role     = "roles/secretmanager.secretAccessor"
   member   = "serviceAccount:${google_service_account.batch_runner.email}"
-  condition {
-    title       = "form-sender-secret-access-${each.key}"
-    description = "Allow Batch runner to read Supabase secrets"
-    expression  = "true"
-  }
 }
 
 resource "google_project_iam_member" "batch_runner_storage" {
@@ -89,8 +107,81 @@ resource "google_artifact_registry_repository" "runner" {
   mode          = "STANDARD_REPOSITORY"
 }
 
-# TODO: Define google-beta_batch_job template once container command and volumes are finalized.
-# Placeholder locals document the expected structure for downstream modules.
+resource "google_batch_job" "form_sender_template" {
+  provider = google-beta
+
+  project = var.project_id
+  location = var.region
+
+  job_id = var.batch_job_template_id
+
+  labels = {
+    workload = "form-sender"
+    template = var.batch_job_template_id
+  }
+
+  priority = 0
+
+  task_groups {
+    name        = var.batch_task_group_name
+    task_count  = 1
+    parallelism = 1
+    task_spec {
+      runnables {
+        container {
+          image = var.batch_container_image
+          entrypoint = var.batch_container_entrypoint != "" ? var.batch_container_entrypoint : null
+        }
+      }
+
+      environment {
+        variables         = local.batch_environment_variables
+        secret_variables  = var.batch_template_secret_env
+      }
+
+      compute_resource {
+        cpu_milli  = var.batch_template_cpu_milli
+        memory_mib = var.batch_template_memory_mb
+      }
+
+      max_retry_count   = var.batch_max_retry_count
+      max_run_duration  = "${var.batch_max_run_duration_seconds}s"
+    }
+  }
+
+  allocation_policy {
+    instances {
+      policy {
+        machine_type        = var.machine_type
+        provisioning_model  = var.prefer_spot_default ? "SPOT" : "STANDARD"
+      }
+    }
+
+    dynamic "instances" {
+      for_each = var.prefer_spot_default && var.allow_on_demand_default ? ["on_demand_fallback"] : []
+      content {
+        policy {
+          machine_type       = var.machine_type
+          provisioning_model = "STANDARD"
+        }
+      }
+    }
+
+    service_account {
+      email = google_service_account.batch_runner.email
+    }
+  }
+
+  logs_policy {
+    destination = var.batch_logs_destination
+  }
+
+  depends_on = [
+    google_project_service.batch_services,
+    google_service_account.batch_runner,
+  ]
+}
+
 locals {
   batch_defaults = {
     prefer_spot                      = var.prefer_spot_default
@@ -99,6 +190,7 @@ locals {
     machine_type                     = var.machine_type
     signed_url_ttl_hours             = var.signed_url_ttl_hours
     signed_url_refresh_threshold_sec = var.signed_url_refresh_threshold_seconds
+    job_template_name                = google_batch_job.form_sender_template.name
+    task_group_name                  = google_batch_job.form_sender_template.task_groups[0].name
   }
 }
-

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,10 @@ class DispatcherSettings:
     batch_machine_type_default: Optional[str] = None
     batch_vcpu_per_worker_default: int = 1
     batch_memory_per_worker_mb_default: int = 2048
+    batch_supabase_url_secret: Optional[str] = None
+    batch_supabase_service_role_secret: Optional[str] = None
+    batch_supabase_url_test_secret: Optional[str] = None
+    batch_supabase_service_role_test_secret: Optional[str] = None
 
     def require_batch_configuration(self) -> None:
         required_fields = {
@@ -41,12 +45,53 @@ class DispatcherSettings:
             "batch_task_group": "FORM_SENDER_BATCH_TASK_GROUP",
             "batch_service_account_email": "FORM_SENDER_BATCH_SERVICE_ACCOUNT",
             "batch_container_image": "FORM_SENDER_BATCH_CONTAINER_IMAGE",
+            "batch_supabase_url_secret": "FORM_SENDER_BATCH_SUPABASE_URL_SECRET",
+            "batch_supabase_service_role_secret": "FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET",
         }
         missing = [env for attr, env in required_fields.items() if not getattr(self, attr)]
         if missing:
             raise RuntimeError(
                 "Batch execution requires the following environment variables: " + ", ".join(missing)
             )
+
+    def batch_secret_ids(self) -> Dict[str, str]:
+        secrets: Dict[str, str] = {}
+        if self.batch_supabase_url_secret:
+            secrets["SUPABASE_URL"] = self.batch_supabase_url_secret
+        if self.batch_supabase_service_role_secret:
+            secrets["SUPABASE_SERVICE_ROLE_KEY"] = self.batch_supabase_service_role_secret
+        if self.batch_supabase_url_test_secret:
+            secrets["SUPABASE_URL_TEST"] = self.batch_supabase_url_test_secret
+        if self.batch_supabase_service_role_test_secret:
+            secrets["SUPABASE_SERVICE_ROLE_KEY_TEST"] = self.batch_supabase_service_role_test_secret
+        return secrets
+
+    def batch_secret_environment(self) -> Dict[str, str]:
+        project_id = self.batch_project_id or self.project_id
+        if not project_id:
+            return {}
+        env_map: Dict[str, str] = {}
+        for env_name, secret_id in self.batch_secret_ids().items():
+            normalized = self._normalize_secret_resource(secret_id, project_id)
+            if normalized:
+                env_map[env_name] = normalized
+        return env_map
+
+    @staticmethod
+    def _normalize_secret_resource(secret_id: str, project_id: str) -> Optional[str]:
+        if not secret_id:
+            return None
+
+        secret_id = secret_id.strip()
+        if not secret_id:
+            return None
+
+        if secret_id.startswith("projects/"):
+            if "/versions/" in secret_id:
+                return secret_id
+            return secret_id.rstrip("/") + "/versions/latest"
+
+        return f"projects/{project_id}/secrets/{secret_id}/versions/latest"
 
     @classmethod
     def from_env(cls) -> "DispatcherSettings":
@@ -82,6 +127,10 @@ class DispatcherSettings:
             batch_machine_type_default=os.getenv("FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT"),
             batch_vcpu_per_worker_default=int(os.getenv("FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT", "1")),
             batch_memory_per_worker_mb_default=int(os.getenv("FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT", "2048")),
+            batch_supabase_url_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_URL_SECRET"),
+            batch_supabase_service_role_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET"),
+            batch_supabase_url_test_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET"),
+            batch_supabase_service_role_test_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_TEST_SECRET"),
         )
 
 

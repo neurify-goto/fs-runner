@@ -24,7 +24,10 @@ env:
   REGION: asia-northeast1
   ARTIFACT_REPO: form-sender-runner
   TERRAFORM_WORKDIR: infrastructure/gcp/batch
+  DISPATCHER_TERRAFORM_WORKDIR: infrastructure/gcp/dispatcher
   IMAGE_NAME: asia-northeast1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/form-sender-runner/playwright
+  DISPATCHER_SERVICE: form-sender-dispatcher
+  CLOUD_RUN_JOB_NAME: form-sender-runner
 
 jobs:
   deploy:
@@ -32,14 +35,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
         with:
-          project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_TERRAFORM_SERVICE_ACCOUNT }}
 
-      - name: Configure Docker authentication
+      - name: Set up gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Cloud Batch unit tests
+        run: |
+          pytest -k gcp_batch --maxfail=1 --disable-warnings
+
+      - name: Configure Artifact Registry authentication
         run: |
           gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
 
@@ -56,32 +86,136 @@ jobs:
         with:
           terraform_version: 1.7.5
 
-      - name: Terraform Init
+      - name: Terraform Init (batch)
         working-directory: ${{ env.TERRAFORM_WORKDIR }}
         run: terraform init
 
-      - name: Terraform Plan
-        id: plan
+      - name: Terraform Plan (batch)
+        id: plan_batch
         working-directory: ${{ env.TERRAFORM_WORKDIR }}
+        env:
+          DISPATCHER_BASE_URL: ${{ secrets.DISPATCHER_BASE_URL }}
+          DISPATCHER_AUDIENCE: ${{ secrets.DISPATCHER_AUDIENCE }}
         run: |
           terraform plan \
             -var="project_id=${PROJECT_ID}" \
             -var="region=${REGION}" \
             -var="gcs_bucket=${PROJECT_ID}-form-sender-client-config" \
-            -var="artifact_repo=${ARTIFACT_REPO}"
+            -var="artifact_repo=${ARTIFACT_REPO}" \
+            -var="batch_container_image=${IMAGE_NAME}:$GITHUB_SHA" \
+            -var="dispatcher_base_url=${DISPATCHER_BASE_URL}" \
+            -var="dispatcher_audience=${DISPATCHER_AUDIENCE}"
 
-      - name: Terraform Apply
+      - name: Terraform Apply (batch)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.apply == 'true'
         working-directory: ${{ env.TERRAFORM_WORKDIR }}
+        env:
+          DISPATCHER_BASE_URL: ${{ secrets.DISPATCHER_BASE_URL }}
+          DISPATCHER_AUDIENCE: ${{ secrets.DISPATCHER_AUDIENCE }}
         run: |
           terraform apply -auto-approve \
             -var="project_id=${PROJECT_ID}" \
             -var="region=${REGION}" \
             -var="gcs_bucket=${PROJECT_ID}-form-sender-client-config" \
-            -var="artifact_repo=${ARTIFACT_REPO}"
+            -var="artifact_repo=${ARTIFACT_REPO}" \
+            -var="batch_container_image=${IMAGE_NAME}:$GITHUB_SHA" \
+            -var="dispatcher_base_url=${DISPATCHER_BASE_URL}" \
+            -var="dispatcher_audience=${DISPATCHER_AUDIENCE}"
+
+      - name: Capture batch Terraform outputs
+        id: batch_outputs
+        working-directory: ${{ env.TERRAFORM_WORKDIR }}
+        run: |
+          terraform output -json > /tmp/batch_outputs.json
+          echo "job_template_name=$(jq -r '.batch_job_template_name.value' /tmp/batch_outputs.json)" >> $GITHUB_OUTPUT
+          echo "task_group_name=$(jq -r '.batch_task_group_name.value' /tmp/batch_outputs.json)" >> $GITHUB_OUTPUT
+          echo "batch_service_account=$(jq -r '.batch_runner_service_account_email.value' /tmp/batch_outputs.json)" >> $GITHUB_OUTPUT
+
+      - name: Terraform Init (dispatcher)
+        working-directory: ${{ env.DISPATCHER_TERRAFORM_WORKDIR }}
+        run: terraform init
+
+      - name: Terraform Plan (dispatcher)
+        id: plan_dispatcher
+        working-directory: ${{ env.DISPATCHER_TERRAFORM_WORKDIR }}
+        env:
+          DISPATCHER_BASE_URL: ${{ secrets.DISPATCHER_BASE_URL }}
+          DISPATCHER_AUDIENCE: ${{ secrets.DISPATCHER_AUDIENCE }}
+          SUPABASE_URL_SECRET_ID: ${{ secrets.SUPABASE_URL_SECRET_ID }}
+          SUPABASE_SERVICE_ROLE_SECRET_ID: ${{ secrets.SUPABASE_SERVICE_ROLE_SECRET_ID }}
+          SUPABASE_URL_TEST_SECRET_ID: ${{ secrets.SUPABASE_URL_TEST_SECRET_ID }}
+          SUPABASE_SERVICE_ROLE_TEST_SECRET_ID: ${{ secrets.SUPABASE_SERVICE_ROLE_TEST_SECRET_ID }}
+        run: |
+          terraform plan \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="service_name=${DISPATCHER_SERVICE}" \
+            -var="container_image=${IMAGE_NAME}:$GITHUB_SHA" \
+            -var="client_config_bucket=${PROJECT_ID}-form-sender-client-config" \
+            -var="cloud_run_job_name=${CLOUD_RUN_JOB_NAME}" \
+            -var="dispatcher_base_url=${DISPATCHER_BASE_URL}" \
+            -var="dispatcher_audience=${DISPATCHER_AUDIENCE}" \
+            -var="supabase_url_secret=${SUPABASE_URL_SECRET_ID}" \
+            -var="supabase_service_role_secret=${SUPABASE_SERVICE_ROLE_SECRET_ID}" \
+            -var="supabase_url_test_secret=${SUPABASE_URL_TEST_SECRET_ID}" \
+            -var="supabase_service_role_test_secret=${SUPABASE_SERVICE_ROLE_TEST_SECRET_ID}" \
+            -var="batch_job_template_name=${{ steps.batch_outputs.outputs.job_template_name }}" \
+            -var="batch_task_group_name=${{ steps.batch_outputs.outputs.task_group_name }}" \
+            -var="batch_service_account_email=${{ steps.batch_outputs.outputs.batch_service_account }}" \
+            -var="batch_container_image=${IMAGE_NAME}:$GITHUB_SHA"
+
+      - name: Terraform Apply (dispatcher)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.apply == 'true'
+        working-directory: ${{ env.DISPATCHER_TERRAFORM_WORKDIR }}
+        env:
+          DISPATCHER_BASE_URL: ${{ secrets.DISPATCHER_BASE_URL }}
+          DISPATCHER_AUDIENCE: ${{ secrets.DISPATCHER_AUDIENCE }}
+          SUPABASE_URL_SECRET_ID: ${{ secrets.SUPABASE_URL_SECRET_ID }}
+          SUPABASE_SERVICE_ROLE_SECRET_ID: ${{ secrets.SUPABASE_SERVICE_ROLE_SECRET_ID }}
+          SUPABASE_URL_TEST_SECRET_ID: ${{ secrets.SUPABASE_URL_TEST_SECRET_ID }}
+          SUPABASE_SERVICE_ROLE_TEST_SECRET_ID: ${{ secrets.SUPABASE_SERVICE_ROLE_TEST_SECRET_ID }}
+        run: |
+          terraform apply -auto-approve \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="service_name=${DISPATCHER_SERVICE}" \
+            -var="container_image=${IMAGE_NAME}:$GITHUB_SHA" \
+            -var="client_config_bucket=${PROJECT_ID}-form-sender-client-config" \
+            -var="cloud_run_job_name=${CLOUD_RUN_JOB_NAME}" \
+            -var="dispatcher_base_url=${DISPATCHER_BASE_URL}" \
+            -var="dispatcher_audience=${DISPATCHER_AUDIENCE}" \
+            -var="supabase_url_secret=${SUPABASE_URL_SECRET_ID}" \
+            -var="supabase_service_role_secret=${SUPABASE_SERVICE_ROLE_SECRET_ID}" \
+            -var="supabase_url_test_secret=${SUPABASE_URL_TEST_SECRET_ID}" \
+            -var="supabase_service_role_test_secret=${SUPABASE_SERVICE_ROLE_TEST_SECRET_ID}" \
+            -var="batch_job_template_name=${{ steps.batch_outputs.outputs.job_template_name }}" \
+            -var="batch_task_group_name=${{ steps.batch_outputs.outputs.task_group_name }}" \
+            -var="batch_service_account_email=${{ steps.batch_outputs.outputs.batch_service_account }}" \
+            -var="batch_container_image=${IMAGE_NAME}:$GITHUB_SHA"
+
+      - name: Deploy dispatcher image
+        run: |
+          gcloud run deploy ${DISPATCHER_SERVICE} \
+            --image ${IMAGE_NAME}:$GITHUB_SHA \
+            --region ${REGION} \
+            --project ${PROJECT_ID} \
+            --quiet
 
       - name: Publish summary
         run: |
           echo "## Cloud Batch Deployment" >> $GITHUB_STEP_SUMMARY
-          echo "- Image: ${IMAGE_NAME}:$GITHUB_SHA" >> $GITHUB_STEP_SUMMARY
-          echo "- Terraform apply: ${{ github.event.inputs.apply || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Runner Image: ${IMAGE_NAME}:$GITHUB_SHA" >> $GITHUB_STEP_SUMMARY
+          echo "- Batch terraform applied: ${{ github.event.inputs.apply || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Dispatcher terraform applied: ${{ github.event.inputs.apply || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Batch job template: ${{ steps.batch_outputs.outputs.job_template_name }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify Slack
+        if: success() && secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "Cloud Batch runner image `${IMAGE_NAME}:$GITHUB_SHA` was built and dispatched. Terraform apply: ${{ github.event.inputs.apply || 'false' }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

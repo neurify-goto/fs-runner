@@ -30,7 +30,7 @@ class DispatcherService:
 
         return storage.Client()
 
-    def handle_form_sender_task(self, task: FormSenderTask) -> Dict[str, str]:
+    def handle_form_sender_task(self, task: FormSenderTask) -> Dict[str, Any]:
         existing = self._supabase.find_active_execution(task.targeting_id, task.execution.run_index_base)
         if existing:
             return {
@@ -67,26 +67,40 @@ class DispatcherService:
                     task_count=task.execution.run_total,
                     parallelism=task.effective_parallelism(),
                 )
-                metadata = dict(record.get("metadata") or {})
-                metadata.update(
-                    {
-                        "execution_mode": "batch",
-                        "batch_job_name": job.name,
-                        "batch_array_size": task.execution.run_total,
-                        "batch_parallelism": batch_meta.get("parallelism"),
-                        "batch_machine_type": batch_meta.get("machine_type"),
-                        "batch_cpu_milli": batch_meta.get("cpu_milli"),
-                        "batch_memory_mb": batch_meta.get("memory_mb"),
-                        "batch_prefer_spot": batch_meta.get("prefer_spot"),
-                        "batch_allow_on_demand": batch_meta.get("allow_on_demand"),
-                    }
-                )
+                batch_metadata: Dict[str, Any] = {
+                    "job_name": job.name,
+                    "task_count": task.execution.run_total,
+                    "parallelism": batch_meta.get("parallelism"),
+                    "machine_type": batch_meta.get("machine_type"),
+                    "cpu_milli": batch_meta.get("cpu_milli"),
+                    "memory_mb": batch_meta.get("memory_mb"),
+                    "prefer_spot": batch_meta.get("prefer_spot"),
+                    "allow_on_demand": batch_meta.get("allow_on_demand"),
+                }
                 if job.task_groups:
-                    metadata["batch_task_group"] = job.task_groups[0].name
-                record = self._supabase.update_metadata(job_execution_id, metadata)
+                    batch_metadata["task_group"] = job.task_groups[0].name
+                if batch_meta.get("memory_warning"):
+                    batch_metadata["memory_warning"] = True
+                    if batch_meta.get("computed_memory_mb") is not None:
+                        batch_metadata["computed_memory_mb"] = batch_meta.get("computed_memory_mb")
+                if batch_meta.get("requested_machine_type"):
+                    batch_metadata["requested_machine_type"] = batch_meta.get("requested_machine_type")
+                if batch_meta.get("resolved_machine_type"):
+                    batch_metadata["resolved_machine_type"] = batch_meta.get("resolved_machine_type")
+                if task.batch and getattr(task.batch, "memory_warning", None):
+                    batch_metadata["memory_warning"] = True
+                    if getattr(task.batch, "computed_memory_mb", None):
+                        batch_metadata["computed_memory_mb"] = task.batch.computed_memory_mb
+
+                metadata_patch = {
+                    "execution_mode": "batch",
+                    "batch": batch_metadata,
+                }
+                record = self._supabase.update_metadata(job_execution_id, metadata_patch)
                 return {
                     "status": "queued",
                     "job_execution_id": record["execution_id"],
+                    "batch": batch_metadata,
                     "batch_job_name": job.name,
                 }
 
@@ -102,18 +116,19 @@ class DispatcherService:
             raise
 
         execution_name = self._job_runner.extract_execution_name(operation)
-        metadata = dict(record.get("metadata") or {})
-        metadata.update(
-            {
-                "execution_mode": "cloud_run",
-                "cloud_run_operation": getattr(operation, "name", None),
-                "cloud_run_execution": execution_name,
-            }
-        )
-        record = self._supabase.update_metadata(job_execution_id, metadata)
+        cloud_run_metadata = {
+            "operation": getattr(operation, "name", None),
+            "execution": execution_name,
+        }
+        metadata_patch = {
+            "execution_mode": "cloud_run",
+            "cloud_run": cloud_run_metadata,
+        }
+        record = self._supabase.update_metadata(job_execution_id, metadata_patch)
         return {
             "status": "queued",
             "job_execution_id": record["execution_id"],
+            "cloud_run": cloud_run_metadata,
             "cloud_run_operation": getattr(operation, "name", None),
         }
 
@@ -170,10 +185,13 @@ class DispatcherService:
             }
 
         metadata = record.get("metadata") or {}
-        execution_mode = metadata.get("execution_mode", "cloud_run")
-        execution_name = metadata.get("cloud_run_execution")
-        operation_name = metadata.get("cloud_run_operation")
-        batch_job_name = metadata.get("batch_job_name")
+        execution_mode = metadata.get("execution_mode", record.get("execution_mode", "cloud_run"))
+        cloud_run_meta = metadata.get("cloud_run") or {}
+        batch_meta = metadata.get("batch") or {}
+
+        execution_name = cloud_run_meta.get("execution") or metadata.get("cloud_run_execution")
+        operation_name = cloud_run_meta.get("operation") or metadata.get("cloud_run_operation")
+        batch_job_name = batch_meta.get("job_name") or metadata.get("batch_job_name")
 
         if execution_mode == "batch":
             if not batch_job_name:

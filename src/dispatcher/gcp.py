@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
@@ -239,9 +240,23 @@ class CloudBatchJobRunner:
         parallelism: int,
     ) -> tuple[batch_v1.Job, Dict[str, Any]]:
         job_id = self._generate_job_id()
-        machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand = self._calculate_resources(task)
+        (
+            machine_type,
+            cpu_milli,
+            memory_mb,
+            prefer_spot,
+            allow_on_demand,
+            resource_metadata,
+        ) = self._calculate_resources(task)
 
+        secret_env = self._settings.batch_secret_environment()
         environment = batch_v1.Environment(variables=env_vars)
+        if secret_env:
+            environment.secret_variables = {
+                name: batch_v1.Secret(secret_version=resource)
+                for name, resource in secret_env.items()
+                if resource
+            }
         container_spec = batch_v1.Runnable.Container(
             image=self._settings.batch_container_image,
         )
@@ -287,6 +302,7 @@ class CloudBatchJobRunner:
             "allow_on_demand": allow_on_demand,
             "parallelism": effective_parallelism,
         }
+        metadata.update(resource_metadata)
         return response, metadata
 
     def delete_job(self, job_name: str) -> None:
@@ -299,10 +315,26 @@ class CloudBatchJobRunner:
             raise
 
     def _generate_job_id(self) -> str:
-        prefix = self._settings.batch_job_template or "form-sender"
+        prefix = self._sanitize_job_prefix(self._settings.batch_job_template)
         return f"{prefix}-{uuid4().hex[:16]}"
 
-    def _calculate_resources(self, task: FormSenderTask) -> tuple[str, int, int, bool, bool]:
+    @staticmethod
+    def _sanitize_job_prefix(template: Optional[str]) -> str:
+        value = template or "form-sender"
+        value = value.strip()
+        if not value:
+            return "form-sender"
+
+        if "/" in value:
+            value = value.split("/")[-1]
+
+        value = re.sub(r"[^a-z0-9-]", "-", value.lower())
+        value = re.sub(r"-+", "-", value).strip("-")
+        if not value or not re.match(r"^[a-z][a-z0-9-]*[a-z0-9]$", value):
+            value = "form-sender"
+        return value
+
+    def _calculate_resources(self, task: FormSenderTask) -> tuple[str, int, int, bool, bool, Dict[str, Any]]:
         workers = max(1, task.execution.workers_per_workflow)
         batch_opts = task.batch if task.batch else None
         vcpu_per_worker = batch_opts.vcpu_per_worker if batch_opts and batch_opts.vcpu_per_worker else self._settings.batch_vcpu_per_worker_default
@@ -312,7 +344,8 @@ class CloudBatchJobRunner:
         vcpu = max(1, vcpu_per_worker) * workers
         total_memory = max(1024, workers * memory_per_worker + buffer_mb)
         memory_mb = int(math.ceil(total_memory / 256.0) * 256)
-        machine_type = batch_opts.machine_type if batch_opts and batch_opts.machine_type else self._settings.batch_machine_type_default
+        requested_machine_type = batch_opts.machine_type if batch_opts and batch_opts.machine_type else None
+        machine_type = requested_machine_type or self._settings.batch_machine_type_default
         if not machine_type:
             machine_type = f"n2d-custom-{vcpu}-{memory_mb}"
 
@@ -320,7 +353,48 @@ class CloudBatchJobRunner:
         allow_on_demand = batch_opts.allow_on_demand_fallback if batch_opts else True
 
         cpu_milli = vcpu * 1000
-        return machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand
+        metadata: Dict[str, Any] = {}
+
+        parsed = self._parse_custom_machine_type(machine_type)
+        needs_fallback = False
+        if parsed:
+            machine_vcpu, machine_memory = parsed
+            if machine_vcpu < vcpu or machine_memory < memory_mb:
+                needs_fallback = True
+
+        if needs_fallback:
+            fallback_memory = max(memory_mb, 10240)
+            fallback_vcpu = max(vcpu, 4)
+            fallback_type = f"n2d-custom-{fallback_vcpu}-{fallback_memory}"
+            logger.warning(
+                "Requested Batch machine_type '%s' insufficient for workers=%s (required_memory_mb=%s). "
+                "Falling back to %s.",
+                requested_machine_type or machine_type,
+                workers,
+                memory_mb,
+                fallback_type,
+            )
+            metadata["memory_warning"] = True
+            metadata["computed_memory_mb"] = memory_mb
+            if requested_machine_type:
+                metadata["requested_machine_type"] = requested_machine_type
+            machine_type = fallback_type
+        elif requested_machine_type:
+            metadata["requested_machine_type"] = requested_machine_type
+
+        metadata["resolved_machine_type"] = machine_type
+
+        return machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand, metadata
+
+    @staticmethod
+    def _parse_custom_machine_type(machine_type: str) -> Optional[tuple[int, int]]:
+        match = re.search(r"custom-(\d+)-(\d+)$", machine_type)
+        if not match:
+            return None
+        try:
+            return int(match.group(1)), int(match.group(2))
+        except (TypeError, ValueError):
+            return None
 
     def _build_allocation_policy(
         self, machine_type: str, prefer_spot: bool, allow_on_demand: bool
@@ -351,7 +425,9 @@ class CloudBatchJobRunner:
 
         service_account = None
         if self._settings.batch_service_account_email:
-            service_account = batch_v1.ServiceAccount(email=self._settings.batch_service_account_email)
+            service_account = batch_v1.AllocationPolicy.ServiceAccount(
+                email=self._settings.batch_service_account_email
+            )
 
         return batch_v1.AllocationPolicy(
             instances=instances,

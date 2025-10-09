@@ -1,7 +1,31 @@
 import os
+import sys
 import types
 
 import pytest
+
+
+class _AsyncPlaywrightStub:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _install_playwright_stubs() -> None:
+    if "playwright" not in sys.modules:
+        playwright_module = types.ModuleType("playwright")
+        async_api_module = types.ModuleType("playwright.async_api")
+        async_api_module.async_playwright = lambda: _AsyncPlaywrightStub()
+        playwright_module.async_api = async_api_module
+        sys.modules["playwright.async_api"] = async_api_module
+        sys.modules["playwright"] = playwright_module
+    if "playwright_stealth" not in sys.modules:
+        sys.modules["playwright_stealth"] = types.SimpleNamespace(Stealth=lambda _page: None)
+
+
+_install_playwright_stubs()
 
 from src import form_sender_runner as runner
 

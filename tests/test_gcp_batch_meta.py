@@ -49,17 +49,15 @@ def test_get_preemption_config_defaults():
     assert config["initial_backoff_seconds"] >= 1
 
 
-def test_config_alias_override(monkeypatch, tmp_path):
-    custom_path = tmp_path / "gcp_batch.json"
-    custom_config = {
-        "env_aliases": {
+def test_config_alias_override(monkeypatch):
+    def fake_aliases(self):  # pylint: disable=unused-argument
+        return {
             "task_index": ["CUSTOM_BATCH_INDEX"],
             "attempt": ["CUSTOM_BATCH_ATTEMPT"],
+            "array_size": ["CUSTOM_BATCH_COUNT", "BATCH_TASK_COUNT"],
         }
-    }
-    custom_path.write_text(json.dumps(custom_config), encoding="utf-8")
 
-    monkeypatch.setattr(gcp_batch, "_CONFIG_PATH", custom_path)
+    monkeypatch.setattr(gcp_batch.ConfigManager, "get_batch_env_aliases", fake_aliases)
     gcp_batch.reset_cache()
 
     monkeypatch.setenv("CUSTOM_BATCH_INDEX", "7")
@@ -68,4 +66,3 @@ def test_config_alias_override(monkeypatch, tmp_path):
     meta = gcp_batch.extract_batch_meta(os.environ)
     assert meta.task_index == 7
     assert meta.attempt == 11
-

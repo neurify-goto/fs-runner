@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 import logging
 
@@ -40,6 +40,40 @@ class ConfigManager:
                 pass
             self._worker_config = cfg
         return self._worker_config
+
+    def get_batch_env_aliases(self) -> Dict[str, List[str]]:
+        """Cloud Batch 関連環境変数のエイリアス設定を取得する。"""
+
+        defaults: Dict[str, List[str]] = {
+            "task_index": ["BATCH_TASK_INDEX", "CLOUD_RUN_TASK_INDEX"],
+            "attempt": ["BATCH_TASK_ATTEMPT", "CLOUD_RUN_TASK_ATTEMPT"],
+            "array_size": ["BATCH_TASK_COUNT", "CLOUD_RUN_TASK_COUNT"],
+        }
+
+        config = self.get_worker_config()
+        aliases = config.get("batch_env_aliases") if isinstance(config, dict) else None
+
+        result: Dict[str, List[str]] = {}
+        if isinstance(aliases, dict):
+            for key, values in aliases.items():
+                if not isinstance(values, list):
+                    continue
+                filtered: List[str] = [
+                    str(item)
+                    for item in values
+                    if isinstance(item, str) and item.strip() != ""
+                ]
+                if filtered:
+                    result[key] = filtered
+
+        if not result:
+            return defaults
+
+        for key, fallback in defaults.items():
+            if key not in result or not result[key]:
+                result[key] = fallback
+
+        return result
     
     def get_retry_config(self) -> Dict[str, Any]:
         """リトライ設定を取得"""

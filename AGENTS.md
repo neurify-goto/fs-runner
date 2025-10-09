@@ -75,6 +75,7 @@ Each GAS module follows the same pattern:
 * **Security for Internal Systems:** As this is an internally operated system, it is not necessary to be overly sensitive to threats like SQL injection.
 * **Timestamps:** When recording time in the database, always use Japan Standard Time (JST).
 * **Never code secret keys on tracked files**
+* **Code File Editing:** When modifying code files, always use the Edit tool. Do not use Python scripts or programmatic approaches for code editing.
 
 #### **Python Module Organization**
 

@@ -5,15 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from supabase import Client, create_client
 
-
-def _merge_metadata(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
-    merged = dict(base or {})
-    for key, value in (patch or {}).items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _merge_metadata(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
+from shared.supabase.metadata import merge_metadata
 
 
 class JobExecutionRepository:
@@ -42,6 +34,22 @@ class JobExecutionRepository:
         cloud_run_execution: Optional[str] = None,
         execution_mode: str = "cloud_run",
     ) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {
+            "workflow_trigger": payload.get("workflow_trigger"),
+            "branch": payload.get("branch"),
+            "test_mode": payload.get("test_mode", False),
+            "execution_mode": execution_mode,
+        }
+
+        if cloud_run_operation or cloud_run_execution:
+            metadata["cloud_run"] = {
+                "operation": cloud_run_operation,
+                "execution": cloud_run_execution,
+            }
+
+        if execution_mode == "batch":
+            metadata.setdefault("batch", {})
+
         record = {
             "execution_id": job_execution_id,
             "job_type": "form_sender",
@@ -54,14 +62,7 @@ class JobExecutionRepository:
             "status": "running",
             "started_at": datetime.now(timezone.utc).isoformat(),
             "execution_mode": execution_mode,
-            "metadata": {
-                "workflow_trigger": payload.get("workflow_trigger"),
-                "branch": payload.get("branch"),
-                "cloud_run_operation": cloud_run_operation,
-                "cloud_run_execution": cloud_run_execution,
-                "test_mode": payload.get("test_mode", False),
-                "execution_mode": execution_mode,
-            },
+            "metadata": metadata,
         }
         response = self._client.table("job_executions").insert(record).execute()
         return response.data[0]
@@ -74,7 +75,7 @@ class JobExecutionRepository:
             existing_meta = current.get("metadata") or {}
             execution_mode = current.get("execution_mode") or existing_meta.get("execution_mode")
 
-        merged_meta = _merge_metadata(existing_meta, metadata)
+        merged_meta = merge_metadata(existing_meta, metadata)
         if merged_meta.get("execution_mode"):
             execution_mode = merged_meta.get("execution_mode")
         elif metadata.get("execution_mode"):

@@ -7,6 +7,20 @@
       "concurrent_tasks": 3
     }
   },
+  "batch_env_aliases": {
+    "task_index": [
+      "BATCH_TASK_INDEX",
+      "CLOUD_RUN_TASK_INDEX"
+    ],
+    "attempt": [
+      "BATCH_TASK_ATTEMPT",
+      "CLOUD_RUN_TASK_ATTEMPT"
+    ],
+    "array_size": [
+      "BATCH_TASK_COUNT",
+      "CLOUD_RUN_TASK_COUNT"
+    ]
+  },
   "_comment_form_sender": "Form-Sender用マルチプロセス設定（重いフォーム送信処理に最適化）",
   "_comment_form_sender_priority": "設定優先順位: form_sender_multi_process専用設定を使用、フォールバック無し",
   "form_sender_multi_process": {
@@ -47,6 +61,12 @@
         "block_fonts": true,
         "block_stylesheets": true
       }
+    },
+    "gcp_spot": {
+      "max_workers": 4,
+      "browser_launch_delay_ms": 800,
+      "wait_for_network_idle": true,
+      "preemption_poll_interval_seconds": 15
     }
   },
   "form_sender": {
@@ -186,6 +206,7 @@
     "requeue_interval_seconds": 60,
     "requeue_stale_minutes": 5,
     "idle_exit_seconds": 900,
+    "metadata_polling_interval_seconds": 30,
     "_comment_shard_strategy": "大量並列時の空シャード対策（全シャードプローブ + シャードローテーション）",
     "shard_num": 8,
     "shard_rotation_enabled": true,

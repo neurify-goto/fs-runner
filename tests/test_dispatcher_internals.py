@@ -1,4 +1,5 @@
 import base64
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from types import MethodType, SimpleNamespace
@@ -11,7 +12,7 @@ from fastapi import HTTPException
 from dispatcher.config import DispatcherSettings
 from dispatcher.schemas import ExecutionConfig, FormSenderTask, Metadata, SignedUrlRefreshRequest, TableConfig
 from dispatcher.service import DispatcherService
-from dispatcher.gcp import CloudRunJobRunner, SignedUrlManager
+from dispatcher.gcp import CloudBatchJobRunner, CloudRunJobRunner, SignedUrlManager
 
 
 def _task_payload_dict(
@@ -420,7 +421,7 @@ def test_cancel_execution_falls_back_when_run_metadata_stub(monkeypatch):
             "execution_id": execution_id,
             "status": "running",
             "metadata": {
-                "cloud_run_operation": "operations/op-123",
+                "cloud_run": {"operation": "operations/op-123"},
             },
         },
         update_status=lambda *args, **kwargs: None,
@@ -496,6 +497,7 @@ def test_handle_form_sender_task_preserves_execution_id(monkeypatch):
     response = service.handle_form_sender_task(task)
 
     assert response["job_execution_id"] == provided_execution_id
+    assert response["cloud_run"]["operation"] == "operations/op-1"
     assert inserted_records
     assert inserted_records[0]["job_execution_id"] == provided_execution_id
     assert inserted_records[0]["payload"]["execution_id"] == provided_execution_id
@@ -587,7 +589,12 @@ def test_dispatcher_cancel_execution_batch_success():
         get_execution=lambda exec_id: {
             "execution_id": exec_id,
             "status": "running",
-            "metadata": {"execution_mode": "batch", "batch_job_name": "projects/demo/locations/asia/jobs/form"},
+            "metadata": {
+                "execution_mode": "batch",
+                "batch": {
+                    "job_name": "projects/demo/locations/asia/jobs/form",
+                },
+            },
         },
         update_status=lambda *args, **kwargs: None,
         list_executions=lambda status, targeting_id: [],
@@ -636,6 +643,53 @@ def test_refresh_signed_url_updates_metadata():
     assert result["signed_url"] == "https://example.com/new-url"
     assert refreshed_urls[0][0] == "exec-123"
     assert refreshed_urls[0][1]["batch"]["latest_signed_url"] == "https://example.com/new-url"
+
+
+def test_batch_runner_enforces_minimum_machine_type(caplog):
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="projects/proj/locations/asia-northeast1/jobs/template",
+        batch_task_group="form-sender-workers",
+        batch_service_account_email="batch-sa@proj.iam.gserviceaccount.com",
+        batch_container_image="asia-northeast1-docker.pkg.dev/proj/repo/image:latest",
+        batch_supabase_url_secret="projects/proj/secrets/url",
+        batch_supabase_service_role_secret="projects/proj/secrets/key",
+        batch_machine_type_default="n2d-custom-4-10240",
+    )
+    runner = CloudBatchJobRunner(settings)
+
+    payload = _task_payload_dict(datetime.now(timezone.utc))
+    payload["mode"] = "batch"
+    payload["execution"]["run_total"] = 4
+    payload["execution"]["parallelism"] = 4
+    payload["execution"]["workers_per_workflow"] = 4
+    payload["batch"] = {
+        "enabled": True,
+        "machine_type": "n2d-custom-2-4096",
+    }
+    task = FormSenderTask.parse_obj(payload)
+
+    caplog.set_level(logging.WARNING, logger="dispatcher.gcp")
+    machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand, metadata = runner._calculate_resources(task)
+
+    assert machine_type == "n2d-custom-4-10240"
+    assert cpu_milli == 4000
+    assert memory_mb == 10240
+    assert prefer_spot is True
+    assert allow_on_demand is True
+    assert metadata.get("memory_warning") is True
+    assert metadata.get("computed_memory_mb") == 10240
+    assert metadata.get("requested_machine_type") == "n2d-custom-2-4096"
+    assert metadata.get("resolved_machine_type") == machine_type
+    assert "insufficient" in caplog.text
 
 
 def test_handle_form_sender_task_batch(monkeypatch):
@@ -703,5 +757,7 @@ def test_handle_form_sender_task_batch(monkeypatch):
     response = service.handle_form_sender_task(task)
 
     assert response["status"] == "queued"
-    assert "batch_job_name" in response
+    assert "batch" in response
+    assert response["batch"]["job_name"].endswith("job123")
+    assert response["batch_job_name"].endswith("job123")
     assert inserted == ["batch"]

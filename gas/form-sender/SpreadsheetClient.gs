@@ -555,7 +555,50 @@ function getTargetingConfig(targetingId) {
         column_map: targetingColMap
       }));
     } catch (e) {}
-    
+
+    function resolveColumnIndex(map, aliases) {
+      if (!Array.isArray(aliases)) {
+        return typeof map[aliases] === 'number' ? map[aliases] : -1;
+      }
+      for (var i = 0; i < aliases.length; i++) {
+        var key = aliases[i];
+        if (typeof map[key] === 'number') {
+          return map[key];
+        }
+      }
+      return -1;
+    }
+
+    function normalizeBoolean(value) {
+      if (value === true || value === 1) {
+        return true;
+      }
+      if (value === false || value === 0) {
+        return false;
+      }
+      if (typeof value === 'string') {
+        var lowered = value.trim().toLowerCase();
+        if (lowered === 'true' || lowered === '1' || lowered === 'yes' || lowered === 'on') {
+          return true;
+        }
+        if (lowered === 'false' || lowered === '0' || lowered === 'no' || lowered === 'off') {
+          return false;
+        }
+      }
+      return false;
+    }
+
+    function parseOptionalInteger(value) {
+      if (value === null || typeof value === 'undefined' || value === '') {
+        return null;
+      }
+      var parsed = parseInt(value, 10);
+      if (!isFinite(parsed)) {
+        return null;
+      }
+      return parsed;
+    }
+
     // targeting_idに該当する行を検索
     let targetingRow = null;
     for (let i = 1; i < targetingData.length; i++) {
@@ -642,6 +685,26 @@ function getTargetingConfig(targetingId) {
       }
       return false;
     })(serverlessColIndex >= 0 ? targetingRow[serverlessColIndex] : false);
+
+    const useBatchColIndex = resolveColumnIndex(targetingColMap, ['use_gcp_batch', 'usegcpbatch', 'use gcp batch', 'usegcpbatch?', 'usegcpbatch', 'usegcpbatch ', 'use gcp_batch']);
+    const batchMaxParallelIndex = resolveColumnIndex(targetingColMap, ['batch_max_parallelism', 'batchmaxparallelism']);
+    const batchPreferSpotIndex = resolveColumnIndex(targetingColMap, ['batch_prefer_spot', 'batchpreferspot']);
+    const batchAllowOnDemandIndex = resolveColumnIndex(targetingColMap, ['batch_allow_on_demand_fallback', 'batchallowondemandfallback']);
+    const batchMachineTypeIndex = resolveColumnIndex(targetingColMap, ['batch_machine_type', 'batchmachinetype']);
+    const batchSignedUrlTtlIndex = resolveColumnIndex(targetingColMap, ['batch_signed_url_ttl_hours', 'batchsignedurlttlhours']);
+    const batchSignedUrlRefreshIndex = resolveColumnIndex(targetingColMap, ['batch_signed_url_refresh_threshold_seconds', 'batchsignedurlrefreshthresholdseconds']);
+    const batchVcpuPerWorkerIndex = resolveColumnIndex(targetingColMap, ['batch_vcpu_per_worker', 'batchvcpuperworker']);
+    const batchMemoryPerWorkerIndex = resolveColumnIndex(targetingColMap, ['batch_memory_per_worker_mb', 'batchmemoryperworkermb']);
+
+    const useGcpBatch = useBatchColIndex >= 0 ? normalizeBoolean(targetingRow[useBatchColIndex]) : false;
+    const batchMaxParallelism = batchMaxParallelIndex >= 0 ? parseOptionalInteger(targetingRow[batchMaxParallelIndex]) : null;
+    const batchPreferSpot = batchPreferSpotIndex >= 0 ? normalizeBoolean(targetingRow[batchPreferSpotIndex]) : null;
+    const batchAllowOnDemand = batchAllowOnDemandIndex >= 0 ? normalizeBoolean(targetingRow[batchAllowOnDemandIndex]) : null;
+    const batchMachineType = batchMachineTypeIndex >= 0 ? String(targetingRow[batchMachineTypeIndex] || '').trim() : '';
+    const batchSignedUrlTtlHours = batchSignedUrlTtlIndex >= 0 ? parseOptionalInteger(targetingRow[batchSignedUrlTtlIndex]) : null;
+    const batchSignedUrlRefreshSeconds = batchSignedUrlRefreshIndex >= 0 ? parseOptionalInteger(targetingRow[batchSignedUrlRefreshIndex]) : null;
+    const batchVcpuPerWorker = batchVcpuPerWorkerIndex >= 0 ? parseOptionalInteger(targetingRow[batchVcpuPerWorkerIndex]) : null;
+    const batchMemoryPerWorkerMb = batchMemoryPerWorkerIndex >= 0 ? parseOptionalInteger(targetingRow[batchMemoryPerWorkerIndex]) : null;
 
     try {
       console.log(JSON.stringify({
@@ -750,10 +813,24 @@ function getTargetingConfig(targetingId) {
           } catch (e) {
             return 1;
           }
-        })()
+        })(),
+        useGcpBatch: useGcpBatch,
+        use_gcp_batch: useGcpBatch
       }
     };
-    
+
+    const batchConfig = {
+      enabled: useGcpBatch,
+      max_parallelism: batchMaxParallelism,
+      prefer_spot: batchPreferSpot,
+      allow_on_demand_fallback: batchAllowOnDemand,
+      machine_type: batchMachineType || null,
+      signed_url_ttl_hours: batchSignedUrlTtlHours,
+      signed_url_refresh_threshold_seconds: batchSignedUrlRefreshSeconds,
+      vcpu_per_worker: batchVcpuPerWorker,
+      memory_per_worker_mb: batchMemoryPerWorkerMb
+    };
+
     console.log(`フィールドバリデーション完了: 必須フィールド ${requiredFields.length} 件OK, 空文字許可フィールド ${optionalFields.length} 件`);
     
     // targetingシート固有のバリデーション（targeting_sql, ng_companiesは空文字許可）
@@ -780,6 +857,9 @@ function getTargetingConfig(targetingId) {
     console.log(`targetingシートバリデーション完了: 必須フィールド ${targetingRequiredFields.length} 件OK, 空文字許可フィールド ${targetingOptionalFields.length} 件`);
     
     console.log(`targeting_id ${targetingId} の2シート結合設定取得完了: ${clientConfig.client?.company_name} (client_id: ${clientConfig.client_id})`);
+    clientConfig.batch = batchConfig;
+    clientConfig.useGcpBatch = useGcpBatch;
+    clientConfig.use_gcp_batch = useGcpBatch;
     return clientConfig;
     
   } catch (error) {

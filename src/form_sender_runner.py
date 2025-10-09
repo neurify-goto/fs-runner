@@ -42,6 +42,7 @@ from form_sender.utils.error_classifier import ErrorClassifier
 from form_sender.utils.client_data_loader import load_client_data_simple
 from config.manager import get_worker_config
 from utils.env import should_sanitize_logs, get_runtime_environment, is_gcp_batch
+from shared.supabase.metadata import merge_metadata
 from utils.gcp_batch import (
     BatchMeta,
     calculate_run_index,
@@ -278,19 +279,7 @@ def _update_job_execution_metadata(patch: Dict[str, Any]) -> None:
             maybe_meta = data[0].get('metadata')
             if isinstance(maybe_meta, dict):
                 current_meta = dict(maybe_meta)
-        merged = dict(current_meta)
-        for key, value in patch.items():
-            if value is None:
-                continue
-            if isinstance(value, dict) and isinstance(merged.get(key), dict):
-                nested = dict(merged[key])
-                for nested_key, nested_value in value.items():
-                    if nested_value is None:
-                        continue
-                    nested[nested_key] = nested_value
-                merged[key] = nested
-            else:
-                merged[key] = value
+        merged = merge_metadata(current_meta, patch)
         supabase.table('job_executions').update({'metadata': merged}).eq('execution_id', JOB_EXECUTION_ID).execute()
         logger.info("Patched job_executions metadata with keys=%s", list(patch.keys()))
     except Exception as exc:  # pylint: disable=broad-except

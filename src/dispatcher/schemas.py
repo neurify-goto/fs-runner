@@ -50,6 +50,8 @@ class BatchOptions(BaseModel):
     signed_url_refresh_threshold_seconds: Optional[int] = Field(default=None, ge=60)
     vcpu_per_worker: Optional[int] = Field(default=None, ge=1)
     memory_per_worker_mb: Optional[int] = Field(default=None, ge=1024)
+    memory_warning: Optional[bool] = Field(default=None)
+    computed_memory_mb: Optional[int] = Field(default=None, ge=0)
 
 
 class SignedUrlRefreshRequest(BaseModel):
@@ -109,11 +111,11 @@ class FormSenderTask(BaseModel):
         if value is None:
             return None
         normalized = value.strip().lower()
-        if normalized not in {"standard", "low"}:
-            raise ValueError("cpu_class must be 'standard' or 'low'")
+        if normalized not in {"standard", "low", "gcp_spot"}:
+            raise ValueError("cpu_class must be 'standard', 'low', or 'gcp_spot'")
         return normalized
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def normalize_batch_mode(cls, values):  # type: ignore[override]
         batch = values.get("batch")
         mode = values.get("mode") or "cloud_run"

@@ -17,3 +17,13 @@ output "batch_defaults" {
   value       = local.batch_defaults
   description = "Default Cloud Batch execution settings for Playwright runner"
 }
+
+output "batch_job_template_name" {
+  value       = var.batch_job_template_id
+  description = "Identifier for the Cloud Batch job template (without resource path)"
+}
+
+output "batch_task_group_name" {
+  value       = google_batch_job.form_sender_template.task_groups[0].name
+  description = "Primary task group name defined in the Batch job template"
+}

@@ -14,6 +14,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from config.manager import ConfigManager
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_PATH = _PROJECT_ROOT / "config" / "gcp_batch.json"
 
@@ -55,19 +57,26 @@ def _load_config() -> Dict[str, object]:
     return {}
 
 
+@lru_cache(maxsize=1)
+def _get_alias_map() -> Dict[str, List[str]]:
+    try:
+        manager = ConfigManager()
+        aliases = manager.get_batch_env_aliases()
+        return {
+            key: list(values)
+            for key, values in aliases.items()
+            if isinstance(values, list) and values
+        }
+    except Exception:
+        return {}
+
+
 @lru_cache(maxsize=None)
 def _get_aliases(key: str) -> List[str]:
-    config = _load_config()
-    env_aliases = config.get("env_aliases")
-    if isinstance(env_aliases, dict):
-        value = env_aliases.get(key)
-        if isinstance(value, list):
-            aliases: List[str] = []
-            for entry in value:
-                if isinstance(entry, str) and entry:
-                    aliases.append(entry)
-            if aliases:
-                return aliases
+    alias_map = _get_alias_map()
+    values = alias_map.get(key)
+    if values:
+        return list(values)
     return list(_DEFAULT_ALIAS_MAP.get(key, []))
 
 
@@ -124,6 +133,6 @@ def reset_cache() -> None:
     """Clear cached configuration (used in tests)."""
 
     _load_config.cache_clear()
+    _get_alias_map.cache_clear()
     _get_aliases.cache_clear()
     get_preemption_config.cache_clear()
-
