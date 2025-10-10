@@ -29,6 +29,7 @@ from form_sender.config_validation import (
     transform_client_config,
 )
 from form_sender_runner import _refresh_client_config_url_if_needed
+from utils import env as env_utils
 from utils.gcp_batch import calculate_run_index, calculate_shard_index, extract_batch_meta
 
 logger = logging.getLogger(__name__)
@@ -302,10 +303,12 @@ def main() -> None:
 
     if has_native_batch_env and current_env != "gcp_batch":
         os.environ["FORM_SENDER_ENV"] = "gcp_batch"
+        env_utils.reset_cache()
         current_env = "gcp_batch"
 
     if not current_env:
         os.environ["FORM_SENDER_ENV"] = "cloud_run"
+        env_utils.reset_cache()
         current_env = "cloud_run"
 
     client_config_url = os.getenv("FORM_SENDER_CLIENT_CONFIG_URL")
