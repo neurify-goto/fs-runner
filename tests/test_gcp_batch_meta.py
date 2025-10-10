@@ -1,8 +1,14 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from utils import gcp_batch
 
@@ -33,6 +39,15 @@ def test_extract_batch_meta_alias(monkeypatch):
     meta = gcp_batch.extract_batch_meta(os.environ)
     assert meta.task_index == 5
     assert meta.attempt == 4
+
+
+def test_extract_batch_meta_respects_provided_mapping(monkeypatch):
+    monkeypatch.setenv("BATCH_TASK_INDEX", "9")
+    monkeypatch.setenv("BATCH_TASK_ATTEMPT", "7")
+    meta = gcp_batch.extract_batch_meta({})
+    assert meta.task_index is None
+    assert meta.attempt is None
+    assert meta.array_size is None
 
 
 def test_calculate_run_and_shard():

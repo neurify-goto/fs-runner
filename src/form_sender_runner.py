@@ -42,7 +42,7 @@ from form_sender.utils.error_classifier import ErrorClassifier
 from form_sender.utils.client_data_loader import load_client_data_simple
 from config.manager import get_worker_config
 from utils.env import should_sanitize_logs, get_runtime_environment, is_gcp_batch
-from shared.supabase.metadata import merge_metadata
+from shared.supabase.repository import JobExecutionRepository
 from utils.gcp_batch import (
     BatchMeta,
     calculate_run_index,
@@ -62,6 +62,9 @@ _CURRENT_RUN_INDEX: Optional[int] = None
 _CURRENT_BATCH_ATTEMPT: Optional[int] = None
 _PREEMPTION_STOP: Optional[threading.Event] = None
 _PREEMPTION_THREAD: Optional[threading.Thread] = None
+
+_SUPABASE_CREDENTIALS: Optional[Tuple[str, str, bool]] = None
+_JOB_EXECUTION_REPOSITORY: Optional[JobExecutionRepository] = None
 
 
 def _get_env_int(name: str) -> Optional[int]:
@@ -264,23 +267,8 @@ def _update_job_execution_metadata(patch: Dict[str, Any]) -> None:
     if not JOB_EXECUTION_ID or not patch:
         return
     try:
-        supabase = _build_supabase_client()
-        current_resp = (
-            supabase
-            .table('job_executions')
-            .select('metadata')
-            .eq('execution_id', JOB_EXECUTION_ID)
-            .limit(1)
-            .execute()
-        )
-        current_meta: Dict[str, Any] = {}
-        data = getattr(current_resp, 'data', None)
-        if isinstance(data, list) and data:
-            maybe_meta = data[0].get('metadata')
-            if isinstance(maybe_meta, dict):
-                current_meta = dict(maybe_meta)
-        merged = merge_metadata(current_meta, patch)
-        supabase.table('job_executions').update({'metadata': merged}).eq('execution_id', JOB_EXECUTION_ID).execute()
+        repository = _get_job_execution_repository()
+        repository.patch_metadata(JOB_EXECUTION_ID, patch)
         logger.info("Patched job_executions metadata with keys=%s", list(patch.keys()))
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("Failed to update job execution metadata: %s", exc)
@@ -354,22 +342,18 @@ def _preemption_monitor_loop(
                 text = (response.text or "").strip().lower()
                 if text in {"true", "1", "preempted"}:
                     logger.warning("Spot preemption detected for current Batch task")
-                    _update_job_execution_metadata({
-                        "batch": {
-                            "preempted": True,
-                            "last_preempted_at": datetime.now(timezone.utc).isoformat(),
-                        }
+                    _record_preemption_event({
+                        "preempted": True,
+                        "last_preempted_at": datetime.now(timezone.utc).isoformat(),
                     })
                     return
             elif response.status_code in {410, 412}:
                 # As per metadata docs, these may indicate preemption depending on rollout
                 logger.warning("Spot preemption metadata returned status %s", response.status_code)
-                _update_job_execution_metadata({
-                    "batch": {
-                        "preempted": True,
-                        "last_preempted_at": datetime.now(timezone.utc).isoformat(),
-                        "preemption_status_code": response.status_code,
-                    }
+                _record_preemption_event({
+                    "preempted": True,
+                    "last_preempted_at": datetime.now(timezone.utc).isoformat(),
+                    "preemption_status_code": response.status_code,
                 })
                 return
         except requests.RequestException as exc:  # pragma: no cover - network errors are best-effort
@@ -936,7 +920,11 @@ def _build_failure_classify_detail(error_type: Optional[str], base_detail: Optio
 
 
 
-def _build_supabase_client():
+def _get_supabase_credentials() -> Tuple[str, str, bool]:
+    global _SUPABASE_CREDENTIALS
+    if _SUPABASE_CREDENTIALS is not None:
+        return _SUPABASE_CREDENTIALS
+
     use_test_credentials = _is_test_mode_enabled()
     if use_test_credentials:
         url_env = 'SUPABASE_URL_TEST'
@@ -955,8 +943,55 @@ def _build_supabase_client():
     if not str(url).startswith('https://'):
         raise ValueError(f'{url_env} must start with https://')
 
+    _SUPABASE_CREDENTIALS = (url, key, use_test_credentials)
+    return _SUPABASE_CREDENTIALS
+
+
+def _build_supabase_client():
+    url, key, use_test_credentials = _get_supabase_credentials()
     logger.info("Supabase client initialized for %s mode", "test" if use_test_credentials else "production")
     return create_client(url, key)
+
+
+def _get_job_execution_repository() -> JobExecutionRepository:
+    global _JOB_EXECUTION_REPOSITORY
+    if _JOB_EXECUTION_REPOSITORY is None:
+        url, key, _ = _get_supabase_credentials()
+        _JOB_EXECUTION_REPOSITORY = JobExecutionRepository(url=url, key=key)
+    return _JOB_EXECUTION_REPOSITORY
+
+
+def _next_preemption_count() -> Optional[int]:
+    if not JOB_EXECUTION_ID:
+        return None
+    try:
+        repository = _get_job_execution_repository()
+        record = repository.get_execution(JOB_EXECUTION_ID)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.debug("Failed to fetch execution metadata for preemption count: %s", exc)
+        return None
+
+    if not isinstance(record, dict):
+        return 1
+
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        return 1
+
+    batch_meta = metadata.get("batch") if isinstance(metadata.get("batch"), dict) else {}
+    current = batch_meta.get("preemption_count") if isinstance(batch_meta, dict) else None
+    current_int = _coerce_to_int(current)
+    if current_int is None or current_int < 0:
+        return 1
+    return current_int + 1
+
+
+def _record_preemption_event(extra: Dict[str, Any]) -> None:
+    payload = dict(extra)
+    next_count = _next_preemption_count()
+    if next_count is not None:
+        payload.setdefault("preemption_count", next_count)
+    _update_job_execution_metadata({"batch": payload})
 
 def _extract_max_daily_sends(client_data: Dict[str, Any]) -> Optional[int]:
     """max_daily_sends を安全に抽出（正の整数のみ有効）"""

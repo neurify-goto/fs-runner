@@ -97,8 +97,9 @@
 2. 左メニューの **SQL Editor** を開き、「New query」をクリック。
 3. `scripts/table_schema/job_executions.sql` の内容をコピーして貼り付け、「Run」を実行。
 4. 同様に `send_queue_test.sql`、`submissions_test.sql` を順に実行。
-5. 画面上部の `Saved queries` に保存しておくと、再実行時に便利です。
-6. 次に `scripts/functions/` 以下の各 SQL を同じ手順で実行し、成功メッセージ（`SUCCESS`）が表示されることを確認します。
+5. Cloud Batch 連携向けのメタデータ正規化マイグレーション `scripts/migrations/202510_gcp_batch_execution_metadata.sql` を実行し、`execution_mode` 列と `metadata.batch` 構造を整備します。
+6. 画面上部の `Saved queries` に保存しておくと、再実行時に便利です。
+7. 次に `scripts/functions/` 以下の各 SQL を同じ手順で実行し、成功メッセージ（`SUCCESS`）が表示されることを確認します。
 
 ### 3.2 CLI での一括適用例
 CLI を使用する場合は、以下のように `psql` または Supabase CLI で一括適用できます。`<SUPABASE_DB_URL>` には Supabase プロジェクトの `postgresql://` 接続文字列を指定してください。
@@ -110,6 +111,7 @@ psql "$SUPABASE_DB_URL" -f scripts/table_schema/submissions.sql          # 部�
 psql "$SUPABASE_DB_URL" -f scripts/table_schema/job_executions.sql
 psql "$SUPABASE_DB_URL" -f scripts/table_schema/send_queue_test.sql
 psql "$SUPABASE_DB_URL" -f scripts/table_schema/submissions_test.sql
+psql "$SUPABASE_DB_URL" -f scripts/migrations/202510_gcp_batch_execution_metadata.sql
 
 # RPC 群を適用
 for file in scripts/functions/create_queue_for_targeting_step_test.sql \
@@ -428,6 +430,20 @@ DISPATCHER_SUPABASE_SERVICE_ROLE_KEY=projects/${PROJECT_ID}/secrets/SUPABASE_SER
 - Cloud Run コンソールで `form-sender-dispatcher` の URL をコピー。
 - Cloud Tasks からの HTTP タスクで OIDC トークンを付与するため、`FORM_SENDER_DISPATCHER_SERVICE_ACCOUNT` に `roles/iam.serviceAccountTokenCreator` を付与。
 - GAS 側で Script Properties に `FORM_SENDER_TASKS_QUEUE` と `FORM_SENDER_DISPATCHER_URL`（もしくは `FORM_SENDER_DISPATCHER_BASE_URL`）を設定します（詳しくは §6 を参照）。
+
+---
+
+### 5.8 Cloud Batch 用コンフィグのメンテナンス
+Cloud Batch 実行に関する設定は下記 2 ファイルに分散しています。
+
+- `config/gcp_batch.json`: プリエンプション監視や待機ポリシーを制御します。
+  - `preemption.endpoint` / `header_*`: Spot VM がプリエンプトされたかを判定するために Runner がポーリングする Metadata Server 情報です。独自のプロキシやスタブに差し替える場合はここを更新してください。
+  - `preemption.initial_backoff_seconds` / `max_backoff_seconds`: プリエンプションチェックのバックオフ値。長時間バッチの待機ポリシーに合わせて調整できます。
+- `config/worker_config.json` の `batch_env_aliases`: Cloud Batch が注入する環境変数名のエイリアスを定義しています。リージョンや API 変更に伴いキー名が変わった場合は、こちらを更新することで Runner / dispatcher の双方に反映されます。
+- Supabase `job_executions.metadata` では dispatcher が最新の `client_config_ref` を保持し、Cloud Batch 実行時には初回投入時点で `metadata.batch.latest_signed_url` に同値を記録し、その後の再署名でも同キーを更新します。直前の署名 URL をフォールバックとして再利用できるため、GCS 署名生成に一時的な失敗があっても dispatcher 側で再署名できます。
+- Runner はプリエンプション検知ごとに `metadata.batch.preemption_count` をインクリメントし `last_preempted_at` を更新します。Spot 割り込み件数の可視化ではこのカウンタを参照してください。
+
+いずれのファイルも更新後は `src/utils/gcp_batch.py` が参照キャッシュを持つため、単体テスト（`pytest tests/test_gcp_batch_meta.py`）もしくは Runner 再起動で反映させてください。設定値はリポジトリにコミットされるため、環境ごとの差分がある場合はブランチもしくは CI で明示的に管理します。
 
 ---
 

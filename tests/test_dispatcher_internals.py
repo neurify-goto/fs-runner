@@ -17,11 +17,16 @@ SRC_DIR = ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from google.api_core import exceptions as gcloud_exceptions
+
 from dispatcher.config import DispatcherSettings
 from dispatcher.schemas import ExecutionConfig, FormSenderTask, Metadata, SignedUrlRefreshRequest, TableConfig
 from dispatcher.service import DispatcherService
 from dispatcher.gcp import CloudBatchJobRunner, CloudRunJobRunner, SignedUrlManager
+import dispatcher.gcp as gcp_module
 
+
+from dispatcher.supabase_client import JobExecutionRepository
 
 def _task_payload_dict(
     issue_time: datetime,
@@ -433,6 +438,7 @@ def test_cancel_execution_falls_back_when_run_metadata_stub(monkeypatch):
             },
         },
         update_status=lambda *args, **kwargs: None,
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
 
     # Replace RunJobMetadata with stub lacking DESCRIPTOR
@@ -484,8 +490,9 @@ def test_handle_form_sender_task_preserves_execution_id(monkeypatch):
         insert_execution=_insert_execution,
         update_status=lambda *args, **kwargs: None,
         update_metadata=lambda job_execution_id, metadata: {"execution_id": job_execution_id, "metadata": metadata},
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
-    service._signed_url_manager = SimpleNamespace(ensure_fresh=lambda task: "https://example.com/config.json")
+    service._signed_url_manager = SimpleNamespace(ensure_fresh=lambda task, **kwargs: "https://example.com/config.json")
 
     operation = SimpleNamespace(name="operations/op-1", metadata=SimpleNamespace(name="projects/demo/locations/asia/jobs/form/executions/exe"))
     service._job_runner = SimpleNamespace(
@@ -513,6 +520,123 @@ def test_handle_form_sender_task_preserves_execution_id(monkeypatch):
     assert captured_env["JOB_EXECUTION_ID"] == provided_execution_id
 
 
+def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypatch):
+    issue_time = datetime.now(timezone.utc)
+    payload_dict = _task_payload_dict(issue_time, execution_id=None)
+    payload_dict["mode"] = "batch"
+    payload_dict["batch"] = {"enabled": True, "max_parallelism": 2}
+    task = FormSenderTask.parse_obj(payload_dict)
+
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender-runner",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="form-sender",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+    )
+
+    stored_url = "https://example.com/latest-signed"
+    captured_override: dict[str, Optional[str]] = {}
+
+    def _insert_execution(job_execution_id, payload, cloud_run_operation, cloud_run_execution=None, execution_mode="cloud_run"):
+        return {"execution_id": job_execution_id, "metadata": {"execution_mode": execution_mode}}
+
+    patched_metadata: list[Dict[str, Any]] = []
+
+    def _update_metadata(execution_id, metadata):
+        patched_metadata.append(metadata)
+        return {"execution_id": execution_id, "metadata": metadata}
+
+    service = object.__new__(DispatcherService)
+    service._settings = settings
+    service._supabase = SimpleNamespace(
+        find_active_execution=lambda targeting_id, run_index_base: None,
+        find_latest_signed_url=lambda targeting_id, client_config_object: stored_url,
+        insert_execution=_insert_execution,
+        update_status=lambda *args, **kwargs: None,
+        update_metadata=_update_metadata,
+    )
+
+    def _capture_signed_url(task_obj, **kwargs):
+        captured_override["override_url"] = kwargs.get("override_url")
+        return "https://example.com/refreshed"
+
+    service._signed_url_manager = SimpleNamespace(ensure_fresh=_capture_signed_url)
+
+    def _ensure_runner(self):
+        job = SimpleNamespace(name="projects/proj/locations/asia/jobs/form-sender/jobs/job123", task_groups=[SimpleNamespace(name="group0")])
+        meta = {
+            "machine_type": "n2d-custom-4-10240",
+            "cpu_milli": 4000,
+            "memory_mb": 10240,
+            "memory_buffer_mb": 2048,
+            "prefer_spot": True,
+            "allow_on_demand": True,
+            "parallelism": 2,
+            "array_size": task.execution.run_total,
+        }
+        return SimpleNamespace(run_job=lambda **kwargs: (job, meta))
+
+    service._ensure_batch_runner = MethodType(_ensure_runner, service)
+    service._job_runner = None
+    service._secret_manager = None
+    service._build_env = MethodType(lambda self, task_obj, job_execution_id, signed_url: {"JOB_EXECUTION_ID": job_execution_id}, service)
+
+    response = service.handle_form_sender_task(task)
+
+    assert captured_override.get("override_url") == stored_url
+    assert response["batch_job_name"].endswith("job123")
+    assert patched_metadata
+    assert patched_metadata[0]["batch"]["latest_signed_url"] == "https://example.com/refreshed"
+
+
+def test_find_latest_signed_url_falls_back_to_client_config_ref():
+    fallback_url = "https://example.com/fallback"
+    metadata = {
+        "client_config_object": "gs://fs-bucket/config.json",
+        "client_config_ref": fallback_url,
+    }
+    data = [{"metadata": metadata}]
+
+    class _FakeSelect:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def select(self, *args, **kwargs):
+            return self
+
+        def eq(self, *args, **kwargs):
+            return self
+
+        def order(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=self._payload)
+
+    repo = object.__new__(JobExecutionRepository)
+    repo._client = SimpleNamespace(table=lambda _: _FakeSelect(data))  # type: ignore[attr-defined]
+
+    result = JobExecutionRepository.find_latest_signed_url(
+        repo,
+        targeting_id=42,
+        client_config_object="gs://fs-bucket/config.json",
+    )
+
+    assert result == fallback_url
+
+
 def test_dispatcher_list_executions_returns_public_fields():
     service = object.__new__(DispatcherService)
     executions = [
@@ -533,7 +657,10 @@ def test_dispatcher_list_executions_returns_public_fields():
             },
         }
     ]
-    service._supabase = SimpleNamespace(list_executions=lambda status, targeting_id: executions)
+    service._supabase = SimpleNamespace(
+        list_executions=lambda status, targeting_id: executions,
+        find_latest_signed_url=lambda *args, **kwargs: None,
+    )
     result = service.list_executions()
     assert result["executions"][0]["execution_id"] == "exec-1"
     assert result["executions"][0]["metadata"]["cloud_run_execution"].endswith("/executions/foo")
@@ -554,6 +681,7 @@ def test_dispatcher_cancel_execution_success(monkeypatch):
         },
         update_status=lambda exec_id, status, ended_at=None: updates.append((exec_id, status, ended_at)),
         list_executions=lambda status, targeting_id: [],
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
     called = {}
     service._job_runner = SimpleNamespace(cancel_execution=lambda **kwargs: called.setdefault("args", kwargs))
@@ -571,6 +699,7 @@ def test_dispatcher_cancel_execution_requires_identifier():
     service._supabase = SimpleNamespace(
         get_execution=lambda exec_id: {"execution_id": exec_id, "status": "running", "metadata": {}},
         list_executions=lambda status, targeting_id: [],
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
 
     with pytest.raises(HTTPException) as exc:
@@ -583,6 +712,7 @@ def test_dispatcher_cancel_execution_batch_missing_identifier():
     service._supabase = SimpleNamespace(
         get_execution=lambda exec_id: {"execution_id": exec_id, "status": "running", "metadata": {"execution_mode": "batch"}},
         list_executions=lambda status, targeting_id: [],
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
 
     with pytest.raises(HTTPException) as exc:
@@ -606,6 +736,7 @@ def test_dispatcher_cancel_execution_batch_success():
         },
         update_status=lambda *args, **kwargs: None,
         list_executions=lambda status, targeting_id: [],
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
 
     def _ensure_runner(self):
@@ -624,6 +755,7 @@ def test_dispatcher_cancel_execution_noop_for_non_running():
     service._supabase = SimpleNamespace(
         get_execution=lambda exec_id: {"execution_id": exec_id, "status": "succeeded", "metadata": {}},
         list_executions=lambda status, targeting_id: [],
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
 
     response = service.cancel_execution("exec-2")
@@ -637,7 +769,8 @@ def test_refresh_signed_url_updates_metadata():
         refresh_for_object=lambda uri, ttl_hours=None: "https://example.com/new-url"
     )
     service._supabase = SimpleNamespace(
-        update_metadata=lambda execution_id, metadata: refreshed_urls.append((execution_id, metadata))
+        update_metadata=lambda execution_id, metadata: refreshed_urls.append((execution_id, metadata)),
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
 
     request = SignedUrlRefreshRequest(
@@ -737,15 +870,22 @@ def test_handle_form_sender_task_batch(monkeypatch):
         inserted.append(execution_mode)
         return {"execution_id": job_execution_id, "metadata": {"execution_mode": execution_mode}}
 
+    patched_metadata: list[Dict[str, Any]] = []
+
+    def _update_metadata(execution_id, metadata):
+        patched_metadata.append(metadata)
+        return {"execution_id": execution_id, "metadata": metadata}
+
     service = object.__new__(DispatcherService)
     service._settings = settings
     service._supabase = SimpleNamespace(
         find_active_execution=lambda targeting_id, run_index_base: None,
         insert_execution=_insert,
         update_status=lambda *args, **kwargs: None,
-        update_metadata=lambda execution_id, metadata: {"execution_id": execution_id, "metadata": metadata},
+        update_metadata=_update_metadata,
+        find_latest_signed_url=lambda *args, **kwargs: None,
     )
-    service._signed_url_manager = SimpleNamespace(ensure_fresh=lambda task: "https://example.com/config.json")
+    service._signed_url_manager = SimpleNamespace(ensure_fresh=lambda task, **kwargs: "https://example.com/config.json")
 
     def _ensure_runner(self):
         job = SimpleNamespace(name="projects/proj/locations/asia-northeast1/jobs/form-sender/jobs/job123", task_groups=[SimpleNamespace(name="group0")])
@@ -775,10 +915,67 @@ def test_handle_form_sender_task_batch(monkeypatch):
     assert response["batch"]["job_name"].endswith("job123")
     assert response["batch_job_name"].endswith("job123")
     assert response["batch"]["array_size"] == task.execution.run_total
+    assert patched_metadata
+    assert patched_metadata[0]["batch"]["latest_signed_url"] == "https://example.com/config.json"
     assert response["batch"]["attempts"] == 3
     assert response["batch"]["max_retry_count"] == 2
     assert response["batch"]["memory_buffer_mb"] == 2048
     assert inserted == ["batch"]
+
+
+def test_batch_runner_raises_when_job_template_missing(monkeypatch):
+    class _StubBatchClient:
+        def __init__(self, *args, **kwargs):
+            self.created: list[Any] = []
+
+        def get_job(self, name):
+            raise gcloud_exceptions.NotFound("template missing")
+
+        def create_job(self, *args, **kwargs):  # pragma: no cover - not reached
+            job_name = kwargs.get("job_id", "job")
+            job_path = f"projects/demo/locations/asia-northeast1/jobs/{job_name}"
+            record = SimpleNamespace(name=job_path, task_groups=[])
+            self.created.append(record)
+            return record
+
+        def delete_job(self, name):  # pragma: no cover - not reached
+            return None
+
+    monkeypatch.setattr(gcp_module.batch_v1, "BatchServiceClient", lambda *args, **kwargs: _StubBatchClient())
+
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="projects/proj/locations/asia-northeast1/jobs/form-sender-template",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia/artifact/form-sender:latest",
+        batch_supabase_url_secret="projects/proj/secrets/url",
+        batch_supabase_service_role_secret="projects/proj/secrets/key",
+    )
+    runner = CloudBatchJobRunner(settings)
+
+    payload = _task_payload_dict(datetime.now(timezone.utc))
+    payload["mode"] = "batch"
+    payload["batch"] = {"enabled": True}
+    task = FormSenderTask.parse_obj(payload)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        runner.run_job(
+            task=task,
+            env_vars={},
+            task_count=task.execution.run_total,
+            parallelism=task.effective_parallelism(),
+        )
+
+    assert "job template" in str(excinfo.value)
 
 
 def test_calculate_resources_warns_when_memory_below_recommendation(caplog):

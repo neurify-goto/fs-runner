@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,9 @@ from .config import DispatcherSettings, get_settings
 from .gcp import CloudBatchJobRunner, CloudRunJobRunner, SecretManager, SignedUrlManager
 from .schemas import FormSenderTask, SignedUrlRefreshRequest
 from .supabase_client import JobExecutionRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 class DispatcherService:
@@ -38,8 +42,18 @@ class DispatcherService:
                 "job_execution_id": existing["execution_id"],
             }
 
+        fallback_signed_url: Optional[str] = None
+        if task.batch_enabled():
+            try:
+                fallback_signed_url = self._supabase.find_latest_signed_url(
+                    targeting_id=task.targeting_id,
+                    client_config_object=task.client_config_object,
+                )
+            except Exception as exc:  # pragma: no cover - best effort fallback
+                logger.debug("Failed to lookup latest signed URL from Supabase: %s", exc)
+
         try:
-            signed_url = self._signed_url_manager.ensure_fresh(task)
+            signed_url = self._signed_url_manager.ensure_fresh(task, override_url=fallback_signed_url)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -78,6 +92,7 @@ class DispatcherService:
                     "memory_buffer_mb": batch_meta.get("memory_buffer_mb"),
                     "prefer_spot": batch_meta.get("prefer_spot"),
                     "allow_on_demand": batch_meta.get("allow_on_demand"),
+                    "latest_signed_url": signed_url,
                 }
                 task_group_name = None
                 if job.task_groups:
@@ -249,6 +264,7 @@ class DispatcherService:
 
         if request.execution_id:
             metadata_patch = {
+                "client_config_ref": signed_url,
                 "batch": {
                     "latest_signed_url": signed_url,
                     "signed_url_refreshed_at": datetime.now(timezone.utc).isoformat(),

@@ -95,7 +95,7 @@ def _resolve_first_int(alias_names: Iterable[str], environ: os._Environ[str] | D
 def extract_batch_meta(environ: os._Environ[str] | Dict[str, str] | None = None) -> BatchMeta:
     """Return Batch metadata (task index / attempt / array size) from environment."""
 
-    source = environ or os.environ
+    source = os.environ if environ is None else environ
     task_index = _resolve_first_int(_get_aliases("task_index"), source)
     attempt = _resolve_first_int(_get_aliases("attempt"), source)
     array_size = _resolve_first_int(_get_aliases("array_size"), source)

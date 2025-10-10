@@ -38,12 +38,12 @@ class SignedUrlManager:
         self._storage = storage_client
         self._settings = settings
 
-    def ensure_fresh(self, task: FormSenderTask) -> str:
+    def ensure_fresh(self, task: FormSenderTask, *, override_url: Optional[str] = None) -> str:
         bucket, blob_name = task.gcs_blob_components()
         if self._settings.client_config_bucket and bucket != self._settings.client_config_bucket:
             raise ValueError("client_config_object bucket が設定と一致しません")
 
-        signed_url = str(task.client_config_ref)
+        signed_url = str(override_url or task.client_config_ref)
         self._validate_signed_url_origin(signed_url, bucket, blob_name)
         ttl_hours, refresh_threshold = self._resolve_signed_url_policy(task)
         should_resign = False
@@ -232,6 +232,7 @@ class CloudBatchJobRunner:
         self._settings.require_batch_configuration()
         self._client = batch_v1.BatchServiceClient()
         self._parent = f"projects/{self._settings.batch_project_id}/locations/{self._settings.batch_location}"
+        self._job_template_cache: Optional[batch_v1.Job] = None
 
     def run_job(
         self,
@@ -257,32 +258,37 @@ class CloudBatchJobRunner:
             for name, resource in self._settings.batch_secret_environment().items()
             if resource
         }
-        environment = batch_v1.Environment(variables=env_vars)
-        if secret_env:
-            self._apply_secret_variables(environment, secret_env)
-        container_spec = batch_v1.Runnable.Container(
-            image=self._settings.batch_container_image,
-        )
-        if self._settings.batch_container_entrypoint:
-            container_spec.entrypoint = self._settings.batch_container_entrypoint
 
-        runnable = batch_v1.Runnable(container=container_spec)
-        compute_resource = batch_v1.ComputeResource(cpu_milli=cpu_milli, memory_mib=memory_mb)
-        task_spec = batch_v1.TaskSpec(
-            runnables=[runnable],
-            environment=environment,
-            compute_resource=compute_resource,
+        job_template = self._get_job_template_copy()
+        template_task_group = None
+        template_logs_policy = None
+        if job_template and job_template.task_groups:
+            template_task_group = job_template.task_groups[0]
+            template_logs_policy = job_template.logs_policy
+
+        task_spec = self._build_task_spec(
+            base_task_spec=template_task_group.task_spec if template_task_group else None,
+            env_vars=env_vars,
+            secret_env=secret_env,
+            cpu_milli=cpu_milli,
+            memory_mb=memory_mb,
+            max_retry_count=max_retry_count,
         )
-        task_spec.max_retry_count = max_retry_count
 
         effective_parallelism = max(1, min(parallelism, task_count))
-        task_group = batch_v1.TaskGroup(
-            task_spec=task_spec,
-            task_count=task_count,
-            parallelism=effective_parallelism,
-        )
+        if template_task_group:
+            task_group = batch_v1.TaskGroup()
+            task_group.CopyFrom(template_task_group)
+            task_group.task_spec = task_spec
+        else:
+            task_group = batch_v1.TaskGroup(task_spec=task_spec)
+        task_group.task_count = task_count
+        task_group.parallelism = effective_parallelism
         if configured_task_group_id:
-            task_group._pb.name = f"{self._parent}/jobs/{job_id}/taskGroups/{configured_task_group_id}"
+            logger.debug(
+                "Configured task group id %s requested, but Cloud Batch does not allow overriding task group names; proceeding with default",
+                configured_task_group_id,
+            )
 
         allocation_policy = self._build_allocation_policy(machine_type, prefer_spot, allow_on_demand)
         labels = {
@@ -299,6 +305,8 @@ class CloudBatchJobRunner:
             allocation_policy=allocation_policy,
             labels=labels,
         )
+        if template_logs_policy:
+            job.logs_policy = template_logs_policy
 
         response = self._client.create_job(parent=self._parent, job=job, job_id=job_id)
         logger.info("Submitted Cloud Batch job", extra={"job_name": response.name})
@@ -314,6 +322,8 @@ class CloudBatchJobRunner:
             "max_retry_count": max_retry_count,
         }
         metadata.update(resource_metadata)
+        if job_template:
+            metadata["job_template"] = job_template.name
         if configured_task_group_id:
             metadata["configured_task_group_id"] = configured_task_group_id
             metadata["task_group_resource_hint"] = f"{self._parent}/jobs/{job_id}/taskGroups/{configured_task_group_id}"
@@ -339,6 +349,103 @@ class CloudBatchJobRunner:
                 return
             logger.warning("Failed to delete Cloud Batch job: %s", exc)
             raise
+
+    def _get_job_template_copy(self) -> Optional[batch_v1.Job]:
+        template_name = self._settings.batch_job_template
+        if not template_name:
+            return None
+
+        if self._job_template_cache is None:
+            try:
+                self._job_template_cache = self._client.get_job(name=template_name)
+            except gcloud_exceptions.NotFound as exc:  # pragma: no cover - network path
+                logger.error(
+                    "Configured Cloud Batch job template '%s' was not found; check FORM_SENDER_BATCH_JOB_TEMPLATE.",
+                    template_name,
+                )
+                raise RuntimeError(
+                    "Cloud Batch job template not found; verify FORM_SENDER_BATCH_JOB_TEMPLATE"
+                ) from exc
+            except gcloud_exceptions.PermissionDenied as exc:  # pragma: no cover - network path
+                logger.error(
+                    "Permission denied when fetching Cloud Batch job template '%s': %s",
+                    template_name,
+                    exc,
+                )
+                raise RuntimeError(
+                    "Insufficient permissions to access Cloud Batch job template"
+                ) from exc
+            except gcloud_exceptions.GoogleAPICallError as exc:  # pragma: no cover - network path
+                logger.error(
+                    "Failed to fetch Cloud Batch job template '%s': %s",
+                    template_name,
+                    exc,
+                )
+                raise RuntimeError(
+                    "Failed to fetch Cloud Batch job template"
+                ) from exc
+            except Exception as exc:  # pragma: no cover - defensive catch
+                logger.error(
+                    "Unexpected error while fetching Cloud Batch job template '%s': %s",
+                    template_name,
+                    exc,
+                )
+                raise RuntimeError(
+                    "Unexpected error while fetching Cloud Batch job template"
+                ) from exc
+
+        if self._job_template_cache is None:
+            return None
+
+        job = batch_v1.Job()
+        job.CopyFrom(self._job_template_cache)
+        return job
+
+    def _build_task_spec(
+        self,
+        *,
+        base_task_spec: Optional[batch_v1.TaskSpec],
+        env_vars: Dict[str, str],
+        secret_env: Dict[str, str],
+        cpu_milli: int,
+        memory_mb: int,
+        max_retry_count: int,
+    ) -> batch_v1.TaskSpec:
+        if base_task_spec is not None:
+            task_spec = batch_v1.TaskSpec()
+            task_spec.CopyFrom(base_task_spec)
+        else:
+            task_spec = batch_v1.TaskSpec()
+
+        if not task_spec.runnables:
+            runnable = batch_v1.Runnable()
+            runnable.container = batch_v1.Runnable.Container()
+            task_spec.runnables.append(runnable)
+
+        runnable = task_spec.runnables[0]
+        if runnable.container is None:
+            runnable.container = batch_v1.Runnable.Container()
+
+        runnable.container.image = self._settings.batch_container_image
+        if self._settings.batch_container_entrypoint:
+            runnable.container.entrypoint = self._settings.batch_container_entrypoint
+
+        environment = task_spec.environment or batch_v1.Environment()
+        if task_spec.environment is None:
+            task_spec.environment = environment
+
+        environment.variables.update({key: str(value) for key, value in env_vars.items()})
+
+        if secret_env:
+            self._apply_secret_variables(environment, secret_env)
+
+        if task_spec.compute_resource is None:
+            task_spec.compute_resource = batch_v1.ComputeResource()
+        task_spec.compute_resource.cpu_milli = cpu_milli
+        task_spec.compute_resource.memory_mib = memory_mb
+
+        task_spec.max_retry_count = max_retry_count
+        return task_spec
 
     def _generate_job_id(self) -> str:
         prefix = self._sanitize_job_prefix(self._settings.batch_job_template)

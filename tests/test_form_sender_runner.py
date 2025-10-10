@@ -1,9 +1,14 @@
 import os
 import sys
 import types
+from typing import Any, Dict
 
 import pytest
 
+
+from shared.supabase.metadata import merge_metadata
+
+from typing import Optional
 
 class _AsyncPlaywrightStub:
     async def __aenter__(self):
@@ -81,6 +86,23 @@ class _FakeSupabase:
         return _FakeQuery(self, _name)
 
 
+class _FakeJobExecutionRepository:
+    def __init__(self, metadata=None):
+        self.metadata = metadata or {}
+        self.patches: list[tuple[str, Dict[str, Any]]] = []
+
+    def patch_metadata(self, execution_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+        self.patches.append((execution_id, patch))
+        merged = merge_metadata(self.metadata, patch)
+        self.metadata = merged
+        return {"execution_id": execution_id, "metadata": merged}
+
+    def get_execution(self, execution_id: str) -> Optional[Dict[str, Any]]:
+        if self.metadata is None:
+            return None
+        return {"execution_id": execution_id, "metadata": dict(self.metadata)}
+
+
 @pytest.fixture(autouse=True)
 def _reset_globals(monkeypatch):
     original_job_execution_id = runner.JOB_EXECUTION_ID
@@ -91,6 +113,8 @@ def _reset_globals(monkeypatch):
     original_batch_attempt = runner._CURRENT_BATCH_ATTEMPT
     original_preemption_stop = runner._PREEMPTION_STOP
     original_preemption_thread = runner._PREEMPTION_THREAD
+    original_repository = runner._JOB_EXECUTION_REPOSITORY
+    original_credentials = runner._SUPABASE_CREDENTIALS
     runner._get_cpu_profile_settings.cache_clear()
     try:
         yield
@@ -103,6 +127,8 @@ def _reset_globals(monkeypatch):
         runner._CURRENT_BATCH_ATTEMPT = original_batch_attempt
         runner._PREEMPTION_STOP = original_preemption_stop
         runner._PREEMPTION_THREAD = original_preemption_thread
+        runner._JOB_EXECUTION_REPOSITORY = original_repository
+        runner._SUPABASE_CREDENTIALS = original_credentials
         if original_cpu_class is None:
             os.environ.pop("FORM_SENDER_CPU_CLASS", None)
         else:
@@ -134,14 +160,26 @@ def test_mark_job_failed_once_only_updates_first_time(monkeypatch):
 
 
 def test_update_job_execution_metadata_merges(monkeypatch):
-    supabase = _FakeSupabase(status="running")
-    supabase.metadata = {"foo": "bar"}
-    monkeypatch.setattr(runner, "_build_supabase_client", lambda: supabase)
+    repository = _FakeJobExecutionRepository(metadata={"foo": "bar"})
+    monkeypatch.setattr(runner, "_get_job_execution_repository", lambda: repository)
     runner.JOB_EXECUTION_ID = "exec-789"
 
     runner._update_job_execution_metadata({"empty_finish": True})
 
-    assert supabase.metadata == {"foo": "bar", "empty_finish": True}
+    assert repository.metadata == {"foo": "bar", "empty_finish": True}
+    assert repository.patches == [("exec-789", {"empty_finish": True})]
+
+
+def test_record_preemption_event_increments(monkeypatch):
+    repository = _FakeJobExecutionRepository(metadata={"batch": {"preemption_count": 2}})
+    monkeypatch.setattr(runner, "_get_job_execution_repository", lambda: repository)
+    runner.JOB_EXECUTION_ID = "exec-789"
+
+    runner._record_preemption_event({"preempted": True})
+
+    assert repository.metadata["batch"]["preemption_count"] == 3
+    last_patch = repository.patches[-1][1]
+    assert last_patch["batch"]["preemption_count"] == 3
 
 
 def test_resolve_worker_count_respects_cpu_profile(monkeypatch):
