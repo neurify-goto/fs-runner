@@ -4,6 +4,7 @@ import logging
 import math
 import re
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
@@ -258,8 +259,7 @@ class CloudBatchJobRunner:
         }
         environment = batch_v1.Environment(variables=env_vars)
         if secret_env:
-            for name, resource in secret_env.items():
-                environment.secret_variables[name] = resource
+            self._apply_secret_variables(environment, secret_env)
         container_spec = batch_v1.Runnable.Container(
             image=self._settings.batch_container_image,
         )
@@ -504,3 +504,77 @@ class CloudBatchJobRunner:
             instances=instances,
             service_account=service_account,
         )
+
+    def _apply_secret_variables(self, environment: batch_v1.Environment, secrets: Dict[str, str]) -> None:
+        if not secrets:
+            return
+
+        expects_message, secret_message_cls, secret_manager_cls = self._resolve_secret_message_types()
+        for name, resource in secrets.items():
+            if not resource:
+                continue
+            if expects_message:
+                secret_value = self._build_secret_message(secret_message_cls, secret_manager_cls, resource)
+                environment.secret_variables[name] = secret_value
+            else:
+                environment.secret_variables[name] = resource
+
+    @staticmethod
+    def _build_secret_message(secret_message_cls, secret_manager_cls, version_name: str):
+        if secret_message_cls is None:
+            raise RuntimeError("Batch client expects Secret messages but type resolution failed")
+
+        secret_message = secret_message_cls()
+
+        if secret_manager_cls is not None:
+            secret_manager = secret_manager_cls()
+            if hasattr(secret_manager, "version_name"):
+                setattr(secret_manager, "version_name", version_name)
+            else:
+                raise RuntimeError("Batch SecretManagerSecret message is missing version_name field")
+
+            if hasattr(secret_message, "secret_manager"):
+                try:
+                    secret_message.secret_manager.CopyFrom(secret_manager)
+                except AttributeError:
+                    secret_message.secret_manager = secret_manager
+            else:
+                raise RuntimeError("Batch Secret message is missing secret_manager field")
+        elif hasattr(secret_message, "version_name"):
+            setattr(secret_message, "version_name", version_name)
+        else:
+            raise RuntimeError("Unsupported Batch Secret message schema")
+
+        return secret_message
+
+    @classmethod
+    @lru_cache(maxsize=1)
+    def _resolve_secret_message_types(cls) -> tuple[bool, Optional[Any], Optional[Any]]:
+        value_field = cls._secret_value_field()
+        if value_field is None:
+            return False, None, None
+
+        if value_field.message_type is None:
+            return False, None, None
+
+        secret_message_cls = getattr(value_field.message_type, "_concrete_class", None)
+        if secret_message_cls is None:
+            logger.debug("Batch secret value field lacks concrete class; falling back to strings")
+            return False, None, None
+
+        secret_manager_cls = None
+        secret_manager_field = value_field.message_type.fields_by_name.get("secret_manager")
+        if secret_manager_field and secret_manager_field.message_type is not None:
+            secret_manager_cls = getattr(secret_manager_field.message_type, "_concrete_class", None)
+
+        return True, secret_message_cls, secret_manager_cls
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _secret_value_field():
+        try:
+            env_descriptor = batch_v1.Environment()._pb.DESCRIPTOR
+            secret_field = env_descriptor.fields_by_name["secret_variables"]
+            return secret_field.message_type.fields_by_name["value"]
+        except Exception:
+            return None

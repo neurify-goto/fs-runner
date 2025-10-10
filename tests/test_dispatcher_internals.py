@@ -863,6 +863,36 @@ def test_calculate_resources_honours_payload_memory_buffer():
     assert metadata["memory_buffer_mb"] == 4096
 
 
+def test_apply_secret_variables_defaults_to_plain_strings():
+    from google.cloud import batch_v1
+
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="projects/proj/locations/asia-northeast1/jobs/template",
+        batch_task_group="form-sender-workers",
+        batch_service_account_email="batch-sa@proj.iam.gserviceaccount.com",
+        batch_container_image="asia-northeast1-docker.pkg.dev/proj/repo/image:latest",
+        batch_supabase_url_secret="projects/proj/secrets/url",
+        batch_supabase_service_role_secret="projects/proj/secrets/key",
+    )
+    runner = CloudBatchJobRunner(settings)
+
+    environment = batch_v1.Environment()
+    secret_path = "projects/proj/secrets/service-role/versions/latest"
+
+    runner._apply_secret_variables(environment, {"SUPABASE_SERVICE_ROLE_KEY": secret_path})
+
+    assert environment.secret_variables["SUPABASE_SERVICE_ROLE_KEY"] == secret_path
+
+
 def test_batch_mode_normalized_when_batch_payload_present():
     issue_time = datetime.now(timezone.utc)
     payload = _task_payload_dict(issue_time)
