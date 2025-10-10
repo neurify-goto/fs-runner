@@ -29,6 +29,21 @@
 
 > 💡 **TIP**: 4〜6 の値は Terraform と GitHub Actions でも利用するので、`.env` や `terraform.tfvars` にまとめておくと後続作業がスムーズです。
 
+### 2.1 GCP API の有効化
+
+Cloud Batch へジョブを投入する前に、対象プロジェクトで必要な API を必ず有効化してください。特に `batch.googleapis.com` が無効だと Terraform や `gcloud batch jobs submit` が失敗します。
+
+```bash
+gcloud services enable \
+  batch.googleapis.com \
+  compute.googleapis.com \
+  run.googleapis.com \
+  cloudtasks.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  iamcredentials.googleapis.com
+```
+
 ---
 
 ## 3. リポジトリ準備 & 依存ライブラリ
@@ -37,8 +52,10 @@
    ```bash
    git clone git@github.com:neurify-goto/fs-runner.git
    cd fs-runner
-   git checkout feature/gcp-batch-implementation   # 運用ブランチへ切り替え
+   git checkout main   # 運用環境に合わせて適切なブランチへ切り替え
    ```
+
+> ℹ️ 本番用に別ブランチを運用している場合は、必要に応じて該当ブランチへ切り替えてから作業を進めてください。
 
 2. Python 依存をインストールします。
    ```bash
@@ -74,6 +91,61 @@ Cloud Batch では `job_executions.metadata.batch` を新しく利用するた�
 
 - Cloud Batch から Supabase へ接続するため、Secret Manager に Service Role Key を格納します (後述の Terraform で利用)。
 - 本番／ステージングを分ける場合は `FORM_SENDER_BATCH_SUPABASE_URL_SECRET` / `..._SERVICE_ROLE_SECRET` / `..._TEST_SECRET` をそれぞれ設定します。
+
+#### 4.2.1 Secret Manager 登録手順 (例)
+
+```bash
+# プロジェクトとサービスアカウントは環境に合わせて読み替えてください
+export PROJECT_ID="fs-prod-001"
+export SECRET_ID="form_sender_supabase_service_role"
+
+# シークレット本体を作成（初回のみ）
+gcloud secrets create ${SECRET_ID} \
+  --project=${PROJECT_ID} \
+  --replication-policy="automatic"
+
+# 値を登録（JSON や文字列をファイル経由でアップロード）
+echo "<SUPABASE_SERVICE_ROLE_KEY>" > /tmp/service-role.key
+gcloud secrets versions add ${SECRET_ID} \
+  --project=${PROJECT_ID} \
+  --data-file=/tmp/service-role.key
+
+# Cloud Batch / Dispatcher から参照するサービスアカウントにアクセス権を付与
+export BATCH_SA="form-sender-batch@${PROJECT_ID}.iam.gserviceaccount.com"
+export DISPATCHER_SA="form-sender-dispatcher@${PROJECT_ID}.iam.gserviceaccount.com"
+for SA in ${BATCH_SA} ${DISPATCHER_SA}; do
+  gcloud secrets add-iam-policy-binding ${SECRET_ID} \
+    --project=${PROJECT_ID} \
+    --member="serviceAccount:${SA}" \
+    --role="roles/secretmanager.secretAccessor"
+done
+```
+
+> ℹ️ Terraform の `supabase_secret_names` に `projects/<project>/secrets/<name>` を列挙すると、Cloud Batch テンプレートへ自動で環境変数が注入されます。
+
+Supabase URL も同様にシークレットへ格納しておきます（Dispatcher 側の必須値）。
+
+```bash
+export URL_SECRET_ID="form_sender_supabase_url"
+echo "https://<YOUR_PROJECT>.supabase.co" > /tmp/supabase-url.txt
+
+gcloud secrets create ${URL_SECRET_ID} \
+  --project=${PROJECT_ID} \
+  --replication-policy="automatic"
+
+gcloud secrets versions add ${URL_SECRET_ID} \
+  --project=${PROJECT_ID} \
+  --data-file=/tmp/supabase-url.txt
+
+for SA in ${BATCH_SA} ${DISPATCHER_SA}; do
+  gcloud secrets add-iam-policy-binding ${URL_SECRET_ID} \
+    --project=${PROJECT_ID} \
+    --member="serviceAccount:${SA}" \
+    --role="roles/secretmanager.secretAccessor"
+done
+```
+
+> 🔐 Supabase 別環境（ステージング等）を利用する場合は `_TEST_SECRET` 用にも同様の手順を実施してください。
 
 ---
 
@@ -154,11 +226,54 @@ terraform apply
 - Artifact Registry リポジトリ  
 - Cloud Run dispatcher サービス + Cloud Tasks キュー  
 - 各種 Service Account と IAM 付与 (`roles/run.invoker`, `roles/secretmanager.secretAccessor` など)  
-- Batch テンプレート環境変数: `FORM_SENDER_ENV=gcp_batch`, `FORM_SENDER_LOG_SANITIZE=1`, `FORM_SENDER_DISPATCHER_*`
+- Batch テンプレート環境変数: `FORM_SENDER_ENV=gcp_batch`, `FORM_SENDER_LOG_SANITIZE=1`, `FORM_SENDER_DISPATCHER_BASE_URL`, `FORM_SENDER_DISPATCHER_AUDIENCE`
 
 ---
 
 ## 6. コンテナイメージのビルド & GitHub Actions 設定
+
+### 6.0 GitHub Actions Workload Identity Federation の準備
+
+GitHub Actions から GCP へ接続する際は、Workload Identity Federation (WIF) を利用します。以下は最小構成の例です。
+
+```bash
+export PROJECT_ID="fs-prod-001"
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+export POOL_ID="fs-runner-gha"
+export PROVIDER_ID="github"
+export SERVICE_ACCOUNT_EMAIL="form-sender-terraform@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# 1. Workload Identity Pool と Provider を作成
+gcloud iam workload-identity-pools create ${POOL_ID} \
+  --project=${PROJECT_ID} \
+  --location="global" \
+  --display-name="GitHub Actions Pool"
+
+gcloud iam workload-identity-pools providers create-oidc ${PROVIDER_ID} \
+  --project=${PROJECT_ID} \
+  --location="global" \
+  --workload-identity-pool=${POOL_ID} \
+  --display-name="GitHub" \
+  --attribute-mapping="google.subject=assertion.sub" \
+  --issuer-uri="https://token.actions.githubusercontent.com"
+
+# 2. Terraform 実行用のサービスアカウントに WIF バインドを付与
+gcloud iam service-accounts add-iam-policy-binding ${SERVICE_ACCOUNT_EMAIL} \
+  --project=${PROJECT_ID} \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository/neurify-goto/fs-runner" \
+  --role="roles/iam.workloadIdentityUser"
+
+# 3. GitHub Secrets に登録する値を控える
+WORKLOAD_IDENTITY_PROVIDER=$(gcloud iam workload-identity-pools providers describe ${PROVIDER_ID} \
+  --project=${PROJECT_ID} \
+  --location="global" \
+  --workload-identity-pool=${POOL_ID} \
+  --format="value(name)")
+echo "Set GCP_WORKLOAD_IDENTITY_PROVIDER=${WORKLOAD_IDENTITY_PROVIDER}"
+echo "Set GCP_TERRAFORM_SERVICE_ACCOUNT=${SERVICE_ACCOUNT_EMAIL}"
+```
+
+> GitHub 側では `permissions: id-token: write` を有効化済みのため、上記で取得した値を Secrets に設定すれば `google-github-actions/auth@v2` から自動的に利用されます。`attribute.repository` の指定は対象リポジトリ（`owner/name`）に合わせて変更してください。
 
 ### 6.1 ローカルでのビルドとプッシュ
 
@@ -196,27 +311,53 @@ GitHub Actions を手動実行すると `terraform plan` が走り、`workflow_d
 
 ## 7. GAS (Apps Script) 設定
 
-1. GAS エディタ → プロジェクトの Script Properties に以下を追加/更新:
+1. GAS エディタ → プロジェクトの Script Properties を開き、既存の dispatcher 関連設定が空になっていないか必ず確認します。
+   - `FORM_SENDER_TASKS_QUEUE`
+   - `FORM_SENDER_DISPATCHER_URL` または `FORM_SENDER_DISPATCHER_BASE_URL`
+   > これらが未設定の場合、GAS 側は自動的に GitHub Actions 経路へフォールバックし Cloud Batch を利用しません。スポット移行後も Batch 実行が意図せず停止しないよう、移行前後で値を控えておくことを推奨します。
+
+2. GAS エディタで Script Properties に以下を追加/更新:
    - `USE_GCP_BATCH = true`
    - `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT = true`
    - `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = true`
    - `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT = 100`
+   - `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT = n2d-custom-4-10240`
+   - `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT = 1`
+   - `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT = 2048`
+   - `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT = 2048`
    - `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE =` (必要な場合のみ)
    - `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH = 48`
    - `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH = 21600`
+   - `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT = 1`
 
-2. targeting シートに以下の列が存在するか確認し、なければ追加:
+3. targeting シートに以下の列が存在するか確認し、なければ追加:
    - `useGcpBatch`
    - `batch_max_parallelism`
    - `batch_prefer_spot`
-  - `batch_allow_on_demand_fallback`
-  - `batch_machine_type`
-  - `batch_signed_url_ttl_hours`
-  - `batch_signed_url_refresh_threshold_seconds`
-  - `batch_vcpu_per_worker`
-  - `batch_memory_per_worker_mb`
+   - `batch_allow_on_demand_fallback`
+   - `batch_machine_type`
+   - `batch_signed_url_ttl_hours`
+   - `batch_signed_url_refresh_threshold_seconds`
+   - `batch_vcpu_per_worker`
+   - `batch_memory_per_worker_mb`
+   - `batch_max_attempts`
 
-3. `gas/form-sender/Code.gs` の `triggerServerlessFormSenderWorkflow_` は Cloud Batch モードを自動判定します。必要に応じて `resolveExecutionMode_()` を利用し、特定 targeting だけ先行移行する運用が可能です。
+| 項目 | 参照優先度 | 備考 |
+| --- | --- | --- |
+| 実行モード (`useGcpBatch` / `useServerless`) | 1. targeting列 → 2. Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`) → 3. GitHub Actions | `true` / `false` だけでなく `1` / `0` / `yes` も受け付けます。|
+| 並列数 (`batch_max_parallelism`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` → 3. GAS推奨値 | 未入力時は Script Property の既定 (デフォルト 100)。 |
+| Spot 設定 (`batch_prefer_spot`, `batch_allow_on_demand_fallback`) | 1. targeting列 → 2. Script Properties | `prefer_spot=true` で Spot 優先、fallback を false にするとスポット枯渇時に失敗します。 |
+| マシンタイプ (`batch_machine_type`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 3. GAS がワーカー数から自動計算 | 自動計算は `n2d-custom-<workers>-<memory_mb>` 形式 (2GB/worker + 2GB バッファ)。|
+| 署名付き URL TTL (`batch_signed_url_ttl_hours`) | 1. targeting列 → 2. `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` (既定 48h) | 1〜168 の整数を指定。 |
+| 署名付き URL リフレッシュ閾値 (`batch_signed_url_refresh_threshold_seconds`) | 1. targeting列 → 2. `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` (既定 21600 秒) | 60〜604800 の範囲で指定。 |
+| リソース単位 (`batch_vcpu_per_worker`, `batch_memory_per_worker_mb`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` / `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | 未指定時は vCPU=1, メモリ=2048MB（共有バッファとして 2048MB を別途確保）。 |
+| リトライ回数 (`batch_max_attempts`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT` | Cloud Batch タスクの最大試行回数（1 以上）。設定すると dispatcher が `maxRetryCount` を上書きします。 |
+
+   > targeting 列を空にすると Script Properties の値がそのまま使われます。移行初期は Script Properties だけで小さく始め、必要になった Targeting だけ列で上書きする運用が推奨です。
+
+   > ℹ️ `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` で設定したバッファ値は、GAS から dispatcher へ送信される `memory_buffer_mb` フィールドにも埋め込まれます。Cloud Run 側の `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` はフォールバック値として残りますが、Script Properties を更新すれば自動的に Batch 実行へ反映されます。
+
+4. `gas/form-sender/Code.gs` の `triggerServerlessFormSenderWorkflow_` は Cloud Batch モードを自動判定します。必要に応じて `resolveExecutionMode_()` を利用し、特定 targeting だけ先行移行する運用が可能です。
 
 ---
 
@@ -263,4 +404,3 @@ A. `workflow_dispatch` で `apply=true` を指定し、Terraform の plan/apply 
 - 並行期間中は `USE_SERVERLESS_FORM_SENDER` を `true` に保ち、問題が起きた際にすぐ Cloud Run Jobs へ切り戻せる体制を維持する。
 
 セットアップが完了したら、運用手順やブラウザテストの Runbook も更新し、チーム全体で共有してください。分からない点があればこのガイドにメモを残して改善していきましょう。
-

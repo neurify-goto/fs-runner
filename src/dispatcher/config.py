@@ -32,6 +32,8 @@ class DispatcherSettings:
     batch_machine_type_default: Optional[str] = None
     batch_vcpu_per_worker_default: int = 1
     batch_memory_per_worker_mb_default: int = 2048
+    batch_memory_buffer_mb_default: int = 2048
+    batch_max_attempts_default: int = 1
     batch_supabase_url_secret: Optional[str] = None
     batch_supabase_service_role_secret: Optional[str] = None
     batch_supabase_url_test_secret: Optional[str] = None
@@ -127,6 +129,8 @@ class DispatcherSettings:
             batch_machine_type_default=os.getenv("FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT"),
             batch_vcpu_per_worker_default=int(os.getenv("FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT", "1")),
             batch_memory_per_worker_mb_default=int(os.getenv("FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT", "2048")),
+            batch_memory_buffer_mb_default=int(os.getenv("FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT", "2048")),
+            batch_max_attempts_default=int(os.getenv("FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT", "1")),
             batch_supabase_url_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_URL_SECRET"),
             batch_supabase_service_role_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET"),
             batch_supabase_url_test_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET"),

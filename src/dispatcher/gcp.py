@@ -248,15 +248,18 @@ class CloudBatchJobRunner:
             allow_on_demand,
             resource_metadata,
         ) = self._calculate_resources(task)
+        configured_task_group_id = self._sanitize_task_group_id(self._settings.batch_task_group)
+        attempts, max_retry_count = self._resolve_attempts(task)
 
-        secret_env = self._settings.batch_secret_environment()
+        secret_env = {
+            name: resource
+            for name, resource in self._settings.batch_secret_environment().items()
+            if resource
+        }
         environment = batch_v1.Environment(variables=env_vars)
         if secret_env:
-            environment.secret_variables = {
-                name: batch_v1.Secret(secret_version=resource)
-                for name, resource in secret_env.items()
-                if resource
-            }
+            for name, resource in secret_env.items():
+                environment.secret_variables[name] = resource
         container_spec = batch_v1.Runnable.Container(
             image=self._settings.batch_container_image,
         )
@@ -270,6 +273,7 @@ class CloudBatchJobRunner:
             environment=environment,
             compute_resource=compute_resource,
         )
+        task_spec.max_retry_count = max_retry_count
 
         effective_parallelism = max(1, min(parallelism, task_count))
         task_group = batch_v1.TaskGroup(
@@ -277,6 +281,8 @@ class CloudBatchJobRunner:
             task_count=task_count,
             parallelism=effective_parallelism,
         )
+        if configured_task_group_id:
+            task_group._pb.name = f"{self._parent}/jobs/{job_id}/taskGroups/{configured_task_group_id}"
 
         allocation_policy = self._build_allocation_policy(machine_type, prefer_spot, allow_on_demand)
         labels = {
@@ -284,7 +290,9 @@ class CloudBatchJobRunner:
             "targeting_id": str(task.targeting_id),
         }
         if self._settings.batch_job_template:
-            labels["job_template"] = self._settings.batch_job_template
+            labels["job_template"] = self._sanitize_job_prefix(self._settings.batch_job_template)
+        if configured_task_group_id:
+            labels["task_group"] = configured_task_group_id
 
         job = batch_v1.Job(
             task_groups=[task_group],
@@ -301,8 +309,14 @@ class CloudBatchJobRunner:
             "prefer_spot": prefer_spot,
             "allow_on_demand": allow_on_demand,
             "parallelism": effective_parallelism,
+            "array_size": task_count,
+            "attempts": attempts,
+            "max_retry_count": max_retry_count,
         }
         metadata.update(resource_metadata)
+        if configured_task_group_id:
+            metadata["configured_task_group_id"] = configured_task_group_id
+            metadata["task_group_resource_hint"] = f"{self._parent}/jobs/{job_id}/taskGroups/{configured_task_group_id}"
         return response, metadata
 
     def delete_job(self, job_name: str) -> None:
@@ -310,7 +324,19 @@ class CloudBatchJobRunner:
             self._client.delete_job(name=job_name)
         except gcloud_exceptions.NotFound:
             logger.warning("Cloud Batch job already deleted", extra={"job_name": job_name})
+        except gcloud_exceptions.PermissionDenied:
+            logger.warning(
+                "Cloud Batch job deletion returned permission error; treating as already finished",
+                extra={"job_name": job_name},
+            )
         except gcloud_exceptions.GoogleAPICallError as exc:
+            status_code = getattr(exc, "code", None)
+            if status_code == 403:
+                logger.warning(
+                    "Cloud Batch job deletion returned 403; treating as already finished",
+                    extra={"job_name": job_name},
+                )
+                return
             logger.warning("Failed to delete Cloud Batch job: %s", exc)
             raise
 
@@ -334,16 +360,36 @@ class CloudBatchJobRunner:
             value = "form-sender"
         return value
 
+    @staticmethod
+    def _sanitize_task_group_id(task_group: Optional[str]) -> Optional[str]:
+        if not task_group:
+            return None
+        value = task_group.strip().lower()
+        if not value:
+            return None
+        value = re.sub(r"[^a-z0-9-]", "-", value)
+        value = re.sub(r"-+", "-", value).strip("-")
+        if not value:
+            return None
+        if not re.match(r"^[a-z][a-z0-9-]*[a-z0-9]$", value):
+            value = f"group-{value}" if not value.startswith("group-") else value
+            value = re.sub(r"[^a-z0-9-]", "-", value).strip("-")
+        return value or None
+
     def _calculate_resources(self, task: FormSenderTask) -> tuple[str, int, int, bool, bool, Dict[str, Any]]:
         workers = max(1, task.execution.workers_per_workflow)
         batch_opts = task.batch if task.batch else None
         vcpu_per_worker = batch_opts.vcpu_per_worker if batch_opts and batch_opts.vcpu_per_worker else self._settings.batch_vcpu_per_worker_default
         memory_per_worker = batch_opts.memory_per_worker_mb if batch_opts and batch_opts.memory_per_worker_mb else self._settings.batch_memory_per_worker_mb_default
-        buffer_mb = self._settings.batch_memory_per_worker_mb_default
+        if batch_opts and batch_opts.memory_buffer_mb is not None:
+            buffer_mb = max(0, batch_opts.memory_buffer_mb)
+        else:
+            buffer_mb = max(0, self._settings.batch_memory_buffer_mb_default)
 
         vcpu = max(1, vcpu_per_worker) * workers
         total_memory = max(1024, workers * memory_per_worker + buffer_mb)
         memory_mb = int(math.ceil(total_memory / 256.0) * 256)
+        required_memory = memory_mb
         requested_machine_type = batch_opts.machine_type if batch_opts and batch_opts.machine_type else None
         machine_type = requested_machine_type or self._settings.batch_machine_type_default
         if not machine_type:
@@ -352,7 +398,6 @@ class CloudBatchJobRunner:
         prefer_spot = batch_opts.prefer_spot if batch_opts else True
         allow_on_demand = batch_opts.allow_on_demand_fallback if batch_opts else True
 
-        cpu_milli = vcpu * 1000
         metadata: Dict[str, Any] = {}
 
         parsed = self._parse_custom_machine_type(machine_type)
@@ -375,16 +420,42 @@ class CloudBatchJobRunner:
                 fallback_type,
             )
             metadata["memory_warning"] = True
-            metadata["computed_memory_mb"] = memory_mb
+            metadata["computed_memory_mb"] = required_memory
             if requested_machine_type:
                 metadata["requested_machine_type"] = requested_machine_type
             machine_type = fallback_type
+            memory_mb = fallback_memory
+            vcpu = fallback_vcpu
         elif requested_machine_type:
             metadata["requested_machine_type"] = requested_machine_type
 
         metadata["resolved_machine_type"] = machine_type
+        cpu_milli = vcpu * 1000
+        metadata["memory_buffer_mb"] = buffer_mb
+
+        recommended_min_memory = 8192
+        if workers >= 4 and memory_mb < recommended_min_memory:
+            logger.warning(
+                "Computed Batch memory %sMB is below recommended minimum %sMB for workers=%s.",
+                memory_mb,
+                recommended_min_memory,
+                workers,
+            )
+            metadata["memory_warning"] = True
+            metadata["computed_memory_mb"] = memory_mb
+            metadata["recommended_memory_mb"] = recommended_min_memory
 
         return machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand, metadata
+
+    def _resolve_attempts(self, task: FormSenderTask) -> tuple[int, int]:
+        batch_opts = task.batch if task.batch else None
+        attempts = self._settings.batch_max_attempts_default
+        if batch_opts and batch_opts.max_attempts is not None:
+            attempts = batch_opts.max_attempts
+
+        attempts = max(1, attempts)
+        max_retry_count = max(0, attempts - 1)
+        return attempts, max_retry_count
 
     @staticmethod
     def _parse_custom_machine_type(machine_type: str) -> Optional[tuple[int, int]]:
@@ -425,7 +496,7 @@ class CloudBatchJobRunner:
 
         service_account = None
         if self._settings.batch_service_account_email:
-            service_account = batch_v1.AllocationPolicy.ServiceAccount(
+            service_account = batch_v1.ServiceAccount(
                 email=self._settings.batch_service_account_email
             )
 

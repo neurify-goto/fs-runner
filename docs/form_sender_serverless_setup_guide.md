@@ -1,15 +1,16 @@
 # Form Sender サーバーレス移行セットアップ & 運用ガイド
 
-最終更新: 2025-10-03 (JST)
-対象範囲: GAS `form-sender` / Cloud Tasks / Cloud Run Job (dispatcher + runner) / Supabase / GitHub Actions フォールバック
+最終更新: 2025-10-09 (JST)
+対象範囲: GAS `form-sender` / Cloud Tasks / Cloud Run dispatcher + Cloud Run Job / Cloud Batch Runner / Supabase / GitHub Actions フォールバック
 
 ---
 
 ## 1. 背景とゴール
-- GitHub Actions 依存のフォーム送信ワークフローを段階的に Cloud Tasks → Cloud Run Jobs → Supabase のサーバーレス基盤へ移行する。
-- 既存の GAS スケジューラと Supabase データ構造を維持したまま、マルチワーカー／シャーディング挙動を再現する。
-- テストモード・ブランチ検証 (form_sender_test / manual) を本番テーブルから分離し、`send_queue_test` / `submissions_test` を利用する。
-- 移行期間中は feature flag (`USE_SERVERLESS_FORM_SENDER`) で GitHub Actions とサーバーレス経路を切り替え可能にする。
+- GitHub Actions 依存のフォーム送信ワークフローを段階的に Cloud Tasks → Cloud Run dispatcher → Cloud Batch (Spot VM) / Cloud Run Jobs へ移行し、長時間実行・大規模並列を安定運用できるようにする。
+- 既存の GAS スケジューラと Supabase データ構造を維持したまま、マルチワーカー／シャーディング挙動を再現しつつ冪等性を確保する。
+- テストモード・ブランチ検証 (`form_sender_test` / `testFormSenderOnBranch`) は本番テーブルから分離し、`send_queue_test` / `submissions_test` を利用する。
+- 実行モードの切り替えは Script Properties `USE_GCP_BATCH` → `USE_SERVERLESS_FORM_SENDER` → GitHub Actions の優先順位で制御し、移行期間中のフォールバックパスを維持する。
+- Cloud Batch 向けのセットアップ詳細は補完資料 `docs/form_sender_gcp_batch_setup_guide.md` に記載。本ガイドでは既存 Cloud Run/Serverless 手順と共通化された運用ポイントをまとめる。
 
 ### 1.1 セットアップ開始前チェックリスト
 初心者の方でも迷わず準備できるよう、以下の前提をすべて満たしてから次章へ進んでください。
@@ -28,7 +29,7 @@
    - GCP 側で Owner または以下のロールを付与済み: `roles/run.admin`, `roles/cloudtasks.admin`, `roles/secretmanager.admin`, `roles/iam.serviceAccountAdmin`, `roles/storage.admin`。
    - Supabase 側で SQL Editor を使用できるロールを所持していること。
 5. **環境変数メモ**
-   - 以下の値をまとめておくと後続のコマンドで迷いません: `PROJECT_ID`, `REGION` (推奨: `asia-northeast1`), `ARTIFACT_REGISTRY_REPO`, `DISPATCHER_SERVICE_ACCOUNT`, `JOB_SERVICE_ACCOUNT`。
+   - 以下の値をまとめておくと後続のコマンドで迷いません: `PROJECT_ID`, `REGION` (推奨: `asia-northeast1`), `ARTIFACT_REGISTRY_REPO`, `DISPATCHER_SERVICE_ACCOUNT`, `JOB_SERVICE_ACCOUNT`, `BATCH_SERVICE_ACCOUNT`, `FORM_SENDER_DISPATCHER_BASE_URL`。
 
 > 💡 **TIP**: 作業中に混乱しないよう、これらの値を `.env.serverless` などのファイルに控えておくと便利です。
 
@@ -38,23 +39,39 @@
 1. **GAS (Apps Script)**
    - 時間トリガー `startFormSenderFromTrigger` が targeting 行を取得。
    - client_config を GCS にアップロードし、Cloud Tasks に dispatcher 呼び出しタスクを enqueue。
-   - Script Properties で並列数・シャード数等を制御。
+   - Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`, `FORM_SENDER_*`) で実行モードや並列度を制御。
 2. **Cloud Tasks**
    - Queue: `FORM_SENDER_TASKS_QUEUE` (`projects/<project>/locations/<region>/queues/<queue>`)
    - OIDC トークン付き HTTP 呼び出しで dispatcher Service を起動。
 3. **Cloud Run Service (dispatcher)**
    - FastAPI ベース。
-   - payload 検証 → 署名 URL 更新 → Cloud Run Job `RunJobRequest` 発行。
-   - Supabase `job_executions` テーブルへ実行メタを INSERT。
-4. **Cloud Run Job (form-sender-runner)**
-   - Dockerfile に Playwright / 依存ライブラリを同梱。
-   - エントリポイント `bin/form_sender_job_entry.py` が client_config を取得し、`form_sender_runner.py` を起動。
-   - 環境変数経由で shard / table mode / run_id を渡す。
-5. **Supabase**
+   - payload 検証 → 署名 URL 更新 → Supabase `job_executions` へ INSERT → 実行モードに応じて Cloud Batch SubmitJob または Cloud Run Job `RunJobRequest` を発行。
+   - Batch 実行時は Spot / On-demand 切替や署名 URL TTL 拡張、プリエンプション情報のメタデータ更新を担当。
+4. **Cloud Batch Job (form-sender-runner)**
+   - Docker イメージは Cloud Run Job と共通。
+   - Spot VM 上で `FORM_SENDER_ENV=gcp_batch` として起動し、プリエンプション監視と署名 URL 再取得 (`/v1/form-sender/signed-url/refresh`) を行う。
+   - Supabase へ再送メタデータを記録し、再実行が冪等になるようロジックを共有。
+5. **Cloud Run Job (フォールバック)**
+   - Batch 未対応案件や `USE_GCP_BATCH=false` 時に利用。
+   - Playwright 依存を含む Docker イメージを 4 ワーカー想定で実行。
+6. **Supabase**
    - RPC: `create_queue_for_targeting[_extra/_test]`, `claim_next_batch[_extra/_test]`, `mark_done[_extra/_test]`, `reset_send_queue_all[_extra/_test]`。
    - 新規テーブル: `job_executions`, `send_queue_test`, `submissions_test`。
-6. **GitHub Actions (フォールバック)**
-   - `form-sender.yml` は `FORM_SENDER_ENV=github_actions` 設定で既存挙動維持。
+7. **GitHub Actions (フォールバック)**
+    - `form-sender.yml` は `FORM_SENDER_ENV=github_actions` 設定で既存挙動維持。
+
+---
+
+### 2.1 実行モード早見表
+| 優先順位 | 条件 | 実行先 | 主な設定項目 |
+| --- | --- | --- | --- |
+| 1 | `USE_GCP_BATCH=true` または targeting シート/JSON で `useGcpBatch` が明示的に真 | Cloud Tasks → dispatcher → Cloud Batch | Script Properties: `USE_GCP_BATCH`, `FORM_SENDER_BATCH_*`<br>Targeting列: `batch_*` シリーズ (省略時は既定値)<br>Runner環境: `FORM_SENDER_ENV=gcp_batch`, `FORM_SENDER_DISPATCHER_BASE_URL`（必要に応じ `FORM_SENDER_DISPATCHER_URL`） |
+| 2 | 上記以外で `USE_SERVERLESS_FORM_SENDER=true` または targeting で `useServerless` が真 | Cloud Tasks → dispatcher → Cloud Run Job | Script Properties: `USE_SERVERLESS_FORM_SENDER`, `FORM_SENDER_CLOUD_RUN_JOB` |
+| 3 | 1,2 がいずれも偽 | GitHub Actions Workflow (`form-sender.yml`) | Repository Dispatch/payload で並列数を制御。`FORM_SENDER_ENV=github_actions` |
+
+> ℹ️ `resolveExecutionMode_()` は targeting 行の `useGcpBatch` / `useServerless` / `batch.enabled` を優先的に評価し、列が存在しない場合は Script Properties を参照します。列未定義の環境ではログに warning を出しつつグローバル設定へフォールバックします。
+
+> ⚠️ Cloud Tasks の Queue と dispatcher URL/BASE が未設定の場合、GAS は自動的に GitHub Actions 経路へフォールバックします。計画的に Batch/Serverless を切り替える際は queue と URL を事前に用意してください。
 
 ---
 
@@ -116,9 +133,12 @@ done
 
 ## 4. Cloud Run Job (Runner) セットアップ
 
+> ※ Cloud Batch Runner の詳細セットアップは `docs/form_sender_gcp_batch_setup_guide.md` を参照してください。ここでは Batch 切替後もフォールバックとして利用する Cloud Run Job のメンテナンス手順を記載します。
+
 ### 4.1 有効化しておくべき GCP API
 ```bash
 gcloud services enable \
+  batch.googleapis.com \
   run.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
@@ -258,6 +278,40 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 
 Cloud Tasks から dispatcher を呼び出す OIDC 用サービスアカウントを分けたい場合は、同様に `form-sender-tasks@` などを作成し `roles/iam.serviceAccountTokenCreator` を付与します。
 
+### 5.3.1 Cloud Batch 実行用サービスアカウントの作成
+
+Cloud Batch の Spot VM で Playwright ランナーを動かす際は、タスクが実行時に利用するサービスアカウントを事前に用意し、必要なロールを与えてください。`FORM_SENDER_BATCH_SERVICE_ACCOUNT` には以下で作成したアカウントを指定します。
+
+```bash
+export BATCH_SERVICE_ACCOUNT="form-sender-batch@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# サービスアカウントの作成
+gcloud iam service-accounts create form-sender-batch \
+  --project="${PROJECT_ID}" \
+  --description="Form Sender Cloud Batch runtime"
+
+# Cloud Batch タスク実行に必要なリソース権限を付与
+for ROLE in \
+  roles/artifactregistry.reader \
+  roles/logging.logWriter \
+  roles/secretmanager.secretAccessor \
+  roles/storage.objectViewer; do
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${BATCH_SERVICE_ACCOUNT}" \
+    --role="${ROLE}"
+done
+
+# Batch サービスエージェントに対する最後の委任設定
+export PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
+gcloud iam service-accounts add-iam-policy-binding "${BATCH_SERVICE_ACCOUNT}" \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@batch-service.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountUser"
+
+echo "Batch runtime service account prepared: ${BATCH_SERVICE_ACCOUNT}"
+```
+
+> ℹ️ プライベート Artifact Registry からイメージを pull する場合は `roles/artifactregistry.reader` が必須です。Cloud Monitoring 等を追加で利用する場合は、上記と同じ形式で必要なロールを付与してください。
+
 ### 5.4 Cloud Tasks Queue の作成
 
 ```bash
@@ -303,20 +357,47 @@ IMAGE_DISPATCHER="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/form-sender-dis
 docker build -t "$IMAGE_DISPATCHER" -f Dockerfile.dispatcher .
 docker push "$IMAGE_DISPATCHER"
 
+DISPATCHER_BASE_URL="https://form-sender-dispatcher-xxxxxxxx-uc.a.run.app"  # デプロイ後に実際の URL へ置き換え
+
+# Cloud Batch 関連の変数も合わせて用意
+export BATCH_JOB_TEMPLATE_NAME="projects/${PROJECT_ID}/locations/${REGION}/jobs/form-sender-batch-template"
+export BATCH_TASK_GROUP_NAME="form-sender-workers"
+export BATCH_SERVICE_ACCOUNT_EMAIL="form-sender-batch@${PROJECT_ID}.iam.gserviceaccount.com"
+export BATCH_CONTAINER_IMAGE="asia-northeast1-docker.pkg.dev/${PROJECT_ID}/form-sender-runner/playwright:latest"
+export BATCH_SUPABASE_URL_SECRET="form_sender_supabase_url"
+export BATCH_SUPABASE_SERVICE_ROLE_SECRET="form_sender_supabase_service_role"
+
 gcloud run deploy form-sender-dispatcher \
   --image="$IMAGE_DISPATCHER" \
   --region="$REGION" \
   --service-account="$DISPATCHER_SERVICE_ACCOUNT" \
   --allow-unauthenticated=false \
-  --set-env-vars=DISPATCHER_PROJECT_ID=${PROJECT_ID},DISPATCHER_LOCATION=${REGION},FORM_SENDER_CLOUD_RUN_JOB=form-sender-runner \
+  --set-env-vars=\
+DISPATCHER_PROJECT_ID=${PROJECT_ID},\
+DISPATCHER_LOCATION=${REGION},\
+FORM_SENDER_CLOUD_RUN_JOB=form-sender-runner,\
+FORM_SENDER_DISPATCHER_BASE_URL=${DISPATCHER_BASE_URL},\
+FORM_SENDER_DISPATCHER_AUDIENCE=${DISPATCHER_BASE_URL},\
+FORM_SENDER_BATCH_PROJECT_ID=${PROJECT_ID},\
+FORM_SENDER_BATCH_LOCATION=${REGION},\
+FORM_SENDER_BATCH_JOB_TEMPLATE=${BATCH_JOB_TEMPLATE_NAME},\
+FORM_SENDER_BATCH_TASK_GROUP=${BATCH_TASK_GROUP_NAME},\
+FORM_SENDER_BATCH_SERVICE_ACCOUNT=${BATCH_SERVICE_ACCOUNT_EMAIL},\
+FORM_SENDER_BATCH_CONTAINER_IMAGE=${BATCH_CONTAINER_IMAGE},\
+FORM_SENDER_BATCH_SUPABASE_URL_SECRET=projects/${PROJECT_ID}/secrets/${BATCH_SUPABASE_URL_SECRET},\
+FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET=projects/${PROJECT_ID}/secrets/${BATCH_SUPABASE_SERVICE_ROLE_SECRET} \
   --set-secrets=DISPATCHER_SUPABASE_URL=projects/${PROJECT_ID}/secrets/SUPABASE_URL:latest,\
 DISPATCHER_SUPABASE_SERVICE_ROLE_KEY=projects/${PROJECT_ID}/secrets/SUPABASE_SERVICE_ROLE_KEY:latest \
   --max-instances=3 \
   --cpu=1 \
   --memory=1Gi
+
+> 🔁 シークレット名は `4.2 Service Role Key の整理` で作成した `form_sender_supabase_*` と揃えてください。別名を利用する場合は上記変数を必ず読み替えます。
 ```
 
 > 既存の CI/CD でビルドする場合は `gcloud builds submit --tag "$IMAGE_DISPATCHER" -f Dockerfile.dispatcher .` を用いても構いません。
+
+> ℹ️ `BATCH_SUPABASE_URL_SECRET` / `BATCH_SUPABASE_SERVICE_ROLE_SECRET` は Secret Manager 上のシークレット名を指します。事前に `gcloud secrets create` で作成し、Cloud Batch / dispatcher のサービスアカウントへ `roles/secretmanager.secretAccessor` を付与してください。環境変数には `projects/<project>/secrets/<name>` までを渡せば、Dispatcher が `/versions/latest` を自動補完します。
 
 ### 5.6 dispatcher の環境変数 (`DispatcherSettings.from_env`)
 | 変数 | 説明 |
@@ -328,13 +409,25 @@ DISPATCHER_SUPABASE_SERVICE_ROLE_KEY=projects/${PROJECT_ID}/secrets/SUPABASE_SER
 | `FORM_SENDER_CLIENT_CONFIG_BUCKET` | client_config 保存用バケット（任意、設定時は StorageClient で検証） |
 | `FORM_SENDER_SIGNED_URL_TTL_HOURS` | 署名URL TTL (既定 15h) |
 | `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD` | 残り秒数閾値 (既定 1800s) |
+| `FORM_SENDER_DISPATCHER_BASE_URL` | 自身の Cloud Run URL（例: `https://<service>-<hash>-a.run.app`）。`/v1/...` を付けずにオリジンのみ設定。`FORM_SENDER_DISPATCHER_URL` を省略した場合はここから `/v1/form-sender/tasks` を自動付与します |
+| `FORM_SENDER_DISPATCHER_AUDIENCE` | ID トークン Audience。通常は `FORM_SENDER_DISPATCHER_BASE_URL` と同じ値を設定 |
+| `FORM_SENDER_BATCH_PROJECT_ID` | Cloud Batch を実行するプロジェクト ID（Dispatcher と同一でも可） |
+| `FORM_SENDER_BATCH_LOCATION` | Cloud Batch リージョン（例: `asia-northeast1`） |
+| `FORM_SENDER_BATCH_JOB_TEMPLATE` | Submit 時に利用する Cloud Batch ジョブテンプレート名。`projects/<project>/locations/<region>/jobs/<template>` 形式を推奨 |
+| `FORM_SENDER_BATCH_TASK_GROUP` | Cloud Batch タスクグループ名（テンプレート側と一致させる） |
+| `FORM_SENDER_BATCH_SERVICE_ACCOUNT` | Cloud Batch 実行に使用するサービスアカウントのメールアドレス |
+| `FORM_SENDER_BATCH_CONTAINER_IMAGE` | Cloud Batch で pull する Runner イメージ（Artifact Registry の完全修飾名） |
+| `FORM_SENDER_BATCH_SUPABASE_URL_SECRET` | Supabase URL を格納した Secret Manager リソース ID（例: `projects/.../secrets/<name>`）。Dispatcher が `/versions/latest` を自動補完します |
+| `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET` | Supabase Service Role Key 用の Secret Manager リソース ID（上記と同形式） |
+| `FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET` *(任意)* | テスト用 Supabase URL シークレットのリソース ID（`projects/.../secrets/<name>`） |
+| `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_TEST_SECRET` *(任意)* | テスト用 Service Role Key シークレットのリソース ID（`projects/.../secrets/<name>`） |
 | `FORM_SENDER_GIT_TOKEN_SECRET` | ブランチテスト用 PAT を Secret Manager から取得する際のリソース名 |
 | `FORM_SENDER_CPU_CLASS_DEFAULT` | dispatcher が付与する既定CPUプロファイル (`standard` 推奨、低負荷運用時は `low`) |
 
 ### 5.7 Cloud Tasks から dispatcher を呼び出す設定
 - Cloud Run コンソールで `form-sender-dispatcher` の URL をコピー。
 - Cloud Tasks からの HTTP タスクで OIDC トークンを付与するため、`FORM_SENDER_DISPATCHER_SERVICE_ACCOUNT` に `roles/iam.serviceAccountTokenCreator` を付与。
-- GAS 側で Script Properties に `FORM_SENDER_DISPATCHER_URL` と `FORM_SENDER_TASKS_QUEUE` を設定します（詳しくは §6 を参照）。
+- GAS 側で Script Properties に `FORM_SENDER_TASKS_QUEUE` と `FORM_SENDER_DISPATCHER_URL`（もしくは `FORM_SENDER_DISPATCHER_BASE_URL`）を設定します（詳しくは §6 を参照）。
 
 ---
 
@@ -349,15 +442,47 @@ DISPATCHER_SUPABASE_SERVICE_ROLE_KEY=projects/${PROJECT_ID}/secrets/SUPABASE_SER
 | キー | 用途 |
 |------|------|
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | 従来通り |
-| `USE_SERVERLESS_FORM_SENDER` | `true` で Cloud Tasks 経路有効 |
+| `USE_GCP_BATCH` | `true` で Cloud Batch 経路を最優先。targeting 列 `useGcpBatch` が真の場合も Batch 実行 |
+| `USE_SERVERLESS_FORM_SENDER` | `true` で Cloud Run Job 経路を有効化（Batch が無効の時に適用） |
 | `FORM_SENDER_GCS_BUCKET` | client_config アップロード先 |
 | `FORM_SENDER_TASKS_QUEUE` | Cloud Tasks Queue パス |
-| `FORM_SENDER_DISPATCHER_URL` | dispatcher endpoint |
+| `FORM_SENDER_DISPATCHER_URL` | dispatcher HTTP エンドポイント（`/v1/form-sender/tasks` まで含めた完全 URL。例: `https://form-sender-dispatcher-xxxxx-a.run.app/v1/form-sender/tasks`）。空の場合は `FORM_SENDER_DISPATCHER_BASE_URL` から自動組み立て |
 | `FORM_SENDER_DISPATCHER_SERVICE_ACCOUNT` | Cloud Tasks OIDC 用 SA |
 | `SERVICE_ACCOUNT_JSON` | GCS アップロード用サービスアカウントキー（`private_key` を `\n` 変換済） |
 | `FORM_SENDER_SHARD_COUNT` | 既定シャード数（例: `8`） |
 | `FORM_SENDER_PARALLELISM_OVERRIDE` | 同時タスク数オーバーライド（任意） |
 | `FORM_SENDER_WORKERS_OVERRIDE` | 1タスクあたりワーカー数オーバーライド（任意） |
+| `FORM_SENDER_SIGNED_URL_TTL_HOURS` | Cloud Run / GitHub Actions 向け署名 URL TTL（既定 15h） |
+| `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` | Cloud Batch 向け署名 URL TTL（既定 48h、1〜168 の範囲） |
+| `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` | Cloud Batch 向け署名 URL 再署名猶予秒数（既定 21600s）。残り時間がこの閾値を下回ると GAS/dispatcher が再署名を行う |
+| `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` | targeting で未指定時の Batch `parallelism` 上限（既定 100） |
+| `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` | Spot 優先フラグの既定値。`true` 推奨 |
+| `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | Spot 枯渇時にオンデマンドへフォールバックするか |
+| `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | Batch 用カスタムマシンタイプ初期値（例: `n2d-custom-4-10240`） |
+| `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` | targeting 列よりも優先して強制するマシンタイプ。全体を一時的に固定したい場合に利用 |
+| `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` / `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | ワーカーあたりの CPU / メモリ初期値（既定 1 vCPU / 2048 MB） |
+| `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` | 共有バッファのメモリ（既定 2048 MB） |
+| `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT` | Cloud Batch タスク `maxAttempt` の既定値（既定 1） |
+
+> ⚠️ targeting シートに `batch_*` 列が存在しない場合は GAS ログに警告が表示され、上記 Script Properties の値へ自動フォールバックします。列を追加した後は値が読み取れていることをログで確認してください。
+
+> ℹ️ `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` を設定すると、targeting シートの `batch_machine_type` よりもこちらが優先されます。メモリ不足が懸念される期間の一括強制や、列が未整備な移行初期に利用してください。
+
+> ℹ️ バッファ値 (`FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT`) は GAS から dispatcher へ送信される Batch payload (`memory_buffer_mb`) にも含まれるため、Script Properties を更新するだけで Cloud Batch 側のメモリ計算が追従します。Cloud Run の環境変数はフォールバック用として残ります。
+
+#### 6.2.1 targeting シート列のチェックリスト
+- `useGcpBatch`
+- `batch_max_parallelism`
+- `batch_prefer_spot`
+- `batch_allow_on_demand_fallback`
+- `batch_machine_type`
+- `batch_signed_url_ttl_hours`
+- `batch_signed_url_refresh_threshold_seconds`
+- `batch_vcpu_per_worker`
+- `batch_memory_per_worker_mb`
+- `batch_max_attempts`
+
+各 targeting の `batch_max_attempts` を指定すると、Cloud Batch の `maxRetryCount` が dispatcher 経由で自動調整されます（未設定時は `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT` を採用）。
 
 ### 6.3 テストモードの指針
 - `options.testMode === true` の場合、GAS は `send_queue_test` を生成し、dispatcher へ `submissions_test` を通知します。
@@ -375,7 +500,7 @@ DISPATCHER_SUPABASE_SERVICE_ROLE_KEY=projects/${PROJECT_ID}/secrets/SUPABASE_SER
 1. GAS エディタから `testFormSenderWorkflowTrigger()` を実行。
 2. 実行ログに Cloud Tasks のレスポンス（`taskId` や duplicate 判定）が出力されることを確認。
 3. GCP コンソールの **Cloud Tasks → form-sender-tasks** でタスクが `dispatching` → `completed` になる流れをチェック。
-4. 問題があれば `FORM_SENDER_DISPATCHER_URL` やサービスアカウントの権限を再確認します。
+4. 問題があれば `FORM_SENDER_DISPATCHER_URL`（自動補完を利用する場合は `FORM_SENDER_DISPATCHER_BASE_URL`）やサービスアカウントの権限を再確認します。
 
 ### 6.6 GAS 用サービスアカウントの権限付与例
 `SERVICE_ACCOUNT_JSON` に設定するサービスアカウント（例: `form-sender-gas@${PROJECT_ID}.iam.gserviceaccount.com`）には、以下のロールを付与しておきます。
@@ -415,7 +540,8 @@ PYTHONPATH=src pytest \
   tests/test_client_config_validator.py \
   tests/test_dispatcher_internals.py \
   tests/test_form_sender_job_entry.py \
-  tests/test_form_sender_runner.py
+  tests/test_form_sender_runner.py \
+  tests/test_gcp_batch_meta.py
 ```
 
 失敗したテストがある場合は該当モジュールの環境変数や依存ライブラリを確認してください。

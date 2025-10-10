@@ -588,6 +588,19 @@ function getTargetingConfig(targetingId) {
       return false;
     }
 
+    function parseOptionalBoolean(value) {
+      if (value === null || typeof value === 'undefined') {
+        return undefined;
+      }
+      if (typeof value === 'string') {
+        var trimmed = value.trim();
+        if (trimmed === '') {
+          return undefined;
+        }
+      }
+      return normalizeBoolean(value);
+    }
+
     function parseOptionalInteger(value) {
       if (value === null || typeof value === 'undefined' || value === '') {
         return null;
@@ -677,14 +690,7 @@ function getTargetingConfig(targetingId) {
     })(extraColIndex >= 0 ? targetingRow[extraColIndex] : false);
 
     const serverlessColIndex = typeof targetingColMap['use_serverless'] === 'number' ? targetingColMap['use_serverless'] : -1;
-    const useServerless = (function(value) {
-      if (value === true || value === 1) return true;
-      if (typeof value === 'string') {
-        const lowered = value.toLowerCase();
-        return lowered === 'true' || lowered === '1';
-      }
-      return false;
-    })(serverlessColIndex >= 0 ? targetingRow[serverlessColIndex] : false);
+    const useServerless = serverlessColIndex >= 0 ? parseOptionalBoolean(targetingRow[serverlessColIndex]) : undefined;
 
     const useBatchColIndex = resolveColumnIndex(targetingColMap, ['use_gcp_batch', 'usegcpbatch', 'use gcp batch', 'usegcpbatch?', 'usegcpbatch', 'usegcpbatch ', 'use gcp_batch']);
     const batchMaxParallelIndex = resolveColumnIndex(targetingColMap, ['batch_max_parallelism', 'batchmaxparallelism']);
@@ -695,16 +701,18 @@ function getTargetingConfig(targetingId) {
     const batchSignedUrlRefreshIndex = resolveColumnIndex(targetingColMap, ['batch_signed_url_refresh_threshold_seconds', 'batchsignedurlrefreshthresholdseconds']);
     const batchVcpuPerWorkerIndex = resolveColumnIndex(targetingColMap, ['batch_vcpu_per_worker', 'batchvcpuperworker']);
     const batchMemoryPerWorkerIndex = resolveColumnIndex(targetingColMap, ['batch_memory_per_worker_mb', 'batchmemoryperworkermb']);
+    const batchMaxAttemptsIndex = resolveColumnIndex(targetingColMap, ['batch_max_attempts', 'batchmaxattempts']);
 
-    const useGcpBatch = useBatchColIndex >= 0 ? normalizeBoolean(targetingRow[useBatchColIndex]) : false;
+    const useGcpBatch = useBatchColIndex >= 0 ? parseOptionalBoolean(targetingRow[useBatchColIndex]) : undefined;
     const batchMaxParallelism = batchMaxParallelIndex >= 0 ? parseOptionalInteger(targetingRow[batchMaxParallelIndex]) : null;
-    const batchPreferSpot = batchPreferSpotIndex >= 0 ? normalizeBoolean(targetingRow[batchPreferSpotIndex]) : null;
-    const batchAllowOnDemand = batchAllowOnDemandIndex >= 0 ? normalizeBoolean(targetingRow[batchAllowOnDemandIndex]) : null;
+    const batchPreferSpot = batchPreferSpotIndex >= 0 ? parseOptionalBoolean(targetingRow[batchPreferSpotIndex]) : undefined;
+    const batchAllowOnDemand = batchAllowOnDemandIndex >= 0 ? parseOptionalBoolean(targetingRow[batchAllowOnDemandIndex]) : undefined;
     const batchMachineType = batchMachineTypeIndex >= 0 ? String(targetingRow[batchMachineTypeIndex] || '').trim() : '';
     const batchSignedUrlTtlHours = batchSignedUrlTtlIndex >= 0 ? parseOptionalInteger(targetingRow[batchSignedUrlTtlIndex]) : null;
     const batchSignedUrlRefreshSeconds = batchSignedUrlRefreshIndex >= 0 ? parseOptionalInteger(targetingRow[batchSignedUrlRefreshIndex]) : null;
     const batchVcpuPerWorker = batchVcpuPerWorkerIndex >= 0 ? parseOptionalInteger(targetingRow[batchVcpuPerWorkerIndex]) : null;
     const batchMemoryPerWorkerMb = batchMemoryPerWorkerIndex >= 0 ? parseOptionalInteger(targetingRow[batchMemoryPerWorkerIndex]) : null;
+    const batchMaxAttempts = batchMaxAttemptsIndex >= 0 ? parseOptionalInteger(targetingRow[batchMaxAttemptsIndex]) : null;
 
     try {
       console.log(JSON.stringify({
@@ -716,7 +724,10 @@ function getTargetingConfig(targetingId) {
         use_extra_table: useExtraTable,
         use_serverless_col_index: serverlessColIndex,
         use_serverless_raw_value: serverlessColIndex >= 0 ? targetingRow[serverlessColIndex] : null,
-        use_serverless: useServerless
+        use_serverless: useServerless,
+        use_gcp_batch_col_index: useBatchColIndex,
+        use_gcp_batch_raw_value: useBatchColIndex >= 0 ? targetingRow[useBatchColIndex] : null,
+        use_gcp_batch: useGcpBatch
       }));
     } catch (e) {}
     
@@ -755,8 +766,6 @@ function getTargetingConfig(targetingId) {
       active: targetingRow[targetingColMap['active']] === true || targetingRow[targetingColMap['active']] === 'TRUE',
       description: targetingRow[targetingColMap['description'] || -1] || '',
       use_extra_table: useExtraTable,
-      useServerless: useServerless,
-      use_serverless: useServerless,
 
       // clientシートからの情報をネスト構造化
       client: {
@@ -802,7 +811,6 @@ function getTargetingConfig(targetingId) {
         send_end_time: targetingRow[targetingColMap['send_end_time'] || -1] || '18:00',
         send_days_of_week: parseSendDaysOfWeek(targetingRow[targetingColMap['send_days_of_week'] || -1]),
         use_extra_table: useExtraTable,
-        use_serverless: useServerless,
         // 追加: 並列起動数（新規 M 列）
         concurrent_workflow: (function() {
           try {
@@ -813,23 +821,55 @@ function getTargetingConfig(targetingId) {
           } catch (e) {
             return 1;
           }
-        })(),
-        useGcpBatch: useGcpBatch,
-        use_gcp_batch: useGcpBatch
+        })()
       }
     };
 
-    const batchConfig = {
-      enabled: useGcpBatch,
-      max_parallelism: batchMaxParallelism,
-      prefer_spot: batchPreferSpot,
-      allow_on_demand_fallback: batchAllowOnDemand,
-      machine_type: batchMachineType || null,
-      signed_url_ttl_hours: batchSignedUrlTtlHours,
-      signed_url_refresh_threshold_seconds: batchSignedUrlRefreshSeconds,
-      vcpu_per_worker: batchVcpuPerWorker,
-      memory_per_worker_mb: batchMemoryPerWorkerMb
-    };
+    if (typeof useServerless !== 'undefined') {
+      clientConfig.useServerless = useServerless;
+      clientConfig.use_serverless = useServerless;
+      clientConfig.targeting.useServerless = useServerless;
+      clientConfig.targeting.use_serverless = useServerless;
+    }
+
+    if (typeof useGcpBatch !== 'undefined') {
+      clientConfig.useGcpBatch = useGcpBatch;
+      clientConfig.use_gcp_batch = useGcpBatch;
+      clientConfig.targeting.useGcpBatch = useGcpBatch;
+      clientConfig.targeting.use_gcp_batch = useGcpBatch;
+    }
+
+    const batchConfig = {};
+    if (typeof useGcpBatch !== 'undefined') {
+      batchConfig.enabled = useGcpBatch;
+    }
+    if (batchMaxParallelism !== null) {
+      batchConfig.max_parallelism = batchMaxParallelism;
+    }
+    if (typeof batchPreferSpot !== 'undefined') {
+      batchConfig.prefer_spot = batchPreferSpot;
+    }
+    if (typeof batchAllowOnDemand !== 'undefined') {
+      batchConfig.allow_on_demand_fallback = batchAllowOnDemand;
+    }
+    if (batchMachineType) {
+      batchConfig.machine_type = batchMachineType;
+    }
+    if (batchSignedUrlTtlHours !== null) {
+      batchConfig.signed_url_ttl_hours = batchSignedUrlTtlHours;
+    }
+    if (batchSignedUrlRefreshSeconds !== null) {
+      batchConfig.signed_url_refresh_threshold_seconds = batchSignedUrlRefreshSeconds;
+    }
+    if (batchVcpuPerWorker !== null) {
+      batchConfig.vcpu_per_worker = batchVcpuPerWorker;
+    }
+    if (batchMemoryPerWorkerMb !== null) {
+      batchConfig.memory_per_worker_mb = batchMemoryPerWorkerMb;
+    }
+    if (batchMaxAttempts !== null) {
+      batchConfig.max_attempts = batchMaxAttempts;
+    }
 
     console.log(`フィールドバリデーション完了: 必須フィールド ${requiredFields.length} 件OK, 空文字許可フィールド ${optionalFields.length} 件`);
     
@@ -858,8 +898,6 @@ function getTargetingConfig(targetingId) {
     
     console.log(`targeting_id ${targetingId} の2シート結合設定取得完了: ${clientConfig.client?.company_name} (client_id: ${clientConfig.client_id})`);
     clientConfig.batch = batchConfig;
-    clientConfig.useGcpBatch = useGcpBatch;
-    clientConfig.use_gcp_batch = useGcpBatch;
     return clientConfig;
     
   } catch (error) {

@@ -50,6 +50,8 @@ class BatchOptions(BaseModel):
     signed_url_refresh_threshold_seconds: Optional[int] = Field(default=None, ge=60)
     vcpu_per_worker: Optional[int] = Field(default=None, ge=1)
     memory_per_worker_mb: Optional[int] = Field(default=None, ge=1024)
+    memory_buffer_mb: Optional[int] = Field(default=None, ge=0)
+    max_attempts: Optional[int] = Field(default=None, ge=1)
     memory_warning: Optional[bool] = Field(default=None)
     computed_memory_mb: Optional[int] = Field(default=None, ge=0)
 
@@ -124,10 +126,11 @@ class FormSenderTask(BaseModel):
                 values["mode"] = "cloud_run"
             return values
 
-        if batch.enabled or mode == "batch":
-            values["mode"] = "batch"
-        else:
-            values["mode"] = "cloud_run"
+        if not batch.enabled:
+            batch = batch.copy(update={"enabled": True})
+            values["batch"] = batch
+
+        values["mode"] = "batch"
         return values
 
     def job_execution_meta(self) -> str:

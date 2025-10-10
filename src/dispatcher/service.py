@@ -46,6 +46,7 @@ class DispatcherService:
         job_execution_id = task.execution_id or uuid.uuid4().hex
         task_data = task.dict()
         task_data["execution_id"] = job_execution_id
+        task_data["client_config_ref"] = signed_url
         env_vars = self._build_env(task, job_execution_id, signed_url)
 
         execution_mode = "batch" if task.batch_enabled() else "cloud_run"
@@ -74,11 +75,25 @@ class DispatcherService:
                     "machine_type": batch_meta.get("machine_type"),
                     "cpu_milli": batch_meta.get("cpu_milli"),
                     "memory_mb": batch_meta.get("memory_mb"),
+                    "memory_buffer_mb": batch_meta.get("memory_buffer_mb"),
                     "prefer_spot": batch_meta.get("prefer_spot"),
                     "allow_on_demand": batch_meta.get("allow_on_demand"),
                 }
+                task_group_name = None
                 if job.task_groups:
-                    batch_metadata["task_group"] = job.task_groups[0].name
+                    task_group_name = job.task_groups[0].name
+                if not task_group_name:
+                    task_group_name = batch_meta.get("task_group_resource_hint")
+                if task_group_name:
+                    batch_metadata["task_group"] = task_group_name
+                configured_task_group_id = batch_meta.get("configured_task_group_id")
+                if configured_task_group_id:
+                    batch_metadata["configured_task_group"] = configured_task_group_id
+                batch_metadata["array_size"] = batch_meta.get("array_size", task.execution.run_total)
+                if batch_meta.get("attempts") is not None:
+                    batch_metadata["attempts"] = batch_meta.get("attempts")
+                if batch_meta.get("max_retry_count") is not None:
+                    batch_metadata["max_retry_count"] = batch_meta.get("max_retry_count")
                 if batch_meta.get("memory_warning"):
                     batch_metadata["memory_warning"] = True
                     if batch_meta.get("computed_memory_mb") is not None:

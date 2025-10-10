@@ -1,5 +1,7 @@
 import base64
 import logging
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from types import MethodType, SimpleNamespace
@@ -8,6 +10,12 @@ import pytest
 
 pytest.importorskip("fastapi")
 from fastapi import HTTPException
+
+# Ensure local src/ modules are importable when pytest is run from repo root
+ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from dispatcher.config import DispatcherSettings
 from dispatcher.schemas import ExecutionConfig, FormSenderTask, Metadata, SignedUrlRefreshRequest, TableConfig
@@ -689,6 +697,7 @@ def test_batch_runner_enforces_minimum_machine_type(caplog):
     assert metadata.get("computed_memory_mb") == 10240
     assert metadata.get("requested_machine_type") == "n2d-custom-2-4096"
     assert metadata.get("resolved_machine_type") == machine_type
+    assert metadata.get("memory_buffer_mb") == settings.batch_memory_buffer_mb_default
     assert "insufficient" in caplog.text
 
 
@@ -702,6 +711,7 @@ def test_handle_form_sender_task_batch(monkeypatch):
         "prefer_spot": True,
         "allow_on_demand_fallback": False,
         "machine_type": "n2d-custom-4-10240",
+        "max_attempts": 3,
     }
     task = FormSenderTask.parse_obj(payload)
 
@@ -743,9 +753,13 @@ def test_handle_form_sender_task_batch(monkeypatch):
             "machine_type": "n2d-custom-4-10240",
             "cpu_milli": 4000,
             "memory_mb": 10240,
+            "memory_buffer_mb": 2048,
             "prefer_spot": True,
             "allow_on_demand": False,
             "parallelism": 2,
+            "array_size": task.execution.run_total,
+            "attempts": 3,
+            "max_retry_count": 2,
         }
         return SimpleNamespace(run_job=lambda **kwargs: (job, meta))
 
@@ -760,4 +774,106 @@ def test_handle_form_sender_task_batch(monkeypatch):
     assert "batch" in response
     assert response["batch"]["job_name"].endswith("job123")
     assert response["batch_job_name"].endswith("job123")
+    assert response["batch"]["array_size"] == task.execution.run_total
+    assert response["batch"]["attempts"] == 3
+    assert response["batch"]["max_retry_count"] == 2
+    assert response["batch"]["memory_buffer_mb"] == 2048
     assert inserted == ["batch"]
+
+
+def test_calculate_resources_warns_when_memory_below_recommendation(caplog):
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="form-sender",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia/artifact/form-sender:latest",
+        batch_supabase_url_secret="projects/proj/secrets/url",
+        batch_supabase_service_role_secret="projects/proj/secrets/key",
+        batch_memory_per_worker_mb_default=1024,
+    )
+    runner = CloudBatchJobRunner(settings)
+
+    payload = _task_payload_dict(datetime.now(timezone.utc))
+    payload["mode"] = "batch"
+    payload["execution"]["run_total"] = 4
+    payload["execution"]["parallelism"] = 4
+    payload["execution"]["workers_per_workflow"] = 4
+    payload["batch"] = {"enabled": True}
+    task = FormSenderTask.parse_obj(payload)
+
+    caplog.set_level(logging.WARNING, logger="dispatcher.gcp")
+    machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand, metadata = runner._calculate_resources(task)
+
+    assert machine_type.endswith("-6144")
+    assert memory_mb < 8192
+    assert metadata.get("memory_warning") is True
+    assert metadata.get("computed_memory_mb") == memory_mb
+    assert metadata.get("memory_buffer_mb") == settings.batch_memory_buffer_mb_default
+    assert metadata.get("recommended_memory_mb") == 8192
+    assert "below recommended minimum" in caplog.text
+
+
+def test_calculate_resources_honours_payload_memory_buffer():
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="form-sender",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia/artifact/form-sender:latest",
+        batch_memory_buffer_mb_default=1024,
+        batch_supabase_url_secret="projects/proj/secrets/url",
+        batch_supabase_service_role_secret="projects/proj/secrets/key",
+    )
+    runner = CloudBatchJobRunner(settings)
+
+    payload = _task_payload_dict(datetime.now(timezone.utc))
+    payload["mode"] = "batch"
+    payload["execution"]["run_total"] = 2
+    payload["execution"]["parallelism"] = 2
+    payload["execution"]["workers_per_workflow"] = 2
+    payload["batch"] = {
+        "enabled": True,
+        "memory_per_worker_mb": 2048,
+        "memory_buffer_mb": 4096,
+    }
+    task = FormSenderTask.parse_obj(payload)
+
+    machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand, metadata = runner._calculate_resources(task)
+
+    assert machine_type == "n2d-custom-2-8192"
+    assert cpu_milli == 2000
+    assert memory_mb == 8192
+    assert metadata["memory_buffer_mb"] == 4096
+
+
+def test_batch_mode_normalized_when_batch_payload_present():
+    issue_time = datetime.now(timezone.utc)
+    payload = _task_payload_dict(issue_time)
+    payload.pop("mode", None)
+    payload["batch"] = {
+        "enabled": False,
+        "max_parallelism": 1,
+    }
+
+    task = FormSenderTask.parse_obj(payload)
+
+    assert task.mode == "batch"
+    assert task.batch is not None
+    assert task.batch.enabled is True

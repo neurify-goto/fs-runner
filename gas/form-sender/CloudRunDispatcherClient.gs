@@ -33,11 +33,19 @@ var CloudRunDispatcherClient = (function() {
   }
 
   function getDispatcherUrl_() {
-    var url = PropertiesService.getScriptProperties().getProperty('FORM_SENDER_DISPATCHER_URL');
-    if (!url) {
-      throw new Error('FORM_SENDER_DISPATCHER_URL が設定されていません');
+    var props = PropertiesService.getScriptProperties();
+    var explicitUrl = props.getProperty('FORM_SENDER_DISPATCHER_URL');
+    if (explicitUrl) {
+      return explicitUrl;
     }
-    return url;
+
+    var baseUrl = props.getProperty('FORM_SENDER_DISPATCHER_BASE_URL');
+    if (!baseUrl) {
+      throw new Error('FORM_SENDER_DISPATCHER_URL/BASE_URL が設定されていません');
+    }
+
+    var normalizedBase = String(baseUrl).trim().replace(/\/$/, '');
+    return normalizedBase + '/v1/form-sender/tasks';
   }
 
   function getDispatcherServiceAccount_() {

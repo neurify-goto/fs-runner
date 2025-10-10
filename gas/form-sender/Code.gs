@@ -108,13 +108,25 @@ function parseBooleanProperty_(value) {
 
 function resolveExecutionModePriority_() {
   var props = PropertiesService.getScriptProperties();
+  var preferBatch = parseBooleanProperty_(props.getProperty('USE_GCP_BATCH'));
+  var preferServerless = parseBooleanProperty_(props.getProperty('USE_SERVERLESS_FORM_SENDER'));
+
   var priority = [];
-  if (parseBooleanProperty_(props.getProperty('USE_GCP_BATCH'))) {
+
+  if (preferBatch) {
     priority.push('batch');
   }
-  if (parseBooleanProperty_(props.getProperty('USE_SERVERLESS_FORM_SENDER'))) {
+  if (preferServerless) {
     priority.push('serverless');
   }
+
+  if (priority.indexOf('batch') === -1) {
+    priority.unshift('batch');
+  }
+  if (priority.indexOf('serverless') === -1) {
+    priority.push('serverless');
+  }
+
   priority.push('github');
   return priority;
 }
@@ -143,9 +155,22 @@ function getScriptPropertyString_(key, fallback) {
 
 function resolveTargetingExecutionMode_(targetingConfig) {
   var config = targetingConfig || {};
+  var isGlobalResolution = !targetingConfig || Object.keys(config).length === 0;
   var scriptProps = PropertiesService.getScriptProperties();
   var globalBatchDefault = parseBooleanProperty_(scriptProps.getProperty('USE_GCP_BATCH'));
   var globalServerlessDefault = parseBooleanProperty_(scriptProps.getProperty('USE_SERVERLESS_FORM_SENDER'));
+
+  function hasAnyKey(obj, keys) {
+    if (!obj || typeof obj !== 'object') {
+      return false;
+    }
+    for (var idx = 0; idx < keys.length; idx++) {
+      if (Object.prototype.hasOwnProperty.call(obj, keys[idx])) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   function collectFrom(obj, keys) {
     if (!obj || typeof obj !== 'object') {
@@ -172,6 +197,9 @@ function resolveTargetingExecutionMode_(targetingConfig) {
   batchCandidates = batchCandidates.concat(collectFrom(config, ['useGcpBatch', 'use_gcp_batch']));
   batchCandidates = batchCandidates.concat(collectFrom(config.targeting || {}, ['useGcpBatch', 'use_gcp_batch']));
   batchCandidates = batchCandidates.concat(collectFrom(config.batch || {}, ['enabled']));
+  var batchFieldsPresent = hasAnyKey(config, ['useGcpBatch', 'use_gcp_batch']) ||
+    hasAnyKey(config.targeting || {}, ['useGcpBatch', 'use_gcp_batch']) ||
+    hasAnyKey(config.batch || {}, ['enabled']);
 
   var batchHasExplicit = hasExplicitValue(batchCandidates);
   var batchExplicitEnabled = batchCandidates.some(parseBooleanProperty_);
@@ -185,15 +213,31 @@ function resolveTargetingExecutionMode_(targetingConfig) {
   var serverlessExplicitEnabled = serverlessCandidates.some(parseBooleanProperty_);
   var serverlessEnabled = serverlessExplicitEnabled || (!serverlessHasExplicit && globalServerlessDefault);
 
+  if (!isGlobalResolution && !batchFieldsPresent && !batchHasExplicit && globalBatchDefault) {
+    console.warn('resolveExecutionMode_: targeting設定に useGcpBatch 列が見つからず Script Property USE_GCP_BATCH を使用しました');
+  }
+
   return {
     batchEnabled: !!batchEnabled,
-    serverlessEnabled: !!serverlessEnabled
+    serverlessEnabled: !!serverlessEnabled,
+    batchHasExplicit: batchHasExplicit,
+    batchExplicitEnabled: !!batchExplicitEnabled,
+    serverlessHasExplicit: serverlessHasExplicit,
+    serverlessExplicitEnabled: !!serverlessExplicitEnabled
   };
 }
 
 function resolveExecutionMode_(targetingConfig) {
   var priority = resolveExecutionModePriority_();
   var modes = resolveTargetingExecutionMode_(targetingConfig || {});
+
+  if (modes.batchExplicitEnabled) {
+    return 'batch';
+  }
+  if (!modes.batchExplicitEnabled && modes.serverlessExplicitEnabled) {
+    return 'serverless';
+  }
+
   for (var i = 0; i < priority.length; i++) {
     var modeCandidate = priority[i];
     if (modeCandidate === 'batch' && modes.batchEnabled) {
@@ -207,6 +251,27 @@ function resolveExecutionMode_(targetingConfig) {
     }
   }
   return 'github';
+}
+
+function isDispatcherConfigured_() {
+  var props = PropertiesService.getScriptProperties();
+  var queue = props.getProperty('FORM_SENDER_TASKS_QUEUE');
+  var dispatcherUrl = props.getProperty('FORM_SENDER_DISPATCHER_URL');
+  var dispatcherBase = props.getProperty('FORM_SENDER_DISPATCHER_BASE_URL');
+
+  function hasValue(value) {
+    return value && typeof value === 'string' && value.trim() !== '';
+  }
+
+  if (!hasValue(queue)) {
+    return false;
+  }
+
+  if (hasValue(dispatcherUrl)) {
+    return true;
+  }
+
+  return hasValue(dispatcherBase);
 }
 
 function readTargetingField_(targetingConfig, keys) {
@@ -231,6 +296,11 @@ function readTargetingField_(targetingConfig, keys) {
 
 function shouldUseServerlessFormSender_() {
   var mode = resolveExecutionMode_(null);
+  return mode === 'serverless';
+}
+
+function shouldUseDispatcherFormSender_() {
+  var mode = resolveExecutionMode_(null);
   return mode === 'batch' || mode === 'serverless';
 }
 
@@ -253,12 +323,31 @@ function ceilTo256_(value) {
   return Math.ceil(value / 256) * 256;
 }
 
-function calculateBatchResourceProfile_(workers) {
-  var vcpu = Math.max(1, workers);
-  var memoryMb = ceilTo256_((workers * 2048) + 2048);
+function calculateBatchResourceProfile_(workers, vcpuPerWorker, memoryPerWorkerMb, bufferMb) {
+  var workerCount = Math.max(1, parseInt(workers, 10) || 1);
+  var resolvedVcpuPerWorker = parseInt(vcpuPerWorker, 10);
+  if (!isFinite(resolvedVcpuPerWorker) || resolvedVcpuPerWorker < 1) {
+    resolvedVcpuPerWorker = 1;
+  }
+
+  var resolvedMemoryPerWorker = parseInt(memoryPerWorkerMb, 10);
+  if (!isFinite(resolvedMemoryPerWorker) || resolvedMemoryPerWorker < 1024) {
+    resolvedMemoryPerWorker = 2048;
+  }
+
+  var resolvedBufferMb = parseInt(bufferMb, 10);
+  if (!isFinite(resolvedBufferMb) || resolvedBufferMb < 0) {
+    resolvedBufferMb = 2048;
+  }
+
+  var totalVcpu = workerCount * resolvedVcpuPerWorker;
+  var totalMemoryMb = ceilTo256_((workerCount * resolvedMemoryPerWorker) + resolvedBufferMb);
+
   return {
-    vcpu: vcpu,
-    memoryMb: memoryMb
+    vcpu: totalVcpu,
+    memoryMb: totalMemoryMb,
+    perWorkerVcpu: resolvedVcpuPerWorker,
+    perWorkerMemoryMb: resolvedMemoryPerWorker
   };
 }
 
@@ -286,15 +375,33 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
   var defaultMaxParallelism = getScriptPropertyInt_('FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT', 100);
   var defaultPreferSpot = parseBooleanProperty_(scriptProps.getProperty('FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT') || 'true');
   var defaultAllowOnDemand = parseBooleanProperty_(scriptProps.getProperty('FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT') || 'true');
+  var machineTypeDefault = getScriptPropertyString_('FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT', null);
   var machineTypeOverride = getScriptPropertyString_('FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE', null);
   var defaultTtlHours = getScriptPropertyInt_('FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH', 48);
   var defaultRefreshSeconds = getScriptPropertyInt_('FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH', 21600);
+  var defaultMaxAttempts = getScriptPropertyInt_('FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT', 1);
+  var defaultVcpuPerWorker = getScriptPropertyInt_('FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT', 1);
+  if (!isFinite(defaultVcpuPerWorker) || defaultVcpuPerWorker < 1) {
+    defaultVcpuPerWorker = 1;
+  }
+  var defaultMemoryPerWorkerMb = getScriptPropertyInt_('FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT', 2048);
+  if (!isFinite(defaultMemoryPerWorkerMb) || defaultMemoryPerWorkerMb < 1024) {
+    defaultMemoryPerWorkerMb = 2048;
+  }
+  var defaultBufferMb = getScriptPropertyInt_('FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT', 2048);
+  if (!isFinite(defaultBufferMb) || defaultBufferMb < 0) {
+    defaultBufferMb = 2048;
+  }
 
-  var maxParallelOverride = readTargetingField_(targetingConfig, ['batch_max_parallelism', 'batchMaxParallelism']);
-  var preferSpotOverride = readTargetingField_(targetingConfig, ['batch_prefer_spot', 'batchPreferSpot']);
-  var fallbackOverride = readTargetingField_(targetingConfig, ['batch_allow_on_demand_fallback', 'batchAllowOnDemandFallback']);
-  var machineTypeField = readTargetingField_(targetingConfig, ['batch_machine_type', 'batchMachineType']);
-  var ttlOverride = readTargetingField_(targetingConfig, ['batch_signed_url_ttl_hours', 'batchSignedUrlTtlHours']);
+  var maxParallelOverride = readTargetingField_(targetingConfig, ['batch_max_parallelism', 'batchMaxParallelism', 'max_parallelism']);
+  var preferSpotOverride = readTargetingField_(targetingConfig, ['batch_prefer_spot', 'batchPreferSpot', 'prefer_spot']);
+  var fallbackOverride = readTargetingField_(targetingConfig, ['batch_allow_on_demand_fallback', 'batchAllowOnDemandFallback', 'allow_on_demand_fallback']);
+  var machineTypeField = readTargetingField_(targetingConfig, ['batch_machine_type', 'batchMachineType', 'machine_type']);
+  var ttlOverride = readTargetingField_(targetingConfig, ['batch_signed_url_ttl_hours', 'batchSignedUrlTtlHours', 'signed_url_ttl_hours']);
+  var batchSignedUrlRefreshSeconds = readTargetingField_(targetingConfig, ['batch_signed_url_refresh_threshold_seconds', 'batchSignedUrlRefreshThresholdSeconds', 'signed_url_refresh_threshold_seconds']);
+  var vcpuPerWorkerOverride = readTargetingField_(targetingConfig, ['batch_vcpu_per_worker', 'batchVcpuPerWorker', 'vcpu_per_worker']);
+  var memoryPerWorkerOverride = readTargetingField_(targetingConfig, ['batch_memory_per_worker_mb', 'batchMemoryPerWorkerMb', 'memory_per_worker_mb']);
+  var batchMaxAttemptsField = readTargetingField_(targetingConfig, ['batch_max_attempts', 'batchMaxAttempts', 'max_attempts']);
 
   var maxParallelism = null;
   if (typeof maxParallelOverride !== 'undefined') {
@@ -317,16 +424,60 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
     allowOnDemand = parseBooleanProperty_(fallbackOverride);
   }
 
-  var resourceProfile = calculateBatchResourceProfile_(workers);
-  var machineType = machineTypeField || machineTypeOverride;
+  var resolvedVcpuPerWorker = defaultVcpuPerWorker;
+  if (typeof vcpuPerWorkerOverride !== 'undefined' && vcpuPerWorkerOverride !== null) {
+    var parsedVcpu = parseInt(vcpuPerWorkerOverride, 10);
+    if (isFinite(parsedVcpu) && parsedVcpu >= 1) {
+      resolvedVcpuPerWorker = parsedVcpu;
+    }
+  }
+
+  var resolvedMemoryPerWorkerMb = defaultMemoryPerWorkerMb;
+  if (typeof memoryPerWorkerOverride !== 'undefined' && memoryPerWorkerOverride !== null) {
+    var parsedMemory = parseInt(memoryPerWorkerOverride, 10);
+    if (isFinite(parsedMemory) && parsedMemory >= 1024) {
+      resolvedMemoryPerWorkerMb = parsedMemory;
+    }
+  }
+
+  var resolvedMaxAttempts = defaultMaxAttempts;
+  if (typeof batchMaxAttemptsField !== 'undefined' && batchMaxAttemptsField !== null) {
+    var parsedAttempts = parseInt(batchMaxAttemptsField, 10);
+    if (isFinite(parsedAttempts) && parsedAttempts >= 1) {
+      resolvedMaxAttempts = parsedAttempts;
+    }
+  }
+  if (!isFinite(resolvedMaxAttempts) || resolvedMaxAttempts < 1) {
+    resolvedMaxAttempts = 1;
+  }
+
+  var resourceProfile = calculateBatchResourceProfile_(workers, resolvedVcpuPerWorker, resolvedMemoryPerWorkerMb, defaultBufferMb);
+  var machineType = machineTypeOverride || machineTypeField || machineTypeDefault;
+  var requestedMachineType = machineType;
   if (!machineType) {
     machineType = 'n2d-custom-' + resourceProfile.vcpu + '-' + resourceProfile.memoryMb;
   }
 
   var parsedMachine = parseCustomMachineProfile_(machineType);
   var memoryWarning = false;
+  var machineTypeFallbackApplied = false;
+  var fallbackMemoryMb = resourceProfile.memoryMb;
+  var fallbackVcpu = resourceProfile.vcpu;
   if (parsedMachine && parsedMachine.memoryMb < resourceProfile.memoryMb) {
     memoryWarning = true;
+    fallbackMemoryMb = Math.max(resourceProfile.memoryMb, 10240);
+    fallbackMemoryMb = ceilTo256_(fallbackMemoryMb);
+    fallbackVcpu = Math.max(resourceProfile.vcpu, 4);
+    console.warn(JSON.stringify({
+      level: 'warning',
+      event: 'batch_machine_type_insufficient',
+      requested_machine_type: machineType,
+      required_memory_mb: resourceProfile.memoryMb,
+      fallback_machine_type: 'n2d-custom-' + fallbackVcpu + '-' + fallbackMemoryMb,
+      workers: resourceProfile.vcpu / Math.max(1, resolvedVcpuPerWorker)
+    }));
+    machineType = 'n2d-custom-' + fallbackVcpu + '-' + fallbackMemoryMb;
+    machineTypeFallbackApplied = true;
   }
 
   var ttlHours = defaultTtlHours;
@@ -337,6 +488,14 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
     }
   }
 
+  var refreshSeconds = defaultRefreshSeconds;
+  if (typeof batchSignedUrlRefreshSeconds !== 'undefined' && batchSignedUrlRefreshSeconds !== null) {
+    var parsedRefresh = parseInt(batchSignedUrlRefreshSeconds, 10);
+    if (isFinite(parsedRefresh) && parsedRefresh >= 60 && parsedRefresh <= 604800) {
+      refreshSeconds = parsedRefresh;
+    }
+  }
+
   var payload = {
     enabled: true,
     max_parallelism: Math.max(1, Math.min(maxParallelism, parallelism || maxParallelism)),
@@ -344,14 +503,25 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
     allow_on_demand_fallback: !!allowOnDemand,
     machine_type: machineType,
     signed_url_ttl_hours: ttlHours,
-    signed_url_refresh_threshold_seconds: defaultRefreshSeconds,
-    vcpu_per_worker: 1,
-    memory_per_worker_mb: 2048
+    signed_url_refresh_threshold_seconds: refreshSeconds,
+    vcpu_per_worker: resolvedVcpuPerWorker,
+    memory_buffer_mb: defaultBufferMb,
+    max_attempts: resolvedMaxAttempts,
+    memory_per_worker_mb: resolvedMemoryPerWorkerMb
   };
 
   if (memoryWarning) {
     payload.memory_warning = true;
     payload.computed_memory_mb = resourceProfile.memoryMb;
+    if (machineTypeFallbackApplied) {
+      if (requestedMachineType) {
+        payload.requested_machine_type = requestedMachineType;
+      }
+      payload.machine_type_overridden = true;
+      payload.fallback_machine_type = machineType;
+      payload.fallback_memory_mb = fallbackMemoryMb;
+      payload.fallback_vcpu = fallbackVcpu;
+    }
   }
 
   return payload;
@@ -392,6 +562,15 @@ function resolveSignedUrlTtlSeconds_(mode) {
     ttlHours = defaultHours;
   }
   return Math.max(1, ttlHours) * 3600;
+}
+
+function listDispatcherExecutionsSafe_(targetingId) {
+  try {
+    return CloudRunDispatcherClient.listRunningExecutions(targetingId);
+  } catch (error) {
+    console.warn('CloudRunDispatcherClient.listRunningExecutions failed: ' + error);
+    return null;
+  }
 }
 
 function allocateRunIndexBase_(targetingId, runTotal) {
@@ -879,6 +1058,12 @@ function processTargeting(targetingId, options) {
     }
 
     var selectedMode = resolveExecutionMode_(targetingConfig);
+    var dispatcherReady = isDispatcherConfigured_();
+
+    if ((selectedMode === 'batch' || selectedMode === 'serverless') && !dispatcherReady) {
+      console.warn('dispatcher 未設定のため GitHub Actions 経路へフォールバックします');
+      selectedMode = 'github';
+    }
 
     if (selectedMode === 'batch') {
       console.log('条件チェック完了。Cloud Tasks 経由で Cloud Batch ジョブを起動します');
@@ -1924,16 +2109,21 @@ function getErrorType(errorMessage) {
  * @returns {Object} 停止処理結果
  */
 function stopAllRunningFormSenderTasks() {
-  if (shouldUseServerlessFormSender_()) {
+  if (shouldUseDispatcherFormSender_()) {
     return stopAllRunningFormSenderTasksServerless_();
+  }
+  var dispatcherResponse = listDispatcherExecutionsSafe_(null);
+  var hasDispatcherExecutions = dispatcherResponse && dispatcherResponse.executions && dispatcherResponse.executions.length > 0;
+  if (hasDispatcherExecutions) {
+    return stopAllRunningFormSenderTasksServerless_(dispatcherResponse);
   }
   return stopAllRunningFormSenderTasksLegacy_();
 }
 
-function stopAllRunningFormSenderTasksServerless_() {
+function stopAllRunningFormSenderTasksServerless_(prefetchedResponse) {
   try {
     console.log('=== 進行中form_sender_task一括停止開始 ===');
-    const response = CloudRunDispatcherClient.listRunningExecutions();
+    const response = prefetchedResponse || CloudRunDispatcherClient.listRunningExecutions();
     const executions = (response && response.executions) || [];
 
     if (executions.length === 0) {
@@ -2053,17 +2243,22 @@ function stopAllRunningFormSenderTasksLegacy_() {
  * @returns {Object} 停止処理結果
  */
 function stopSpecificFormSenderTask(targetingId) {
-  if (shouldUseServerlessFormSender_()) {
+  if (shouldUseDispatcherFormSender_()) {
     return stopSpecificFormSenderTaskServerless_(targetingId);
+  }
+  var dispatcherResponse = listDispatcherExecutionsSafe_(targetingId);
+  var hasDispatcherExecutions = dispatcherResponse && dispatcherResponse.executions && dispatcherResponse.executions.length > 0;
+  if (hasDispatcherExecutions) {
+    return stopSpecificFormSenderTaskServerless_(targetingId, dispatcherResponse);
   }
   return stopSpecificFormSenderTaskLegacy_(targetingId);
 }
 
-function stopSpecificFormSenderTaskServerless_(targetingId) {
+function stopSpecificFormSenderTaskServerless_(targetingId, prefetchedResponse) {
   try {
     console.log(`=== targeting_id ${targetingId} のform_sender_task停止開始 ===`);
 
-    const response = CloudRunDispatcherClient.listRunningExecutions(targetingId);
+    const response = prefetchedResponse || CloudRunDispatcherClient.listRunningExecutions(targetingId);
     const executions = (response && response.executions) || [];
 
     if (executions.length === 0) {
@@ -2311,17 +2506,25 @@ function cancelWorkflowRun(runId) {
  * @returns {Object} 実行中タスクの詳細情報
  */
 function getRunningFormSenderTasks() {
-  if (shouldUseServerlessFormSender_()) {
-    return getRunningFormSenderTasksServerless_();
+  if (shouldUseDispatcherFormSender_()) {
+    return getRunningFormSenderTasksServerless_(null);
   }
+
+  var dispatcherResponse = listDispatcherExecutionsSafe_(null);
+  var hasDispatcherExecutions = dispatcherResponse && dispatcherResponse.executions && dispatcherResponse.executions.length > 0;
+
+  if (hasDispatcherExecutions) {
+    return getRunningFormSenderTasksServerless_(dispatcherResponse);
+  }
+
   return getRunningFormSenderTasksLegacy_();
 }
 
-function getRunningFormSenderTasksServerless_() {
+function getRunningFormSenderTasksServerless_(prefetchedResponse) {
   try {
     console.log('=== 実行中form_sender_task状況確認開始 (serverless) ===');
 
-    const response = CloudRunDispatcherClient.listRunningExecutions();
+    const response = prefetchedResponse || CloudRunDispatcherClient.listRunningExecutions();
     const executions = (response && response.executions) || [];
 
     if (executions.length === 0) {
@@ -2333,6 +2536,20 @@ function getRunningFormSenderTasksServerless_() {
       const metadata = exec.metadata || {};
       const cloudRunMeta = metadata.cloud_run || {};
       const batchMeta = metadata.batch || {};
+      const parallelism = typeof batchMeta.parallelism !== 'undefined' ? batchMeta.parallelism : (metadata.batch_parallelism || null);
+      const arraySize = typeof batchMeta.array_size !== 'undefined' ? batchMeta.array_size : (metadata.batch_array_size || null);
+      const attempts = typeof batchMeta.attempts !== 'undefined' ? batchMeta.attempts : (metadata.batch_attempts || null);
+      const maxRetryCount = typeof batchMeta.max_retry_count !== 'undefined' ? batchMeta.max_retry_count : (metadata.batch_max_retry_count || null);
+      const memoryMb = typeof batchMeta.memory_mb !== 'undefined' ? batchMeta.memory_mb : (metadata.batch_memory_mb || null);
+      const memoryBufferMb = typeof batchMeta.memory_buffer_mb !== 'undefined' ? batchMeta.memory_buffer_mb : (metadata.batch_memory_buffer_mb || null);
+      const preferSpot = typeof batchMeta.prefer_spot !== 'undefined' ? batchMeta.prefer_spot : (metadata.batch_prefer_spot || null);
+      const allowOnDemand = typeof batchMeta.allow_on_demand !== 'undefined' ? batchMeta.allow_on_demand : (metadata.batch_allow_on_demand || null);
+      const memoryWarning = batchMeta.memory_warning === true || metadata.batch_memory_warning === true;
+      const computedMemoryMb = typeof batchMeta.computed_memory_mb !== 'undefined' ? batchMeta.computed_memory_mb : (metadata.batch_computed_memory_mb || null);
+      const machineType = batchMeta.machine_type || metadata.batch_machine_type || null;
+      const requestedMachineType = batchMeta.requested_machine_type || metadata.batch_requested_machine_type || null;
+      const cpuMilli = typeof batchMeta.cpu_milli !== 'undefined' ? batchMeta.cpu_milli : (metadata.batch_cpu_milli || null);
+
       return {
         execution_id: exec.execution_id,
         run_id: exec.execution_id,
@@ -2344,7 +2561,20 @@ function getRunningFormSenderTasksServerless_() {
         cloud_run_execution: cloudRunMeta.execution || metadata.cloud_run_execution || null,
         cloud_run_operation: cloudRunMeta.operation || metadata.cloud_run_operation || null,
         batch_job_name: batchMeta.job_name || metadata.batch_job_name || null,
-        batch_task_group: batchMeta.task_group || metadata.batch_task_group || null
+        batch_task_group: batchMeta.task_group || metadata.batch_task_group || null,
+        batch_parallelism: parallelism,
+        batch_array_size: arraySize,
+        batch_attempts: attempts,
+        batch_max_retry_count: maxRetryCount,
+        batch_memory_mb: memoryMb,
+        batch_memory_buffer_mb: memoryBufferMb,
+        batch_memory_warning: memoryWarning,
+        batch_computed_memory_mb: memoryWarning ? computedMemoryMb : null,
+        batch_prefer_spot: preferSpot,
+        batch_allow_on_demand: allowOnDemand,
+        batch_machine_type: machineType,
+        batch_requested_machine_type: requestedMachineType,
+        batch_cpu_milli: cpuMilli
       };
     });
 
