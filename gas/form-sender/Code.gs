@@ -436,7 +436,7 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
   if (typeof memoryPerWorkerOverride !== 'undefined' && memoryPerWorkerOverride !== null) {
     var parsedMemory = parseInt(memoryPerWorkerOverride, 10);
     if (isFinite(parsedMemory) && parsedMemory >= 1024) {
-      resolvedMemoryPerWorkerMb = parsedMemory;
+      resolvedMemoryPerWorkerMb = Math.max(parsedMemory, 2048);
     }
   }
 

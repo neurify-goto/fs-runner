@@ -140,6 +140,7 @@ done
 ### 4.1 有効化しておくべき GCP API
 ```bash
 gcloud services enable \
+  compute.googleapis.com \
   batch.googleapis.com \
   run.googleapis.com \
   cloudbuild.googleapis.com \
@@ -415,7 +416,7 @@ DISPATCHER_SUPABASE_SERVICE_ROLE_KEY=projects/${PROJECT_ID}/secrets/SUPABASE_SER
 | `FORM_SENDER_DISPATCHER_AUDIENCE` | ID トークン Audience。通常は `FORM_SENDER_DISPATCHER_BASE_URL` と同じ値を設定 |
 | `FORM_SENDER_BATCH_PROJECT_ID` | Cloud Batch を実行するプロジェクト ID（Dispatcher と同一でも可） |
 | `FORM_SENDER_BATCH_LOCATION` | Cloud Batch リージョン（例: `asia-northeast1`） |
-| `FORM_SENDER_BATCH_JOB_TEMPLATE` | Submit 時に利用する Cloud Batch ジョブテンプレート名。`projects/<project>/locations/<region>/jobs/<template>` 形式を推奨 |
+| `FORM_SENDER_BATCH_JOB_TEMPLATE` | Submit 時に利用する Cloud Batch ジョブテンプレート名。`projects/<project>/locations/<region>/jobs/<template>` 形式を推奨。Terraform ではテンプレート作成時に数秒の検証スクリプトのみが実行される |
 | `FORM_SENDER_BATCH_TASK_GROUP` | Cloud Batch タスクグループ名（テンプレート側と一致させる） |
 | `FORM_SENDER_BATCH_SERVICE_ACCOUNT` | Cloud Batch 実行に使用するサービスアカウントのメールアドレス |
 | `FORM_SENDER_BATCH_CONTAINER_IMAGE` | Cloud Batch で pull する Runner イメージ（Artifact Registry の完全修飾名） |

@@ -47,7 +47,7 @@ class BatchOptions(BaseModel):
     allow_on_demand_fallback: bool = Field(default=True)
     machine_type: Optional[str] = None
     signed_url_ttl_hours: Optional[int] = Field(default=None, ge=1, le=168)
-    signed_url_refresh_threshold_seconds: Optional[int] = Field(default=None, ge=60)
+    signed_url_refresh_threshold_seconds: Optional[int] = Field(default=None, ge=60, le=604800)
     vcpu_per_worker: Optional[int] = Field(default=None, ge=1)
     memory_per_worker_mb: Optional[int] = Field(default=None, ge=1024)
     memory_buffer_mb: Optional[int] = Field(default=None, ge=0)

@@ -81,13 +81,35 @@ class SignedUrlManager:
         )
 
     def _resolve_signed_url_policy(self, task: FormSenderTask) -> tuple[int, int]:
-        if task.batch_enabled() and task.batch:
-            ttl_hours = task.batch.signed_url_ttl_hours or self._settings.signed_url_ttl_hours_batch
-            refresh_threshold = task.batch.signed_url_refresh_threshold_seconds or self._settings.signed_url_refresh_threshold_seconds_batch
+        if task.batch_enabled():
+            if task.batch:
+                ttl_hours = task.batch.signed_url_ttl_hours or self._settings.signed_url_ttl_hours_batch
+                refresh_threshold = (
+                    task.batch.signed_url_refresh_threshold_seconds
+                    or self._settings.signed_url_refresh_threshold_seconds_batch
+                )
+            else:
+                ttl_hours = self._settings.signed_url_ttl_hours_batch
+                refresh_threshold = self._settings.signed_url_refresh_threshold_seconds_batch
         else:
             ttl_hours = self._settings.signed_url_ttl_hours
             refresh_threshold = self._settings.signed_url_refresh_threshold_seconds
-        return max(1, ttl_hours), max(60, refresh_threshold)
+
+        ttl_hours = max(1, ttl_hours)
+        refresh_threshold = max(60, refresh_threshold)
+
+        ttl_seconds = ttl_hours * 3600
+        if refresh_threshold >= ttl_seconds:
+            adjusted_threshold = max(60, ttl_seconds - 600)
+            logger.warning(
+                "Signed URL refresh threshold %s seconds exceeds or matches TTL %s seconds. Adjusted to %s seconds.",
+                refresh_threshold,
+                ttl_seconds,
+                adjusted_threshold,
+            )
+            refresh_threshold = adjusted_threshold
+
+        return ttl_hours, refresh_threshold
 
     def _should_resign(self, signed_url: str, refresh_threshold_seconds: int) -> bool:
         parsed = urlparse(signed_url)

@@ -219,9 +219,11 @@ terraform plan
 terraform apply
 ```
 
+> ℹ️ **補足**: `terraform apply` により Cloud Batch ジョブテンプレートが作成される際、内部で 1 回だけ軽量な検証スクリプト (`echo "Form Sender Batch template validated"`) が実行されます。ランナー本番用コンテナは起動せず、ジョブは数秒で完了するため失敗ログは残りません。
+
 実行後、以下が自動的に構成されます。
 
-- Cloud Batch Job Template + Spot / Standard 混在ポリシー  
+- Cloud Batch Job Template（初期実行は検証スクリプトのみ） + Spot / Standard 混在ポリシー  
 - Cloud Storage バケット (client_config 保管) ライフサイクル 7 日  
 - Artifact Registry リポジトリ  
 - Cloud Run dispatcher サービス + Cloud Tasks キュー  
@@ -330,6 +332,8 @@ GitHub Actions を手動実行すると `terraform plan` が走り、`workflow_d
    - `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH = 21600`
    - `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT = 1`
 
+   > ⚠️ `batch_machine_type` 系の値は **カスタムマシンタイプ（例: `n2d-custom-*`）を推奨** します。`e2-standard-2` など標準プリセットを指定すると、dispatcher 側でメモリ不足を事前検知できず Cloud Batch 提出時に失敗する恐れがあります。targeting シートからマシンタイプを上書きする場合も同じ制約が適用されます。
+
 3. targeting シートに以下の列が存在するか確認し、なければ追加:
    - `useGcpBatch`
    - `batch_max_parallelism`
@@ -355,7 +359,29 @@ GitHub Actions を手動実行すると `terraform plan` が走り、`workflow_d
 
    > targeting 列を空にすると Script Properties の値がそのまま使われます。移行初期は Script Properties だけで小さく始め、必要になった Targeting だけ列で上書きする運用が推奨です。
 
+   > ⚠️ TTL と閾値の整合性に注意: `signed_url_refresh_threshold_seconds` を `signed_url_ttl_hours × 3600` 以上に設定すると dispatcher 側で自動的に閾値が TTL 未満へ補正されます。想定外の再署名を避けるため、閾値は TTL より十分短い値（例: TTL=48hなら閾値=21600秒 ≒ 6h）に保ってください。
+
    > ℹ️ `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` で設定したバッファ値は、GAS から dispatcher へ送信される `memory_buffer_mb` フィールドにも埋め込まれます。Cloud Run 側の `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` はフォールバック値として残りますが、Script Properties を更新すれば自動的に Batch 実行へ反映されます。
+
+### 7.4 Cloud Run dispatcher 用環境変数の確認
+
+Terraform を使わずに手動で Cloud Run サービスを更新する場合や、ローカルで `DispatcherSettings.from_env()` を利用する場合は下記の環境変数を忘れずに設定します（`src/dispatcher/config.py` 参照）。`require_batch_configuration()` で不足すると起動時にエラーになります。
+
+| 環境変数 | 用途 |
+| --- | --- |
+| `FORM_SENDER_BATCH_PROJECT_ID` | Batch リソースを作成する GCP プロジェクト ID（省略時は `DISPATCHER_PROJECT_ID` を使用） |
+| `FORM_SENDER_BATCH_LOCATION` | Batch ジョブのリージョン（例: `asia-northeast1`） |
+| `FORM_SENDER_BATCH_JOB_TEMPLATE` | `projects/<proj>/locations/<region>/jobs/<template>` 形式のジョブテンプレート名 |
+| `FORM_SENDER_BATCH_TASK_GROUP` | テンプレートで利用するタスクグループ名（`taskGroups[0].name`） |
+| `FORM_SENDER_BATCH_SERVICE_ACCOUNT` | Batch ジョブが実行するサービスアカウント（メールアドレス形式） |
+| `FORM_SENDER_BATCH_CONTAINER_IMAGE` | Runner イメージの Artifact Registry パス |
+| `FORM_SENDER_BATCH_ENTRYPOINT` | 任意。コンテナのエントリポイントを上書きする場合に指定 |
+| `FORM_SENDER_BATCH_SUPABASE_URL_SECRET` | Supabase URL を格納した Secret Manager リソースパス |
+| `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET` | Supabase Service Role Key の Secret Manager リソースパス |
+| `FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET` | テスト環境向け Supabase URL シークレット（必要な場合のみ） |
+| `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_TEST_SECRET` | テスト環境向け Service Role Key シークレット（必要な場合のみ） |
+
+これらに加えて、Cloud Run dispatcher では従来通り `FORM_SENDER_DISPATCHER_BASE_URL`, `FORM_SENDER_DISPATCHER_AUDIENCE`, `FORM_SENDER_CLOUD_RUN_JOB` などの既存環境変数も必須です。Terraform を利用する場合はモジュールで自動付与されますが、手動デプロイやローカル検証では `.env`・`gcloud run deploy --set-env-vars` などで反映させてください。
 
 4. `gas/form-sender/Code.gs` の `triggerServerlessFormSenderWorkflow_` は Cloud Batch モードを自動判定します。必要に応じて `resolveExecutionMode_()` を利用し、特定 targeting だけ先行移行する運用が可能です。
 

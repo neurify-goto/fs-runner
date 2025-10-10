@@ -128,9 +128,14 @@ resource "google_batch_job" "form_sender_template" {
     parallelism = 1
     task_spec {
       runnables {
-        container {
-          image = var.batch_container_image
-          entrypoint = var.batch_container_entrypoint != "" ? var.batch_container_entrypoint : null
+        # Terraform apply 時に実行されるテンプレート検証ジョブは軽量スクリプトのみを
+        # 実行し、本番ランナーのエントリポイントや環境変数には影響しない。
+        script {
+          text = <<-EOT
+            #!/bin/bash
+            echo "Form Sender Batch template validated: $(date -Is)"
+            exit 0
+          EOT
         }
       }
 
