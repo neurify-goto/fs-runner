@@ -181,9 +181,12 @@ class DispatcherService:
             "JOB_EXECUTION_ID": job_execution_id,
             "JOB_EXECUTION_META": task.job_execution_meta(),
             "FORM_SENDER_CPU_CLASS": cpu_class,
-            "FORM_SENDER_DISPATCHER_BASE_URL": self._settings.dispatcher_base_url,
-            "FORM_SENDER_DISPATCHER_AUDIENCE": self._settings.dispatcher_audience,
         }
+
+        if self._settings.dispatcher_base_url:
+            env_vars["FORM_SENDER_DISPATCHER_BASE_URL"] = self._settings.dispatcher_base_url
+        if self._settings.dispatcher_audience:
+            env_vars["FORM_SENDER_DISPATCHER_AUDIENCE"] = self._settings.dispatcher_audience
 
         if task.tables.submissions_table:
             env_vars["SUBMISSIONS_TABLE"] = task.tables.submissions_table

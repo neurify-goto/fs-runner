@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Dict, Optional
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,8 @@ class DispatcherSettings:
 
     def require_batch_configuration(self) -> None:
         required_fields = {
+            "dispatcher_base_url": "FORM_SENDER_DISPATCHER_BASE_URL (または FORM_SENDER_DISPATCHER_URL から導出)",
+            "dispatcher_audience": "FORM_SENDER_DISPATCHER_AUDIENCE",
             "batch_project_id": "FORM_SENDER_BATCH_PROJECT_ID",
             "batch_location": "FORM_SENDER_BATCH_LOCATION",
             "batch_job_template": "FORM_SENDER_BATCH_JOB_TEMPLATE",
@@ -95,6 +98,19 @@ class DispatcherSettings:
 
         return f"projects/{project_id}/secrets/{secret_id}/versions/latest"
 
+    @staticmethod
+    def _derive_base_url(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return None
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        return base.rstrip('/')
+
     @classmethod
     def from_env(cls) -> "DispatcherSettings":
         def require(name: str) -> str:
@@ -102,6 +118,18 @@ class DispatcherSettings:
             if not value:
                 raise RuntimeError(f"環境変数 {name} が設定されていません")
             return value
+
+        dispatcher_base_url = os.getenv("FORM_SENDER_DISPATCHER_BASE_URL", "") or ""
+        dispatcher_audience = os.getenv("FORM_SENDER_DISPATCHER_AUDIENCE", "") or ""
+        dispatcher_url = os.getenv("FORM_SENDER_DISPATCHER_URL")
+
+        if not dispatcher_base_url and dispatcher_url:
+            derived_base = cls._derive_base_url(dispatcher_url)
+            if derived_base:
+                dispatcher_base_url = derived_base
+
+        if not dispatcher_audience:
+            dispatcher_audience = dispatcher_base_url or ""
 
         return cls(
             project_id=require("DISPATCHER_PROJECT_ID"),
@@ -115,8 +143,8 @@ class DispatcherSettings:
             client_config_bucket=os.getenv("FORM_SENDER_CLIENT_CONFIG_BUCKET"),
             git_token_secret=os.getenv("FORM_SENDER_GIT_TOKEN_SECRET"),
             default_cpu_class=os.getenv("FORM_SENDER_CPU_CLASS_DEFAULT", "standard"),
-            dispatcher_base_url=require("FORM_SENDER_DISPATCHER_BASE_URL"),
-            dispatcher_audience=require("FORM_SENDER_DISPATCHER_AUDIENCE"),
+            dispatcher_base_url=dispatcher_base_url,
+            dispatcher_audience=dispatcher_audience,
             signed_url_ttl_hours_batch=int(os.getenv("FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH", "48")),
             signed_url_refresh_threshold_seconds_batch=int(os.getenv("FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH", "21600")),
             batch_project_id=os.getenv("FORM_SENDER_BATCH_PROJECT_ID") or os.getenv("DISPATCHER_PROJECT_ID"),

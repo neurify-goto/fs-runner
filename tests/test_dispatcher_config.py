@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "src"
 if str(SRC_DIR) not in sys.path:
@@ -74,6 +76,22 @@ def test_batch_secret_environment_preserves_versioned_ids():
 
     env = settings.batch_secret_environment()
     assert env["SUPABASE_URL"] == versioned
-SRC_DIR = ROOT / "src"
-if SRC_DIR.exists():
-    sys.path.insert(0, str(SRC_DIR))
+
+
+def test_require_batch_configuration_requires_dispatcher_base_url():
+    settings = _base_settings(
+        dispatcher_base_url="",
+        dispatcher_audience="",
+        batch_project_id="batch-proj",
+        batch_location="asia-northeast1",
+        batch_job_template="template",
+        batch_task_group="group",
+        batch_service_account_email="svc@batch-proj.iam.gserviceaccount.com",
+        batch_container_image="asia-docker.pkg.dev/proj/repo/image:latest",
+        batch_supabase_url_secret="form_sender_supabase_url",
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        settings.require_batch_configuration()
+
+    assert "FORM_SENDER_DISPATCHER_BASE_URL" in str(excinfo.value)
