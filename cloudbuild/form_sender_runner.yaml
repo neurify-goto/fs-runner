@@ -19,9 +19,23 @@ steps:
         "push",
         "${_IMAGE_NAME}:${SHORT_SHA}"
       ]
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "tag",
+        "${_IMAGE_NAME}:${SHORT_SHA}",
+        "${_IMAGE_NAME}:latest"
+      ]
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "push",
+        "${_IMAGE_NAME}:latest"
+      ]
 
 images:
   - "${_IMAGE_NAME}:${SHORT_SHA}"
+  - "${_IMAGE_NAME}:latest"
 
 options:
   logging: CLOUD_LOGGING_ONLY

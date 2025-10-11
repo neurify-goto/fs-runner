@@ -1,0 +1,15 @@
+# Terraform variables for Cloud Batch runner infrastructure
+# このファイルを terraform.tfvars としてコピーし、下記の値を実プロジェクト向けに編集してください。
+
+project_id                          = "your-project-id"
+region                              = "asia-northeast1"
+gcs_bucket                          = "your-project-id-form-sender-client-config"
+artifact_repo                       = "form-sender-runner"
+batch_container_image               = "asia-northeast1-docker.pkg.dev/your-project-id/form-sender-runner/playwright:latest"
+dispatcher_base_url                 = "https://form-sender-dispatcher-xxxx.a.run.app"
+dispatcher_audience                 = "https://form-sender-dispatcher-xxxx.a.run.app"
+# Supabase のシークレットリソースパスが決まっている場合は配列に追加します（任意）
+# supabase_secret_names            = [
+#   "projects/your-project-id/secrets/form_sender_supabase_url/versions/latest",
+#   "projects/your-project-id/secrets/form_sender_supabase_service_role/versions/latest",
+# ]

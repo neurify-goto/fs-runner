@@ -163,58 +163,63 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
    2. イメージ登録は Cloud Build の **第 2 世代トリガー**で行います。\
       - Cloud Console → **Cloud Build** → **トリガー** で右上の **作成** を押し、「第 2 世代」を選択します（必要に応じて **リポジトリを接続** から GitHub App を連携）。\
       - 「ソース」を *リポジトリ* に設定し、「マネージド リポジトリ」一覧から対象リポジトリを選択してブランチ条件（例: `^main$`）を指定します。\
-      - 「ビルド構成」は *Dockerfile をビルド* を選び、Dockerfile のパスにはリポジトリ直下の `Dockerfile` を指定します（GitHub Actions `deploy-gcp-batch.yml` でも同じパスを利用）。UI 上で「Dockerfile のディレクトリ」が `/`（リポジトリルート）、「Dockerfile のファイル名」が `Dockerfile` になるように入力してください。トリガー対象ブランチは実際に検証したいブランチ（例: `^main$` や `^feature/.*$`）を指定します。実行サービスアカウントは 4.2.0 節で確認した Cloud Build 用サービスアカウント（既定の `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` か、用意した `form-sender-cloudbuild` など）を選択し、付与済みの `Artifact Registry Writer` 権限で Artifact Registry へプッシュできるようにします。\
-      - 同じカード内の下部にある **結果イメージ** 入力欄に、Artifact Registry へプッシュしたいタグ（例: `asia-northeast1-docker.pkg.dev/<project>/<repo>/playwright:latest`）を 1 行ずつ入力します。ここへ値を入れないと、自動で付与されるタグがなくビルドが失敗します。`<project>` と `<repo>` は実際のプロジェクト ID／リポジトリ ID に置き換えてください。dispatcher 用 Dockerfile が別途必要な場合は専用トリガーを作成するか、cloudbuild.yaml にまとめて扱います。\
-      - 画面最下部の **詳細** セクションには「承認」「ビルドログ」「サービス アカウント」の 3 カードが並びます。2025-10 時点の Cloud Console では、Dockerfile モードを選択した場合にログの送信先（`Cloud Logging のみ` やカスタムバケット）を GUI から変更できません。ユーザー管理サービスアカウントを指定した状態でこのまま実行すると、次のエラーでビルドが失敗します。\
-        \
-        `build must either specify build.logs_bucket, use REGIONAL_USER_OWNED_BUCKET build.options.default_logs_bucket_behavior, or select CLOUD_LOGGING_ONLY/NONE logging options`\
-        \
-        回避策として、いずれかを選択してください。\
-        1. Cloud Storage にログ専用バケット（例: `gs://<project>-cloud-build-logs`）を作成し、トリガー作成後に `gcloud builds triggers patch` で `--service-account` と併せて `--build-log-bucket=<bucket>` も指定する。\
-        2. もしくは（推奨）リポジトリに Cloud Build 構成ファイルを追加し、`options.logging: CLOUD_LOGGING_ONLY` を記述したうえでトリガーのビルド構成を *Cloud Build ファイル* に切り替える。手順は後述の「Cloud Build 構成ファイルの例」を参照してください。\
-      - トリガー保存後、一覧のメニュー（︙）から **トリガーを実行** を選択すると指定ブランチの HEAD でビルドが走り、結果は Cloud Build の **ビルド** タブに記録されます。単発ビルドが必要な場合は右上の **ビルドを作成** → 「Dockerfile をビルド」を利用します。\
-   3. ビルド完了後、Artifact Registry の **パッケージ** タブに `playwright:latest` や `dispatcher:latest` が登録されていることを確認し、`form-sender-batch` と `form-sender-dispatcher` のサービスアカウントに `Artifact Registry Reader` ロールが付与されているか再確認します（Cloud Console → **IAM と管理** → **IAM** で対象 SA を検索）。\
+      - 「ビルド構成」は *Cloud Build ファイル* を選び、ファイルパスに `cloudbuild/form_sender_runner.yaml` を入力します。サブスティテューションは `_IMAGE_NAME` がファイル内に定義されているため追加設定は不要です。YAML 側で `:latest` へのタグ付けも自動で行われます。\
+      - 実行サービスアカウントは 4.2.0 節で準備した Cloud Build 用サービスアカウント（既定の `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` か、用意した `form-sender-cloudbuild` など）を選択します。必須ロールは `Artifact Registry Writer`, `Storage Admin`, `Logging Log Writer`, `Cloud Trace Agent`、および既定で付与される `Cloud Build Service Account` 相当です。\
+      - **詳細** セクションの「ビルドログ」カードでは GitHub へのログ送信を無効化（チェックを外す）すると、Cloud Logging のみに記録され機微情報が漏れにくくなります。その他の項目（承認フローなど）はチーム方針に合わせて設定してください。\
+      - トリガー保存後、一覧のメニュー（︙）から **トリガーを実行** を選択すると指定ブランチの HEAD でビルドが走り、結果は Cloud Build の **ビルド** タブに記録されます。単発ビルドが必要な場合は右上の **ビルドを作成** → 「Cloud Build ファイルを使用」を選び、同じ `cloudbuild/form_sender_runner.yaml` を指定してください。\
+   3. ビルド完了後、Artifact Registry の **パッケージ** タブに `playwright` が登録されていることを確認し、パッケージ詳細に表示される `FULL IMAGE NAME`（例: `asia-northeast1-docker.pkg.dev/<project>/form-sender-runner/playwright:<short_sha>`）を控えます。これが `terraform.tfvars` の `batch_container_image` へ記載する値です。固定タグも付けた場合は、そのタグ名を同じ欄に指定してください。また、`form-sender-batch` と `form-sender-dispatcher` のサービスアカウントに `Artifact Registry Reader` ロールが付与されているか再確認します（Cloud Console → **IAM と管理** → **IAM** で対象 SA を検索）。\
 \
    > 参考: [Create and manage build triggers](https://cloud.google.com/build/docs/automating-builds/create-manage-triggers)（最終更新 2025-09-19 UTC）、[Create GitHub App triggers](https://cloud.google.com/build/docs/automating-builds/create-github-app-triggers)（最終更新 2024-09-10 UTC）
 
-   **Cloud Build 構成ファイルの活用（ユーザー管理サービスアカウント使用時）**\
-   1. 本リポジトリには `cloudbuild/form_sender_runner.yaml` を既に含めています。内容は以下のとおりで、必要に応じて `_IMAGE_NAME` のレジストリ名などを自分のプロジェクト向けに調整してください（`${PROJECT_ID}` は Cloud Build が自動的に置き換えます）。\
-      ```yaml
-      # cloudbuild/form_sender_runner.yaml
-      substitutions:
-        _IMAGE_NAME: "asia-northeast1-docker.pkg.dev/$PROJECT_ID/form-sender-runner/playwright"
-
-      steps:
-        - name: gcr.io/cloud-builders/docker
-          args: ["build", "-t", "${_IMAGE_NAME}:${SHORT_SHA}", "."]
-        - name: gcr.io/cloud-builders/docker
-          args: ["push", "${_IMAGE_NAME}:${SHORT_SHA}"]
-
-      images:
-        - "${_IMAGE_NAME}:${SHORT_SHA}"
-
-      options:
-        logging: CLOUD_LOGGING_ONLY
-      ```
-      - `SHORT_SHA` は Cloud Build が自動展開するコミットハッシュ 7 桁です。特定タグ（例: `latest`）を維持したい場合は `images` セクションに `"${_IMAGE_NAME}:latest"` を追記し、追加ステップで `docker tag` → `docker push` を行ってください。
+**Cloud Build 構成ファイルの活用（ユーザー管理サービスアカウント使用時）**\
+   1. 本リポジトリには `cloudbuild/form_sender_runner.yaml` を既に含めています。既定で `${PROJECT_ID}` を使い `asia-northeast1-docker.pkg.dev/<project>/form-sender-runner/playwright:${SHORT_SHA}` と `:latest` の両方へ push します。必要に応じて次の項目だけ書き換えてください。\
+      - Artifact Registry のリポジトリ名を変更したい場合: `_IMAGE_NAME` の `form-sender-runner` 部分を自分のリポジトリ ID に置き換える。\
+      - 追加のビルド手順が必要な場合のみ、Cloud Build ステップを追記する（Playwright 依存のインストールは既に Dockerfile 側で完結しています）。
    2. Cloud Build トリガーの編集画面に戻り、「ビルド構成」を *Cloud Build ファイル* に変更し、ファイルパスに `cloudbuild/form_sender_runner.yaml` を入力します。サブスティテューション `_IMAGE_NAME` はファイル内で既に定義済みのため、UI の「変数」セクションで追加設定を行う必要はありません（プロジェクト名を変更したい場合のみ上書きします）。
-   3. このファイルを利用すると `options.logging: CLOUD_LOGGING_ONLY` が常に適用されるため、ユーザー管理サービスアカウントでもエラー無くビルドが実行されます。必要に応じて `logging: REGIONAL_USER_OWNED_BUCKET` や `defaultLogsBucketBehavior` へ変更しても構いません。
+   3. このファイルを利用すると `options.logging: CLOUD_LOGGING_ONLY` が常に適用されるため、ユーザー管理サービスアカウントでもエラー無くビルドが実行されます。必要に応じて `logging: REGIONAL_USER_OWNED_BUCKET` や `defaultLogsBucketBehavior` へ変更してください。
 
-4. **Cloud Batch ジョブテンプレート**\
-   Cloud Console → **Batch** → **ジョブ テンプレート** → **テンプレートを作成**。リージョンは `asia-northeast1`、テンプレート名は `form-sender-batch-template` など任意で構いません。タスク グループでは次の項目を設定します。\
-   - コンテナイメージ: 手順 3 で登録した Runner イメージ\
-   - サービスアカウント: `form-sender-batch@<project>.iam.gserviceaccount.com`\
-   - 環境変数: `FORM_SENDER_ENV=gcp_batch`, `FORM_SENDER_LOG_SANITIZE=1`, `FORM_SENDER_DISPATCHER_BASE_URL=<Cloud Run URL>`, `FORM_SENDER_DISPATCHER_AUDIENCE=<Cloud Run URL>`, `FORM_SENDER_CLIENT_CONFIG_BUCKET=<バケット名>`, `FORM_SENDER_BATCH_PROJECT_ID=<project>`, `FORM_SENDER_BATCH_LOCATION=asia-northeast1`, `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT=100` など Runner・dispatcher が参照する値をすべて入力\
-   - コンピュート リソース: `CPU (milli)` を 4000、`メモリ (MiB)` を 10240 に設定し `n2d-custom-4-10240` 相当とする\
-   - リトライ: `maxRetryCount` を 0（再実行なし）または運用ポリシーに従って設定\
-   割り当てポリシーでは `Spot` を最優先にし、必要に応じて Standard（オンデマンド）を追加します。
+4. **Cloud Batch ジョブテンプレート（Terraform）**\
+   Cloud Batch のテンプレート編集機能はコンソールからは一部オプションが設定できないため、リポジトリ同梱の Terraform 定義で作成・更新するのが確実です。citeturn0search0\
+   1. `infrastructure/gcp/batch/terraform.tfvars.example` を `terraform.tfvars` にコピーし、以下の値だけ自分の環境向けに書き換えます。\
+      - `project_id`, `region`\
+      - `gcs_bucket`（推奨: `<project>-form-sender-client-config`）\
+      - `artifact_repo`（Cloud Build で push している Artifact Registry のリポジトリ ID）\
+      - `batch_container_image`（最新タグまたは固定タグ）\
+      - `dispatcher_base_url`, `dispatcher_audience`（Cloud Run dispatcher の URL）\
+      Supabase の Secret Manager リソースを利用する場合は `supabase_secret_names` 配列のコメントを外して設定します。\
+   2. Terraform を実行します（`terraform.tfvars` があるため追加の `-var` 指定は不要です）。\
+      ```bash
+      cd infrastructure/gcp/batch
+      terraform init
+      terraform plan
+      terraform apply -auto-approve
+      ```
+      `terraform apply` 実行時にテンプレート検証用の軽量ジョブが 1 度だけ走ります（`google_batch_job.form_sender_template` 参照）。完了後、`terraform output` でテンプレート名・タスクグループ名・Batch 用サービスアカウントが確認できます。\
+   3. Terraform から出力される `batch_job_template_name` を Script Properties `FORM_SENDER_BATCH_JOB_TEMPLATE` に、`batch_task_group_name` を `FORM_SENDER_BATCH_TASK_GROUP` に設定します。Outputs は `terraform output -json` から参照可能です。\
+   4. dispatcher が実ジョブを投入する際は `src/dispatcher/gcp.py` の `_calculate_resources()` でワーカー数や targeting オプションに基づき vCPU・メモリ・マシンタイプが動的に再計算されます。テンプレートに書いた 4000 milliCPU / 10240 MiB はあくまでベースラインであり、`batch_vcpu_per_worker_mb_default` や targeting シートの `batch_memory_per_worker_mb` を変更すると即座に反映されます。citeturn1shell3
 
 5. **Cloud Run dispatcher のデプロイ**\
-   Cloud Console → **Cloud Run** → **サービスを作成**。コンテナイメージに dispatcher 用イメージを指定し、リージョンは `asia-northeast1`、サービスアカウントは `form-sender-dispatcher@<project>.iam.gserviceaccount.com` を選択します。**環境変数** タブで以下を登録し、Secret Manager の値は「秘密」から参照させてください。\
-   - Supabase 関連: `DISPATCHER_SUPABASE_URL`, `DISPATCHER_SUPABASE_SERVICE_ROLE_KEY`\
-   - Dispatcher 基本設定: `DISPATCHER_PROJECT_ID`, `DISPATCHER_LOCATION`, `FORM_SENDER_CLOUD_RUN_JOB`, `FORM_SENDER_DISPATCHER_BASE_URL`, `FORM_SENDER_DISPATCHER_AUDIENCE`\
-   - Batch 連携: `FORM_SENDER_BATCH_PROJECT_ID`, `FORM_SENDER_BATCH_LOCATION`, `FORM_SENDER_BATCH_JOB_TEMPLATE`, `FORM_SENDER_BATCH_TASK_GROUP`, `FORM_SENDER_BATCH_SERVICE_ACCOUNT`, `FORM_SENDER_BATCH_CONTAINER_IMAGE`, `FORM_SENDER_BATCH_SUPABASE_URL_SECRET`, `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET`\
-   デプロイ後に表示されるサービス URL を控え、後続の Cloud Batch テンプレートや GAS Script Properties に利用します。
+   Cloud Run は Cloud Tasks からの HTTP リクエストを受け取り Cloud Batch ジョブを起動するエントリポイントです。次の手順で `form-sender-dispatcher` サービスを作成します。\
+   1. Cloud Console → **Cloud Run** → **サービスを作成** を開き、ソースは *既存のコンテナ イメージをデプロイ*（デフォルト）を選択します。\
+      - **コンテナ イメージの URL**: `asia-northeast1-docker.pkg.dev/<project>/form-sender-runner/playwright:latest` を入力し **選択**。Cloud Build トリガーが `:latest` を常に更新するため、このタグを指定します。\
+   2. **構成** セクションで以下を設定します。\
+      - **サービス名**: `form-sender-dispatcher`（任意ですが GAS の Script Properties と一致させることを推奨）\
+      - **リージョン**: `asia-northeast1 (東京)`\
+      - **認証**: *認証が必要* を選択し、IAM のみ有効にします（Cloud Tasks からのリクエストが OIDC で認証されるため）。\
+      - **課金**: *リクエスト ベース* のままで問題ありません。\
+      - **サービスのスケーリング**: *自動スケーリング* を選択し、`インスタンスの最小数` = 0、`インスタンスの最大数` = 10（要件に応じて調整）。\
+      - **Ingress**: *すべて* を選択し、インターネット経由のリクエストを許可したうえで IAM で制限します。\
+   3. **コンテナ、ボリューム、ネットワーキング、セキュリティ** → **コンテナ** を開き、`編集` から次の値を設定します。\
+      - **コンテナポート**: `8080`（既定）\
+      - **メモリ**: `512 MiB` 以上（Playwright dispatcher は軽量なので既定値で可）\
+      - **CPU**: `1`\
+      - **環境変数**: **変数とシークレット** をクリックし、以下を追加します。Secret Manager から値を参照するものは「シークレット」タブで指定してください。\
+        - Supabase 関連: `DISPATCHER_SUPABASE_URL`, `DISPATCHER_SUPABASE_SERVICE_ROLE_KEY`\
+        - Dispatcher 基本設定: `DISPATCHER_PROJECT_ID`, `DISPATCHER_LOCATION`, `FORM_SENDER_CLOUD_RUN_JOB`, `FORM_SENDER_DISPATCHER_BASE_URL`, `FORM_SENDER_DISPATCHER_AUDIENCE`\
+        - Batch 連携: `FORM_SENDER_BATCH_PROJECT_ID`, `FORM_SENDER_BATCH_LOCATION`, `FORM_SENDER_BATCH_JOB_TEMPLATE`, `FORM_SENDER_BATCH_TASK_GROUP`, `FORM_SENDER_BATCH_SERVICE_ACCOUNT`, `FORM_SENDER_BATCH_CONTAINER_IMAGE`, `FORM_SENDER_BATCH_SUPABASE_URL_SECRET`, `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET`\
+      - **サービスアカウント**: 画面下部の **セキュリティ** セクションで `form-sender-dispatcher@<project>.iam.gserviceaccount.com` を選択します。存在しない場合は 4.2.0 節の手順で作成してください。\
+      - その他の項目（ヘルスチェック、同時実行数、起動時 CPU ブーストなど）は既定値のままで構いません。要件に応じて調整する場合のみ変更してください。\
+   4. **作成** を押してデプロイし、完了後に表示される **エンドポイント URL**（例: `https://form-sender-dispatcher-xxxx.a.run.app`）を控えます。`terraform.tfvars` の `dispatcher_base_url` / `dispatcher_audience`、および GAS Script Properties の `FORM_SENDER_DISPATCHER_BASE_URL` へ同じ値を設定します。
 
 6. **Cloud Tasks キュー**\
    Cloud Console → **Cloud Tasks** → **キューを作成**。名前は `form-sender-dispatcher`、リージョンは `asia-northeast1` を指定。ターゲットに HTTP を選択し、URL に `https://<cloud-run-url>/v1/form-sender/tasks` を入力します。認証方式は OIDC を選択し、サービスアカウントに `form-sender-dispatcher@<project>.iam.gserviceaccount.com` を設定。リトライ設定は既定値をベースに運用ポリシーへ合わせて調整します。
