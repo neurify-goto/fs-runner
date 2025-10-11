@@ -163,7 +163,8 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
    2. イメージ登録は Cloud Build の **第 2 世代トリガー**で行います。\
       - Cloud Console → **Cloud Build** → **トリガー** で右上の **作成** を押し、「第 2 世代」を選択します（必要に応じて **リポジトリを接続** から GitHub App を連携）。\
       - 「ソース」を *リポジトリ* に設定し、「マネージド リポジトリ」一覧から対象リポジトリを選択してブランチ条件（例: `^main$`）を指定します。\
-      - 「ビルド構成」は *Dockerfile をビルド* を選び、Dockerfile のパスにはリポジトリ直下の `Dockerfile` を指定します（GitHub Actions `deploy-gcp-batch.yml` でも同じパスを利用）。UI 上で「Dockerfile のディレクトリ」が `/`（リポジトリルート）、「Dockerfile のファイル名」が `Dockerfile` になるように入力してください。トリガー対象ブランチは実際に検証したいブランチ（例: `^main$` や `^feature/.*$`）を指定します。実行サービスアカウントは 4.2.0 節で確認した Cloud Build 用サービスアカウント（既定の `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` か、用意した `form-sender-cloudbuild` など）を選択し、付与済みの `Artifact Registry Writer` 権限で Artifact Registry へプッシュできるようにします。出力イメージ名 `asia-northeast1-docker.pkg.dev/<project>/<repo>/playwright:latest` も忘れずに入力します。dispatcher 用 Dockerfile が別途必要な場合は専用トリガーを作成するか、cloudbuild.yaml にまとめて扱います。\
+      - 「ビルド構成」は *Dockerfile をビルド* を選び、Dockerfile のパスにはリポジトリ直下の `Dockerfile` を指定します（GitHub Actions `deploy-gcp-batch.yml` でも同じパスを利用）。UI 上で「Dockerfile のディレクトリ」が `/`（リポジトリルート）、「Dockerfile のファイル名」が `Dockerfile` になるように入力してください。トリガー対象ブランチは実際に検証したいブランチ（例: `^main$` や `^feature/.*$`）を指定します。実行サービスアカウントは 4.2.0 節で確認した Cloud Build 用サービスアカウント（既定の `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` か、用意した `form-sender-cloudbuild` など）を選択し、付与済みの `Artifact Registry Writer` 権限で Artifact Registry へプッシュできるようにします。\
+      - 同じカード内の下部にある **結果イメージ** 入力欄に、Artifact Registry へプッシュしたいタグ（例: `asia-northeast1-docker.pkg.dev/<project>/<repo>/playwright:latest`）を 1 行ずつ入力します。ここへ値を入れないと、自動で付与されるタグがなくビルドが失敗します。`<project>` と `<repo>` は実際のプロジェクト ID／リポジトリ ID に置き換えてください。dispatcher 用 Dockerfile が別途必要な場合は専用トリガーを作成するか、cloudbuild.yaml にまとめて扱います。\
       - 画面最下部の **詳細** セクションには「承認」「ビルドログ」「サービス アカウント」の 3 カードが並びます。2025-10 時点の Cloud Console では、Dockerfile モードを選択した場合にログの送信先（`Cloud Logging のみ` やカスタムバケット）を GUI から変更できません。ユーザー管理サービスアカウントを指定した状態でこのまま実行すると、次のエラーでビルドが失敗します。\
         \
         `build must either specify build.logs_bucket, use REGIONAL_USER_OWNED_BUCKET build.options.default_logs_bucket_behavior, or select CLOUD_LOGGING_ONLY/NONE logging options`\
@@ -177,7 +178,7 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
    > 参考: [Create and manage build triggers](https://cloud.google.com/build/docs/automating-builds/create-manage-triggers)（最終更新 2025-09-19 UTC）、[Create GitHub App triggers](https://cloud.google.com/build/docs/automating-builds/create-github-app-triggers)（最終更新 2024-09-10 UTC）
 
    **Cloud Build 構成ファイルの活用（ユーザー管理サービスアカウント使用時）**\
-   1. 本リポジトリには `cloudbuild/form_sender_runner.yaml` を既に含めています。内容は以下のとおりで、必要に応じて `_IMAGE_NAME` のレジストリ名などを自分のプロジェクト向けに調整してください。\
+   1. 本リポジトリには `cloudbuild/form_sender_runner.yaml` を既に含めています。内容は以下のとおりで、必要に応じて `_IMAGE_NAME` のレジストリ名などを自分のプロジェクト向けに調整してください（`${PROJECT_ID}` は Cloud Build が自動的に置き換えます）。\
       ```yaml
       # cloudbuild/form_sender_runner.yaml
       substitutions:

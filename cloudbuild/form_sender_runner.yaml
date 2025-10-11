@@ -2,7 +2,7 @@
 # 詳細手順は docs/form_sender_gcp_batch_setup_guide.md の 5.2.3.2 / 6.1 節を参照
 
 substitutions:
-  _IMAGE_NAME: "asia-northeast1-docker.pkg.dev/$PROJECT_ID/form-sender-runner/playwright"
+  _IMAGE_NAME: "asia-northeast1-docker.pkg.dev/${PROJECT_ID}/form-sender-runner/playwright"
 
 steps:
   - name: gcr.io/cloud-builders/docker
