@@ -1,5 +1,5 @@
 substitutions:
-  _IMAGE_NAME: "asia-northeast1-docker.pkg.dev/$PROJECT_ID/form-sender-runner/dispatcher"
+  _IMAGE_NAME: "asia-northeast1-docker.pkg.dev/${PROJECT_ID}/form-sender-runner/dispatcher"
 
 steps:
   - name: gcr.io/cloud-builders/docker
