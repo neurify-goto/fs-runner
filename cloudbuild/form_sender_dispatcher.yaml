@@ -22,3 +22,6 @@ steps:
 images:
   - "${_IMAGE_NAME}:${SHORT_SHA}"
   - "${_IMAGE_NAME}:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
