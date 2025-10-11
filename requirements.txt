@@ -38,7 +38,7 @@ google-cloud-tasks==2.16.3
 google-cloud-run==0.10.1
 google-cloud-storage==2.16.0
 google-cloud-secret-manager==2.20.0
-google-cloud-batch>=1.11.0
+google-cloud-batch==0.17.37
 google-auth==2.35.0
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
