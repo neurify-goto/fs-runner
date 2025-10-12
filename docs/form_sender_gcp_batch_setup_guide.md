@@ -97,14 +97,14 @@ Cloud Batch では `job_executions.metadata.batch` を新しく利用するた�
    - **Cloud Batch Runner 用**（例: `form-sender-batch`）
    - **Cloud Run dispatcher 用**（例: `form-sender-dispatcher`）
    - **Cloud Build 実行用**: 自動で用意される `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` をそのまま使うのが最も簡単です。プロジェクト番号は Cloud Console 上部のプロジェクトセレクタに表示されています。独自に権限を分離したい場合は、追加でカスタム SA（例: `form-sender-cloudbuild`）を作成しても構いません。
-   - **Terraform 実行（GitHub Actions）用**: `form-sender-terraform` など、後述の Workload Identity Federation で GitHub Actions と紐付けるサービスアカウントを 1 つ準備します。
+   - **Terraform 実行（GitHub Actions）用**: `form-sender-terraform` など（GitHub Actions 連携が必要な場合のみ）。詳細は `docs/github_actions_batch_ci.md` を参照します。
 3. 作成直後のロール割り当てウィザード、またはサービスアカウント詳細 → **権限** → **権限を追加** で最低限以下のロールを付与します。
    - Batch Runner 用: `roles/batch.admin`, `roles/secretmanager.secretAccessor`, `roles/storage.objectAdmin`, `roles/artifactregistry.reader`
    - Dispatcher 用: `roles/run.admin`, `roles/secretmanager.secretAccessor`, `roles/cloudtasks.enqueuer`, `roles/iam.serviceAccountTokenCreator`
    - Cloud Build 実行用: `roles/artifactregistry.writer`, `roles/storage.admin`, `roles/logging.logWriter`, `roles/cloudtrace.agent`（既定の Cloud Build サービスアカウントには `roles/cloudbuild.builds.builder` が自動付与されています。新規プロジェクトではステージング用 Cloud Storage バケットを自動作成するため `roles/storage.admin` が必須です。カスタム SA を使う場合は同ロールも追加してください）
    - Terraform 実行用: `roles/run.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/batch.admin`, `roles/artifactregistry.admin`, `roles/secretmanager.admin`, `roles/storage.admin`, `roles/cloudtasks.admin`, `roles/logging.admin`（インフラを Terraform で一括管理できるよう、事前準備チェックリスト 4. の権限と同等に揃えます）
 4. Cloud Build 実行用サービスアカウントは「ビルドを実行する主体」であり、Cloud Batch Runner / dispatcher 用とは別物です。5.2.3.2 節の Cloud Build トリガー画面では、このサービスアカウントを選択してください。
-5. Terraform 実行用サービスアカウントは GitHub Actions の Workload Identity Federation で利用します（6.0 節参照）。Cloud Build のサービスアカウントとは役割が異なるため混同しないよう注意してください。
+5. Terraform 実行用サービスアカウントは、GitHub Actions 連携ガイド（`docs/github_actions_batch_ci.md`）で説明する Workload Identity Federation で利用します。必要がなければ作成・設定しなくても構いません。
 6. 後からロールを追加したい場合は、**IAM と管理** 画面で対象サービスアカウントの **アクセス権** を編集します。
 
 > ℹ️ Terraform を利用する場合は、この段階で作成したサービスアカウントのメールアドレスを変数ファイルに記載しておくと、後続の設定がスムーズです。
@@ -188,7 +188,7 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
       - **リージョン**: `asia-northeast1`。ゾーンは `any` のままで問題ありません。\
       - **タスク数 / 並列数**: それぞれ `1`。dispatcher が実際のジョブ投入時に上書きするため、テンプレートでは最小構成にします。\
       - **コンテナ イメージ**: `asia-northeast1-docker.pkg.dev/<project>/form-sender-runner/playwright:latest`。必要に応じて `Entry point` を `/bin/sh`、`CMD` を `-c "echo Template"` のような軽量コマンドにしておくと初回実行時に成功しやすくなります。\
-      - **環境変数**: 7.4 節の一覧に従って `FORM_SENDER_BATCH_*` 系、`FORM_SENDER_DISPATCHER_BASE_URL` などを入力します。Secret Manager の値は「シークレット」タブから `projects/<project>/secrets/.../versions/latest` を選択します。\
+      - **環境変数**: 6.3 節の一覧に従って `FORM_SENDER_BATCH_*` 系、`FORM_SENDER_DISPATCHER_BASE_URL` などを入力します。Secret Manager の値は「シークレット」タブから `projects/<project>/secrets/.../versions/latest` を選択します。\
       - **追加ストレージ（任意）**: 入出力データを共有する必要がある場合のみ「Additional configurations → Storage volumes → Add new volume」から Cloud Storage バケットをマウントします。バケット名とマウントパス（例: `/mnt/disks/client-config`）を指定するとタスク内でローカルフォルダとして利用できます。不要であれば設定しなくて構いません。citeturn0search0\
       - **リソース仕様**: Provisioning model は Spot（フォールバックあり）を推奨。コンソールではプリセットのマシンタイプのみ選択できるため、`n2d-standard-4` など最終的に必要となる vCPU/メモリを満たすタイプを選び、`Resources per task` の vCPU（`cpuMilli`）とメモリ（`memoryMiB`）がマシンタイプの上限を超えないようにしてください。`n2d-custom-4-10240` のようなカスタム形状を利用したい場合は、`gcloud batch jobs submit --config job.json` 等で `allocationPolicy.instances[].policy.machineType` にカスタム文字列を指定する必要があります。詳細はコンソールドキュメントの「Resource specifications」節を参照。citeturn0search0\
         ```json
@@ -278,77 +278,14 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 
 > 📝 手動構築では設定漏れが起こりやすいため、設定内容を記録しチーム内でレビューする運用を推奨します。再現性や差分管理が必要になったら Terraform への移行を検討してください。
 
----
+## 6. GAS (Apps Script) 設定
 
-## 6. コンテナイメージのビルド & GitHub Actions 設定
-
-### 6.0 GitHub Actions Workload Identity Federation の準備（Cloud Console）
-
-GitHub Actions から GCP へ安全に接続するため、Terraform 実行用サービスアカウント（4.2.0 節）と GitHub リポジトリを Workload Identity Federation で紐付けます。すべて Cloud Console の GUI で完了できます。
-
-1. Cloud Console → **IAM と管理** → **Workload Identity Federation** を開き、上部の **プールを作成** をクリックします。
-   - **名前**: `fs-runner-gha` など判別しやすい ID。
-   - **表示名**: `GitHub Actions Pool` など任意。
-   - **場所**: 既定の `global` のままにします。
-   - 作成後、一覧にプールが追加されるのでクリックして詳細へ移動します。
-2. プール詳細画面の **プロバイダ** タブで **プロバイダを追加** → **OIDC** を選択し、以下の値を入力します。
-   - **プロバイダ ID**: `github`
-   - **発行元 URL**: `https://token.actions.githubusercontent.com`
-   - **表示名**: 任意（例: `GitHub`）
-   - **属性マッピング**: 
-     - `google.subject=assertion.sub`
-     - `attribute.repository=assertion.repository`
-   - **属性条件**: `attribute.repository == "neurify-goto/fs-runner"`
-   - **対象サービスアカウント** は後段で付与するため、ここでは設定不要です。
-   - プレビューで問題が無いことを確認し、**作成** をクリックします。
-3. プール詳細画面に戻り、右側に表示される **リソース名**（`projects/.../locations/global/workloadIdentityPools/.../providers/...` の形式）を控えます。これは後で GitHub Secrets `GCP_WORKLOAD_IDENTITY_PROVIDER` に登録します。
-4. 同じ画面の **サービス アカウントへのアクセス権** セクションで **アクセス権を付与** をクリックし、以下の設定で Terraform 実行用サービスアカウントを紐付けます。
-   - **対象サービスアカウント**: 4.2.0 節で作成した `form-sender-terraform@<project>.iam.gserviceaccount.com`。
-   - **ロール**: `Workload Identity User`
-   - **条件**: `attribute.repository == "neurify-goto/fs-runner"`
-   - 保存すると一覧に対象サービスアカウントが表示され、GitHub リポジトリからの呼び出しが許可されます。
-5. GitHub リポジトリ → **Settings** → **Secrets and variables** → **Actions** に移動し、以下のシークレットを登録します。
-   - `GCP_WORKLOAD_IDENTITY_PROVIDER`: 手順 3 で控えたリソース名
-   - `GCP_TERRAFORM_SERVICE_ACCOUNT`: `form-sender-terraform@<project>.iam.gserviceaccount.com`
-6. 既に GitHub Workflow 側（`.github/workflows/deploy-gcp-batch.yml`）では `permissions: id-token: write` が設定済みです。上記シークレットを登録すれば、`google-github-actions/auth@v2` ステップで自動的に連携されます。複数ブランチを許可する場合は、属性条件の `attribute.repository` を対象リポジトリに合わせて調整してください。
-
-### 6.1 Cloud Build トリガーで Runner イメージを更新する
-
-1. Cloud Console → **Cloud Build** → **トリガー** を開き、5.2.3.2 節で作成した Playwright Runner 用トリガーを選択します。
-2. 右側の **実行** ボタンをクリックし、ダイアログで対象ブランチ（例: `main`）とサブスティテューションが正しいかを確認してから **実行** を押します。
-3. **ビルド** タブで進行状況を確認します。完了すると緑色のチェックが表示され、ログ上部にビルド ID が記録されます。エラーが出た場合はログを開き、`docker build` や `artifactregistry` の行で失敗していないかを確認してください。
-4. 成功後、Artifact Registry → リポジトリ → 対象パッケージ (`playwright`) を開き、最新タグ（例: `:latest` または コミットハッシュ）が追加されていることを確認します。GitHub Actions や Terraform で参照するタグはここに表示されたものを利用してください。
-
-> 💡 手元での検証用にローカルビルドが必要な場合は、`gcloud auth configure-docker` → `docker build` → `docker push` を行いますが、本番運用では Cloud Build トリガー経由の更新だけで十分です。
-
-### 6.2 GitHub Actions シークレット
-
-`.github/workflows/deploy-gcp-batch.yml` では以下のシークレットを利用します。リポジトリの Settings → Secrets から登録してください。
-
-| 名前 | 用途 |
-| --- | --- |
-| `GCP_PROJECT_ID` | Terraform / gcloud 用 Project ID |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation 設定 |
-| `GCP_TERRAFORM_SERVICE_ACCOUNT` | Terraform 実行 Service Account メール |
-| `DISPATCHER_BASE_URL` | Cloud Run dispatcher の本番 URL |
-| `DISPATCHER_AUDIENCE` | ID トークン Audience (通常は Base URL と同一) |
-| `SUPABASE_URL_SECRET_ID` | Secret Manager のリソースパス |
-| `SUPABASE_SERVICE_ROLE_SECRET_ID` | 同上 (Service Role Key) |
-| `SUPABASE_URL_TEST_SECRET_ID` | テスト用 (任意) |
-| `SUPABASE_SERVICE_ROLE_TEST_SECRET_ID` | テスト用 (任意) |
-
-GitHub Actions を手動実行すると `terraform plan` が走り、`workflow_dispatch` で `apply=true` にすると本番反映されます。
-
----
-
-## 7. GAS (Apps Script) 設定
-
-1. GAS エディタ → プロジェクトの Script Properties を開き、既存の dispatcher 関連設定が空になっていないか必ず確認します。
+### 6.1 Script Properties の初期設定
+1. GAS エディタ → **プロジェクトの設定** → **スクリプト プロパティ** を開き、既存の dispatcher 関連設定が空になっていないか必ず確認します。
    - `FORM_SENDER_TASKS_QUEUE`
    - `FORM_SENDER_DISPATCHER_URL` または `FORM_SENDER_DISPATCHER_BASE_URL`
-   > これらが未設定の場合、GAS 側は自動的に GitHub Actions 経路へフォールバックし Cloud Batch を利用しません。スポット移行後も Batch 実行が意図せず停止しないよう、移行前後で値を控えておくことを推奨します。
-
-2. GAS エディタで Script Properties に以下を追加/更新:
+   > これらが未設定の場合、GAS 側は自動的に GitHub Actions 経路へフォールバックし Cloud Batch を利用しません。移行前後で値を控えておくと復旧が容易です。
+2. 同じ画面で次のキーを追加または更新します。
    - `USE_GCP_BATCH = true`
    - `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT = true`
    - `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = true`
@@ -357,14 +294,15 @@ GitHub Actions を手動実行すると `terraform plan` が走り、`workflow_d
    - `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT = 1`
    - `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT = 2048`
    - `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT = 2048`
-   - `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE =` (必要な場合のみ)
+   - `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE =` （必要に応じて）
    - `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH = 48`
    - `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH = 21600`
    - `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT = 1`
 
-   > ⚠️ `batch_machine_type` 系の値は **カスタムマシンタイプ（例: `n2d-custom-*`）を推奨** します。`e2-standard-2` など標準プリセットを指定すると、dispatcher 側でメモリ不足を事前検知できず Cloud Batch 提出時に失敗する恐れがあります。targeting シートからマシンタイプを上書きする場合も同じ制約が適用されます。
+   > ⚠️ `batch_machine_type` 系の値は **カスタムマシンタイプ（例: `n2d-custom-*`）を推奨** します。`e2-standard-2` などプリセットを指定すると dispatcher がメモリ不足を事前検知できず、Cloud Batch 提出時に失敗する恐れがあります。
 
-3. targeting シートに以下の列が存在するか確認し、なければ追加:
+### 6.2 Targeting シートの更新
+1. targeting シートに以下の列が存在するか確認し、なければ追加します。
    - `useGcpBatch`
    - `batch_max_parallelism`
    - `batch_prefer_spot`
@@ -389,13 +327,13 @@ GitHub Actions を手動実行すると `terraform plan` が走り、`workflow_d
 
    > targeting 列を空にすると Script Properties の値がそのまま使われます。移行初期は Script Properties だけで小さく始め、必要になった Targeting だけ列で上書きする運用が推奨です。
 
-   > ⚠️ TTL と閾値の整合性に注意: `signed_url_refresh_threshold_seconds` を `signed_url_ttl_hours × 3600` 以上に設定すると dispatcher 側で自動的に閾値が TTL 未満へ補正されます。想定外の再署名を避けるため、閾値は TTL より十分短い値（例: TTL=48hなら閾値=21600秒 ≒ 6h）に保ってください。
+   > ⚠️ TTL と閾値の整合性に注意: `signed_url_refresh_threshold_seconds` を `signed_url_ttl_hours × 3600` 以上に設定すると dispatcher 側で自動的に閾値が TTL 未満へ補正されます。閾値は TTL より十分短い値（例: TTL=48hなら閾値=21600秒 ≒ 6h）に保ってください。
 
-   > ℹ️ `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` で設定したバッファ値は、GAS から dispatcher へ送信される `memory_buffer_mb` フィールドにも埋め込まれます。Cloud Run 側の `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` はフォールバック値として残りますが、Script Properties を更新すれば自動的に Batch 実行へ反映されます。
+   > ℹ️ `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` で設定したバッファ値は、GAS から dispatcher へ送信される `memory_buffer_mb` フィールドにも埋め込まれます。Script Properties を更新すれば Cloud Batch 実行へ自動反映されます。
 
-### 7.4 Cloud Run dispatcher 用環境変数の確認
+### 6.3 Cloud Run dispatcher 用環境変数の確認
 
-Terraform を使わずに手動で Cloud Run サービスを更新する場合や、ローカルで `DispatcherSettings.from_env()` を利用する場合は下記の環境変数を忘れずに設定します（`src/dispatcher/config.py` 参照）。`require_batch_configuration()` で不足すると起動時にエラーになります。
+Terraform を使わずに手動で Cloud Run サービスを更新する場合や、ローカルで `DispatcherSettings.from_env()` を利用する場合は下記の環境変数を忘れずに設定します（`src/dispatcher/config.py` 参照）。不足すると起動時にエラーになります。
 
 | 環境変数 | 用途 |
 | --- | --- |
@@ -411,18 +349,30 @@ Terraform を使わずに手動で Cloud Run サービスを更新する場合�
 | `FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET` | テスト環境向け Supabase URL シークレット（必要な場合のみ） |
 | `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_TEST_SECRET` | テスト環境向け Service Role Key シークレット（必要な場合のみ） |
 
-これらに加えて、Cloud Run dispatcher では従来通り `FORM_SENDER_DISPATCHER_BASE_URL`, `FORM_SENDER_DISPATCHER_AUDIENCE`, `FORM_SENDER_CLOUD_RUN_JOB` などの既存環境変数も必須です。Terraform を利用する場合はモジュールで自動付与されますが、手動デプロイやローカル検証では Cloud Console → **Cloud Run** → **環境変数とシークレット** から設定するか、必要に応じて `gcloud run deploy --set-env-vars` などの CLI を利用してください。
+これらに加えて、Cloud Run dispatcher では従来通り `FORM_SENDER_DISPATCHER_BASE_URL`, `FORM_SENDER_DISPATCHER_AUDIENCE`, `FORM_SENDER_CLOUD_RUN_JOB` などの既存環境変数も必須です。手動デプロイやローカル検証では Cloud Console → **Cloud Run** → **環境変数とシークレット** から設定するか、必要に応じて `gcloud run deploy --set-env-vars` を利用してください。
 
-4. `gas/form-sender/Code.gs` の `triggerServerlessFormSenderWorkflow_` は Cloud Batch モードを自動判定します。必要に応じて `resolveExecutionMode_()` を利用し、特定 targeting だけ先行移行する運用が可能です。
+### 6.4 その他の補足
+
+- `gas/form-sender/Code.gs` の `triggerServerlessFormSenderWorkflow_` は Cloud Batch モードを自動判定します。特定 targeting だけ先行移行したい場合は `resolveExecutionMode_()` を併用してください。
+- targeting や Script Properties を変更した後は、テスト用 targeting で Dry Run を実施してから本番に適用します。
+
 
 ---
 
+## 7. 補足: GitHub Actions 連携（任意）
+
+本ドキュメントの手順で GAS → Cloud Tasks → Cloud Run dispatcher → Cloud Batch のルートは完結します。CI/CD や Terraform の自動実行を GitHub Actions で行いたい場合のみ、別ドキュメント「[GitHub Actions 連携ガイド](github_actions_batch_ci.md)」を参照してください。
+
+---
+
+
 ## 8. 動作確認フロー
 
-1. **GitHub Actions でユニットテストを実行**
-   - GitHub リポジトリ → **Actions** → `Deploy Cloud Batch Runner` を開き、右側の **Run workflow** ボタンを押します。
-   - `apply` 入力は既定の `false` のままにすると、テストと plan のみが実行されます。ワークフロー内の「Run Cloud Batch unit tests」ステップで `pytest -k gcp_batch` が自動実行されるため、コンソールで結果を確認してください。
-   - 成功すると緑のチェックが表示されます。失敗した場合はログ内の `tests/` 配下のエラー行を確認し、該当箇所を修正します。
+> 運用時の定期チェックやトラブルシューティング手順は `docs/form_sender_batch_operations.md` を参照してください。
+
+
+1. **（任意）GitHub Actions でユニットテストを実行**
+   - GitHub Actions を利用する場合は、リポジトリ → **Actions** → `Deploy Cloud Batch Runner` ワークフローを実行し、`pytest -k gcp_batch` の結果を確認します。CI/CD を使用しない場合はローカルで `pytest -k gcp_batch` を実行してください。
 
 2. **Dry Run (GAS)**
    - GAS エディタから `triggerFormSenderWorkflow(targetingId, { testMode: true })` を実行。  
@@ -449,7 +399,7 @@ A. ログに `Requested Batch machine_type ... Falling back to n2d-custom-4-1024
 A. Terraform の `supabase_secret_names` を利用して Secret Manager に格納し、Cloud Run/Batch からのみ参照する運用にしてください。ローカル検証時は `.env` に一時的に書くか、GitHub Actions のシークレットを使ってください。
 
 **Q4. GitHub Actions 経由のデプロイで Batch だけ更新したい。**  
-A. `workflow_dispatch` で `apply=true` を指定し、Terraform の plan/apply をバッチ側だけに限定したい場合は `terraform apply -target=module.batch` などを参考にジョブを編集してください。
+A. `workflow_dispatch` で `apply=true` を指定し、Terraform の plan/apply をバッチ側だけに限定したい場合は `terraform apply -target=module.batch` などを参考にジョブを編集してください。設定手順の詳細は `docs/github_actions_batch_ci.md` を参照してください。
 
 ---
 
