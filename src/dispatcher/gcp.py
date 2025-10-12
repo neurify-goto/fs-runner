@@ -470,7 +470,11 @@ class CloudBatchJobRunner:
 
     def _generate_job_id(self) -> str:
         prefix = self._sanitize_job_prefix(self._settings.batch_job_template)
-        return f"{prefix}-{uuid4().hex[:16]}"
+        suffix = uuid4().hex[:16]
+        max_prefix_length = 63 - 1 - len(suffix)  # Cloud Batch job_id は最大 63 文字
+        if len(prefix) > max_prefix_length:
+            prefix = prefix[:max_prefix_length].rstrip('-') or 'form-sender'
+        return f"{prefix}-{suffix}"
 
     @staticmethod
     def _sanitize_job_prefix(template: Optional[str]) -> str:
