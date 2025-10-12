@@ -178,25 +178,70 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
    2. Cloud Build トリガーの編集画面に戻り、「ビルド構成」を *Cloud Build ファイル* に変更し、Runner 用トリガーでは `cloudbuild/form_sender_runner.yaml` を、dispatcher 用トリガーでは `cloudbuild/form_sender_dispatcher.yaml` を入力します。サブスティテューション `_IMAGE_NAME` はファイル内で既に定義済みのため、UI の「変数」セクションで追加設定を行う必要はありません（プロジェクト名を変更したい場合のみ上書きします）。
    3. どちらのファイルでも `options.logging: CLOUD_LOGGING_ONLY` が適用されるため、ユーザー管理サービスアカウントでもエラーなくビルドが実行されます。必要に応じて `logging: REGIONAL_USER_OWNED_BUCKET` や `defaultLogsBucketBehavior` へ変更してください。
 
-4. **Cloud Batch ジョブテンプレート（Terraform）**\
-   Cloud Batch のテンプレート編集機能はコンソールからは一部オプションが設定できないため、リポジトリ同梱の Terraform 定義で作成・更新するのが確実です。citeturn0search0\
-   1. `infrastructure/gcp/batch/terraform.tfvars.example` を `terraform.tfvars` にコピーし、以下の値だけ自分の環境向けに書き換えます。\
-      - `project_id`, `region`\
-      - `gcs_bucket`（推奨: `<project>-form-sender-client-config`）\
-      - `artifact_repo`（Cloud Build で push している Artifact Registry のリポジトリ ID）\
-      - `batch_container_image`（最新タグまたは固定タグ）\
-      - `dispatcher_base_url`, `dispatcher_audience`（Cloud Run dispatcher の URL）\
-      Supabase の Secret Manager リソースを利用する場合は `supabase_secret_names` 配列のコメントを外して設定します。\
-   2. Terraform を実行します（`terraform.tfvars` があるため追加の `-var` 指定は不要です）。\
+4. **Cloud Batch ジョブ（テンプレート相当のベースジョブを作成）**\
+   > ⚠️ 2025-10-11 時点では、公式 Terraform プロバイダ（`hashicorp/google` / `hashicorp/google-beta`）が Cloud Batch のジョブリソースをサポートしておらず、`terraform plan` で `Invalid resource type "google_batch_job"` が発生します。ジョブに相当する設定はコンソールまたは API から直接登録してください。\
+   - Terraform を使わずに完結させたい場合は、以下のステップ 0 と 1 をスキップし、5.2.2 以降のコンソール手順でバケットや Artifact Registry などのリソースを作成してください。\
+   0. （任意）Terraform で一括管理したい場合は、`infrastructure/gcp/batch/terraform.tfvars.example` を `terraform.tfvars` にコピーし、`project_id` / `region` / `gcs_bucket` / `artifact_repo` / `batch_container_image` / `dispatcher_base_url` / `dispatcher_audience` などを自分の環境向けに編集します。Supabase の Secret Manager を利用する場合は `supabase_secret_names` のコメントアウトを外してリソース名を列挙します。\
+   1. （任意）Terraform で周辺リソース（サービスアカウント、GCS バケット、Artifact Registry 等）だけを適用する場合は、`infrastructure/gcp/batch/main.tf` 内の `resource "google_batch_job" ...` ブロックと、`infrastructure/gcp/batch/outputs.tf` にある `google_batch_job.form_sender_template` 参照行をコメントアウトした状態で `terraform init && terraform apply` を実行します。プロバイダがジョブリソースをサポートしたら差分を戻して再適用してください。\
+   2. コンソールでベースとなるジョブを作成します（Cloud Console → **Batch** → **ジョブ一覧** → **作成**）。ジョブ作成ウィザードで定義した内容をそのままテンプレートとして残し、以後 dispatcher から参照します。フォームには次の値を入力します。citeturn0search0\
+      - **ジョブ ID**: `form-sender-template` など固定値（再実行時の衝突を避けるためこのジョブは再利用せず保存専用とします）。\
+      - **リージョン**: `asia-northeast1`。ゾーンは `any` のままで問題ありません。\
+      - **タスク数 / 並列数**: それぞれ `1`。dispatcher が実際のジョブ投入時に上書きするため、テンプレートでは最小構成にします。\
+      - **コンテナ イメージ**: `asia-northeast1-docker.pkg.dev/<project>/form-sender-runner/playwright:latest`。必要に応じて `Entry point` を `/bin/sh`、`CMD` を `-c "echo Template"` のような軽量コマンドにしておくと初回実行時に成功しやすくなります。\
+      - **環境変数**: 7.4 節の一覧に従って `FORM_SENDER_BATCH_*` 系、`FORM_SENDER_DISPATCHER_BASE_URL` などを入力します。Secret Manager の値は「シークレット」タブから `projects/<project>/secrets/.../versions/latest` を選択します。\
+      - **追加ストレージ（任意）**: 入出力データを共有する必要がある場合のみ「Additional configurations → Storage volumes → Add new volume」から Cloud Storage バケットをマウントします。バケット名とマウントパス（例: `/mnt/disks/client-config`）を指定するとタスク内でローカルフォルダとして利用できます。不要であれば設定しなくて構いません。citeturn0search0\
+      - **リソース仕様**: Provisioning model は Spot（フォールバックあり）を推奨。コンソールではプリセットのマシンタイプのみ選択できるため、`n2d-standard-4` など最終的に必要となる vCPU/メモリを満たすタイプを選び、`Resources per task` の vCPU（`cpuMilli`）とメモリ（`memoryMiB`）がマシンタイプの上限を超えないようにしてください。`n2d-custom-4-10240` のようなカスタム形状を利用したい場合は、`gcloud batch jobs submit --config job.json` 等で `allocationPolicy.instances[].policy.machineType` にカスタム文字列を指定する必要があります。詳細はコンソールドキュメントの「Resource specifications」節を参照。citeturn0search0\
+        ```json
+        {
+          "taskGroups": [{
+            "taskSpec": {
+              "runnables": [{"script": {"text": "#!/bin/bash\necho template"}}],
+              "computeResource": {"cpuMilli": 4000, "memoryMib": 10240}
+            },
+            "taskCount": 1
+          }],
+          "allocationPolicy": {
+            "instances": [{
+              "policy": {"machineType": "n2d-custom-4-10240", "provisioningModel": "SPOT"}
+            }]
+          }
+        }
+        ```
+        > *参考*: 上記 JSON を `job.json` として保存し、`gcloud batch jobs submit form-sender-template --location=asia-northeast1 --config=job.json --no-run` のように登録するとカスタム形状を含むジョブを作成できます（`--no-run` で即時実行を抑制）。
+      - **コスト注意**: `Resources per task` に 10 GB など小さい値を入れても、課金は選択したマシンタイプ（例: `n2d-standard-4` は 16 GB メモリ搭載）に対して発生します。メモリを節約して課金を抑えたい場合は、CLI/API でカスタム形状を指定して実際の必要量（例: 4 vCPU / 10 GiB）へ合わせてください。カスタム N2D のオンデマンド料金は vCPU が $0.0288771/時間、メモリが $0.0038703/ギビバイト時間（Iowa リージョンの「Default」列）で、4 vCPU・10 GiB と 4 vCPU・16 GiB を 176 時間稼働させた場合の差額は約 $4.09 です。citeturn0search0
+      - **ログ**: Cloud Logging 送信を有効にしたままで構いません。\
+      作成ボタンを押すとジョブが即時実行されます。数十秒で `SUCCEEDED` になったことを確認し、このジョブは削除せず「テンプレート」として保持します（以後 dispatcher は `get_job` で定義をコピーします）。
+   3. ジョブ作成後、Cloud Shell もしくはローカルで次のコマンドを実行し、テンプレート（例: `form-sender`）として利用するジョブ名とタスクグループ名を取得します。実行前に `gcloud config set project formsalespaid` などで対象プロジェクトを切り替えておいてください。citeturn1search1\
+      > ⚠️ `WARNING: Your active project does not match the quota project ...` が表示された場合は、以下を順に実行して ADC の quota project を揃えます。サービスアカウントの ADC が設定されている状態だと `set-quota-project` が失敗するため、先にユーザーで再ログインするのが確実です。
+      > ```bash
+      > gcloud auth application-default login
+      > gcloud auth application-default set-quota-project formsalespaid
+      > ```
       ```bash
-      cd infrastructure/gcp/batch
-      terraform init
-      terraform plan
-      terraform apply -auto-approve
+      gcloud config set project formsalespaid
+      gcloud batch jobs describe form-sender \
+        --location=asia-northeast1 \
+        --format='value(name, taskGroups[0].name)'
       ```
-      `terraform apply` 実行時にテンプレート検証用の軽量ジョブが 1 度だけ走ります（`google_batch_job.form_sender_template` 参照）。完了後、`terraform output` でテンプレート名・タスクグループ名・Batch 用サービスアカウントが確認できます。\
-   3. Terraform から出力される `batch_job_template_name` を Script Properties `FORM_SENDER_BATCH_JOB_TEMPLATE` に、`batch_task_group_name` を `FORM_SENDER_BATCH_TASK_GROUP` に設定します。Outputs は `terraform output -json` から参照可能です。\
-   4. dispatcher が実ジョブを投入する際は `src/dispatcher/gcp.py` の `_calculate_resources()` でワーカー数や targeting オプションに基づき vCPU・メモリ・マシンタイプが動的に再計算されます。テンプレートに書いた 4000 milliCPU / 10240 MiB はあくまでベースラインであり、`batch_vcpu_per_worker_mb_default` や targeting シートの `batch_memory_per_worker_mb` を変更すると即座に反映されます。citeturn1shell3
+
+      Cloud Run のログを確認したい場合は、`gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="form-sender"' --project=formsalespaid --limit=50` のように `gcloud logging read` コマンドを利用してください。citeturn0search0
+      出力される `projects/<project>/locations/<region>/jobs/<job_id>` が `FORM_SENDER_BATCH_JOB_TEMPLATE`、`taskGroups[0].name` が `FORM_SENDER_BATCH_TASK_GROUP` に相当します。必要に応じて `--format=json` で完全なジョブ定義を保存し、将来の再作成に備えてください。citeturn1search1\
+   4. Script Properties および Cloud Run dispatcher の環境変数を最新化します。\
+      - GAS 側: スクリプトエディタ → **プロジェクトの設定** → **スクリプト プロパティ** を開き、以下を入力して保存します。\
+        | キー | 値の例 | 説明 |
+        | --- | --- | --- |
+        | `FORM_SENDER_BATCH_JOB_TEMPLATE` | `projects/formsalespaid/locations/asia-northeast1/jobs/form-sender` | `gcloud batch jobs describe` で取得したジョブ名 |
+        | `FORM_SENDER_BATCH_TASK_GROUP` | `form-sender-task-group` | 同コマンドで得た `taskGroups[0].name` |
+        | `FORM_SENDER_BATCH_SERVICE_ACCOUNT` など既存エントリ | 必要に応じて更新 | 変更があればここで調整 |
+      - Cloud Run 側: Cloud Console → **Cloud Run** → `form-sender-dispatcher` → **編集とデプロイ** → **コンテナ、変数、シークレット** を開き、以下を確認／更新します。\
+        | 環境変数 | 値 | 備考 |
+        | --- | --- | --- |
+        | `FORM_SENDER_BATCH_JOB_TEMPLATE` | `projects/formsalespaid/locations/asia-northeast1/jobs/form-sender` | Script Properties と同じ値 |
+        | `FORM_SENDER_BATCH_TASK_GROUP` | `form-sender-task-group` | 同上 |
+        | `FORM_SENDER_BATCH_SERVICE_ACCOUNT` など関連項目 | 既存値を再確認 | 変更が必要な場合のみ更新 |
+      - これらを更新したら Cloud Run サービスを再デプロイし、GAS の Script Properties も保存したことを確認してから次の手順に進みます。\
+   5. 後日 Terraform のプロバイダがジョブリソースをサポートした場合は、上記ジョブ構成を YAML/JSON に書き出し、`google_batch_job` ブロックへ移植すると IaC 管理へ戻せます。プロバイダの更新状況は [terraform-provider-google-beta のリリースノート](https://github.com/hashicorp/terraform-provider-google-beta/releases) を随時確認してください。\
+   6. dispatcher が実ジョブを投入する際は `src/dispatcher/gcp.py` の `_calculate_resources()` でワーカー数や targeting オプションに基づきリソースを動的に再計算します。テンプレートで指定した値は初期値として扱われる点に注意してください。
 
 5. **Cloud Run dispatcher のデプロイ**\
    Cloud Run は Cloud Tasks からの HTTP リクエストを受け取り Cloud Batch ジョブを起動するエントリポイントです。次の手順で `form-sender-dispatcher` サービスを作成します。\
@@ -219,7 +264,7 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
         - Batch 連携: `FORM_SENDER_BATCH_PROJECT_ID`, `FORM_SENDER_BATCH_LOCATION`, `FORM_SENDER_BATCH_JOB_TEMPLATE`, `FORM_SENDER_BATCH_TASK_GROUP`, `FORM_SENDER_BATCH_SERVICE_ACCOUNT`, `FORM_SENDER_BATCH_CONTAINER_IMAGE`, `FORM_SENDER_BATCH_SUPABASE_URL_SECRET`, `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET`\
       - **サービスアカウント**: 画面下部の **セキュリティ** セクションで `form-sender-dispatcher@<project>.iam.gserviceaccount.com` を選択します。存在しない場合は 4.2.0 節の手順で作成してください。\
       - その他の項目（ヘルスチェック、同時実行数、起動時 CPU ブーストなど）は既定値のままで構いません。要件に応じて調整する場合のみ変更してください。\
-   4. **作成** を押してデプロイし、完了後に表示される **エンドポイント URL**（例: `https://form-sender-dispatcher-xxxx.a.run.app`）を控えます。`terraform.tfvars` の `dispatcher_base_url` / `dispatcher_audience`、および GAS Script Properties の `FORM_SENDER_DISPATCHER_BASE_URL` へ同じ値を設定します。
+   4. **作成** を押してデプロイし、完了後に表示される **エンドポイント URL**（例: `https://form-sender-dispatcher-xxxx.a.run.app`）を控えます。リビジョンが起動エラーになっても URL 自体は変わらないため、この時点で `terraform.tfvars` の `dispatcher_base_url` / `dispatcher_audience` や Script Properties `FORM_SENDER_DISPATCHER_BASE_URL` に反映して構いません。
 
 6. **Cloud Tasks キュー**\
    Cloud Console → **Cloud Tasks** → **キューを作成**。名前は `form-sender-dispatcher`、リージョンは `asia-northeast1` を指定。ターゲットに HTTP を選択し、URL に `https://<cloud-run-url>/v1/form-sender/tasks` を入力します。認証方式は OIDC を選択し、サービスアカウントに `form-sender-dispatcher@<project>.iam.gserviceaccount.com` を設定。リトライ設定は既定値をベースに運用ポリシーへ合わせて調整します。
@@ -229,7 +274,7 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
 
 ### 補足: Terraform を利用する場合
 
-Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` と `infrastructure/gcp/dispatcher` にある Terraform 定義を使うと同じリソースを再現できます。`terraform.tfvars` にプロジェクト ID・リージョン・バケット名・サービスアカウント・シークレット名などを記入し、`terraform init && terraform apply` を実行してください。Terraform を利用するケースでも、事前に Secret Manager への登録と Artifact Registry へのイメージ配置を済ませておく必要があります。
+Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` と `infrastructure/gcp/dispatcher` にある Terraform 定義を活用できます。`terraform.tfvars` にプロジェクト ID・リージョン・バケット名・サービスアカウント・シークレット名などを記入し、`terraform init && terraform apply` を実行してください（5.2.4 の手順に従い `google_batch_job` ブロックはプロバイダ対応まで除外する必要があります）。Terraform を利用するケースでも、事前に Secret Manager への登録と Artifact Registry へのイメージ配置を済ませておく必要があります。
 
 > 📝 手動構築では設定漏れが起こりやすいため、設定内容を記録しチーム内でレビューする運用を推奨します。再現性や差分管理が必要になったら Terraform への移行を検討してください。
 

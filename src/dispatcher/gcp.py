@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 import requests
-from google.api_core import operations_v1
 from google.api_core.client_options import ClientOptions
 from google.api_core.operation import Operation
 from google.api_core import exceptions as gcloud_exceptions
@@ -180,7 +179,7 @@ class CloudRunJobRunner:
         client_options = ClientOptions(api_endpoint=f"{settings.location}-run.googleapis.com")
         self._client = run_v2.JobsClient(client_options=client_options)
         self._executions_client = run_v2.ExecutionsClient(client_options=client_options)
-        self._operations_client = operations_v1.OperationsClient(client_options=client_options)
+        self._operations_client = self._client.transport.operations_client
         self._job_path = f"projects/{settings.project_id}/locations/{settings.location}/jobs/{settings.job_name}"
 
     def run_job(
