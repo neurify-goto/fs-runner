@@ -299,7 +299,11 @@ class CloudBatchJobRunner:
         effective_parallelism = max(1, min(parallelism, task_count))
         if template_task_group:
             task_group = batch_v1.TaskGroup()
-            task_group.CopyFrom(template_task_group)
+            template_task_group_pb = getattr(template_task_group, "_pb", None)
+            if template_task_group_pb is not None:
+                task_group._pb.CopyFrom(template_task_group_pb)
+            else:
+                task_group = batch_v1.TaskGroup(template_task_group)
             task_group.task_spec = task_spec
         else:
             task_group = batch_v1.TaskGroup(task_spec=task_spec)
@@ -434,7 +438,11 @@ class CloudBatchJobRunner:
     ) -> batch_v1.TaskSpec:
         if base_task_spec is not None:
             task_spec = batch_v1.TaskSpec()
-            task_spec.CopyFrom(base_task_spec)
+            base_pb = getattr(base_task_spec, "_pb", None)
+            if base_pb is not None:
+                task_spec._pb.CopyFrom(base_pb)
+            else:
+                task_spec = batch_v1.TaskSpec(base_task_spec)
         else:
             task_spec = batch_v1.TaskSpec()
 
@@ -666,9 +674,11 @@ class CloudBatchJobRunner:
                 raise RuntimeError("Batch SecretManagerSecret message is missing version_name field")
 
             if hasattr(secret_message, "secret_manager"):
-                try:
-                    secret_message.secret_manager.CopyFrom(secret_manager)
-                except AttributeError:
+                secret_message_pb = getattr(secret_message, "_pb", None)
+                secret_manager_pb = getattr(secret_manager, "_pb", None)
+                if secret_message_pb is not None and secret_manager_pb is not None:
+                    secret_message_pb.secret_manager.CopyFrom(secret_manager_pb)
+                else:
                     secret_message.secret_manager = secret_manager
             else:
                 raise RuntimeError("Batch Secret message is missing secret_manager field")
