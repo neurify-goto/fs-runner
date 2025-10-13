@@ -55,6 +55,13 @@ class DispatcherService:
         try:
             signed_url = self._signed_url_manager.ensure_fresh(task, override_url=fallback_signed_url)
         except ValueError as exc:
+            logger.error(
+                "Signed URL validation failed (targeting_id=%s, client_config_object=%s): %s",
+                task.targeting_id,
+                task.client_config_object,
+                exc,
+                exc_info=True,
+            )
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         job_execution_id = task.execution_id or uuid.uuid4().hex
@@ -263,6 +270,12 @@ class DispatcherService:
                 ttl_hours=request.signed_url_ttl_hours,
             )
         except ValueError as exc:
+            logger.error(
+                "Signed URL refresh failed (client_config_object=%s): %s",
+                request.client_config_object,
+                exc,
+                exc_info=True,
+            )
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         if request.execution_id:

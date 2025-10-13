@@ -2,7 +2,12 @@
  * Cloud Storage への client_config 保存と署名付きURL生成を担当するクライアント
  */
 var StorageClient = (function() {
-  var serviceAccount = ServiceAccountClient;
+  function resolveServiceAccount_() {
+    if (typeof ServiceAccountClient !== 'undefined' && ServiceAccountClient) {
+      return ServiceAccountClient;
+    }
+    throw new Error('ServiceAccountClient が未定義です');
+  }
   var MAX_UPLOAD_ATTEMPTS = 3;
   var MAX_SIGN_ATTEMPTS = 3;
   var RETRY_BASE_DELAY_MS = 1000;
@@ -27,7 +32,7 @@ var StorageClient = (function() {
     var lastError = null;
     for (var attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
       try {
-        var token = serviceAccount.getAccessToken(['https://www.googleapis.com/auth/devstorage.read_write']);
+        var token = resolveServiceAccount_().getAccessToken(['https://www.googleapis.com/auth/devstorage.read_write']);
         var response = UrlFetchApp.fetch(url, {
           method: 'post',
           contentType: 'application/json; charset=utf-8',
@@ -65,7 +70,7 @@ var StorageClient = (function() {
     var isoDate = Utilities.formatDate(now, 'UTC', 'yyyyMMdd');
     var isoTimestamp = Utilities.formatDate(now, 'UTC', 'yyyyMMdd\'T\'HHmmss\'Z\'');
     var credentialScope = isoDate + '/auto/storage/goog4_request';
-    var credential = serviceAccount.getServiceAccountEmail() + '/' + credentialScope;
+    var credential = resolveServiceAccount_().getServiceAccountEmail() + '/' + credentialScope;
 
     var canonicalUri = '/' + encodeURIComponent(bucket) + '/' + encodeURI(objectName).replace(/%5B/g, '[').replace(/%5D/g, ']');
     var canonicalHeaders = 'host:storage.googleapis.com\n';
@@ -98,7 +103,7 @@ var StorageClient = (function() {
     var signError = null;
     for (var signAttempt = 1; signAttempt <= MAX_SIGN_ATTEMPTS; signAttempt++) {
       try {
-        signature = serviceAccount.signBytes(stringToSign);
+        signature = resolveServiceAccount_().signBytes(stringToSign);
         break;
       } catch (err) {
         signError = err;
@@ -120,7 +125,7 @@ var StorageClient = (function() {
     }
 
     var url = 'https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucket) + '/o/' + encodeURIComponent(objectName);
-    var token = serviceAccount.getAccessToken(['https://www.googleapis.com/auth/devstorage.read_write']);
+    var token = resolveServiceAccount_().getAccessToken(['https://www.googleapis.com/auth/devstorage.read_write']);
     var response = UrlFetchApp.fetch(url, {
       method: 'delete',
       headers: {

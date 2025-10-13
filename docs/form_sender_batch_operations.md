@@ -1,8 +1,65 @@
 # Form Sender Batch 運用ガイド
 
-GAS → Cloud Tasks → Cloud Run dispatcher → Cloud Batch の本番ルートを安定運用するための手順とチェックポイントをまとめたドキュメントです。セットアップ手順は `docs/form_sender_gcp_batch_setup_guide.md` を参照してください。
+GAS → Cloud Tasks → Cloud Run dispatcher → Cloud Batch（Spot VM 優先）の運用に必要なフロー概要、Script Properties の確認項目、日常オペレーションをまとめたドキュメントです。セットアップ手順は `docs/form_sender_gcp_batch_setup_guide.md` を参照してください。
 
-## 1. 日次・定期チェック
+## 1. アーキテクチャ概要
+
+主要コンポーネントと役割:
+
+- **GAS (form-sender)**: targeting / client 設定を読み込み、実行モードと Script Properties を解決する入口。
+- **Cloud Tasks**: `form-sender-dispatcher` キューにタスクを積み、リトライとスケジュールを担保。
+- **Cloud Run dispatcher**: タスクを受け取り、client_config を GCS に保存して署名付き URL を生成。Spot 優先で Cloud Batch ジョブを起動。
+- **Cloud Batch (Playwright Runner)**: Supabase から設定を取得し、Spot VM 上でワーカーを並列実行。必要に応じてオンデマンドへフォールバック。
+- **Supabase**: targeting / client マスタと、`job_executions` / `job_execution_attempts` による実行ログを保持。
+
+データフロー（Batch モード）:
+
+```
+GAS trigger (time-based / manual)
+  │ 1. targeting 読み込み + Script Properties 解決
+  ▼
+Cloud Tasks queue (form-sender-dispatcher)
+  │ 2. dispatcher タスクを enqueue
+  ▼
+Cloud Run dispatcher
+  │ 3. client_config を GCS:FORM_SENDER_GCS_BUCKET へ保存
+  │ 4. Supabase 用署名付き URL を生成
+  │ 5. Cloud Batch job submit (provisioningModel=SPOT)
+  ▼
+Cloud Batch workers
+  │ 6. signed URL で設定取得 → Playwright 実行
+  ▼
+Supabase / Cloud Logging / Monitoring
+```
+
+> Spot VM が確保できない場合、`batch_allow_on_demand_fallback` が `true` のターゲティングではオンデマンドへ自動切り替えされます。フォールバック結果は `job_executions.metadata.batch` に記録されます。
+
+## 2. Script Properties チェックリスト
+
+GAS が Batch 経路へフォールバックする条件を満たすには、以下の Script Properties が正しく設定されている必要があります（詳細はセットアップガイド 6.1 節）。
+
+| キー | 用途 | 設定例 / 取得先 | 備考 |
+| --- | --- | --- | --- |
+| `USE_GCP_BATCH` | Batch モード既定値 | `true` | targeting 列が空欄の案件で Batch を強制 |
+| `FORM_SENDER_TASKS_QUEUE` | Cloud Tasks キュー名 | `projects/formsalespaid/locations/asia-northeast1/queues/form-sender-dispatcher` | `projects/<id>/locations/<region>/queues/<queue>` 形式 |
+| `FORM_SENDER_DISPATCHER_BASE_URL` | Cloud Run dispatcher のベース URL | `https://form-sender-dispatcher-xxxx.a.run.app` | 末尾 `/v1/...` は付けない |
+| `FORM_SENDER_DISPATCHER_SERVICE_ACCOUNT` | Cloud Tasks → dispatcher OIDC 用 SA | `form-sender-dispatcher@formsalespaid.iam.gserviceaccount.com` | 未設定だとタスクに認証ヘッダーが付与されず 403 になります |
+| `FORM_SENDER_GCS_BUCKET` | client_config 保存用バケット | `formsalespaid-form-sender-client-config` | GAS と dispatcher が共用。未設定だとアップロードに失敗 |
+| `SERVICE_ACCOUNT_JSON` | Cloud Tasks / Storage / Batch 用 SA キー | Cloud Console → サービスアカウント → 鍵を追加（JSON） | 4.2.0 節で作成した `form-sender-gas@<project>.iam.gserviceaccount.com`（GAS オーケストレーター用）の JSON 全文を貼り付け |
+| `FORM_SENDER_BATCH_JOB_TEMPLATE` | Cloud Batch テンプレート | `projects/formsalespaid/locations/asia-northeast1/jobs/form-sender` | `gcloud batch jobs describe` の出力を転記 |
+| `FORM_SENDER_BATCH_TASK_GROUP` | タスクグループ名 | `form-sender-task-group` | 同上 |
+| `FORM_SENDER_BATCH_SERVICE_ACCOUNT` | Batch 実行用 SA | `form-sender-batch@formsalespaid.iam.gserviceaccount.com` | テンプレートの `serviceAccountEmail` と一致させる |
+| `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` | targeting 未指定時の並列上限 | `100` | `batch_max_parallelism` 列のデフォルト |
+| `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` / `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | ワーカーリソース既定 | `1` / `2048` | dispatcher がマシンタイプを自動算出する際に使用 |
+| `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` | 共有メモリバッファ | `2048` | 追加メモリを確保したい場合に調整 |
+| `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` / `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | Spot 優先 / フォールバック既定 | `true` / `false` | targeting 側が空欄の場合の挙動（フォールバックは明示的に有効化が必要） |
+| `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` / `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` | 署名付き URL の TTL と更新閾値 | `48` / `21600` | 長時間ジョブの URL 期限切れを防ぐ |
+
+> Supabase 関連 (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) や GitHub Actions フォールバック用のプロパティも環境ごとに整合性を保ってください。`.env` と Script Properties の差分がないか定期的に確認することを推奨します。
+> オンデマンドへの自動切り替えは既定で無効 (`FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = false`) です。Spot VM でのみ実行したい案件は何も設定せず、フォールバックが必要な案件のみ targeting シートで `batch_allow_on_demand_fallback = true` をオンにしてください。
+> `SERVICE_ACCOUNT_JSON` に使用する `form-sender-gas` サービスアカウントには `roles/cloudtasks.enqueuer`, `roles/storage.objectAdmin`, `roles/run.invoker`, `roles/iam.serviceAccountUser` を付与し、Cloud Tasks・GCS・Cloud Run dispatcher へのアクセスに利用します。また、`form-sender-dispatcher@...` 側には `roles/iam.serviceAccountTokenCreator` を付けたうえで、Cloud Tasks サービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）にも同ロールを与えておくと OIDC トークン生成が安定します。
+
+## 3. 日次・定期チェック
 
 1. **Cloud Tasks キューの遅延確認**
    - Cloud Console → **Cloud Tasks** → `form-sender-dispatcher`。
@@ -23,13 +80,13 @@ GAS → Cloud Tasks → Cloud Run dispatcher → Cloud Batch の本番ルート�
    - `https://<dispatcher-url>/healthz` を叩いて `{"status":"ok"}` が返るか確認。
    - 異常時は Cloud Logging で `service_name="form-sender-dispatcher"` を検索。
 
-## 2. 手動オペレーション
+## 4. 手動オペレーション
 
-### 2.1 テスト実行（Dry Run）
+### 4.1 テスト実行（Dry Run）
 - GAS エディタから `triggerFormSenderWorkflow(targetingId, { testMode: true })` を実行。
 - Supabase `job_executions` に `execution_mode=batch` でレコードが追加され、Cloud Batch で `RUNNING` → `SUCCEEDED` となることを確認。
 
-### 2.2 ジョブの停止
+### 4.2 ジョブの停止
 - GAS エディタ：`stopSpecificFormSenderTask(targetingId)`。
 - もしくは CLI：
   ```bash
@@ -37,13 +94,13 @@ GAS → Cloud Tasks → Cloud Run dispatcher → Cloud Batch の本番ルート�
   ```
 - Supabase 側で `status=cancelled` に更新されているか確認。
 
-### 2.3 Cloud Tasks の手動投入
+### 4.3 Cloud Tasks の手動投入
 - Cloud Console → **Cloud Tasks** → `form-sender-dispatcher` → **タスクを作成**。
 - 送信先 URL: `https://<dispatcher-url>/v1/form-sender/tasks`
 - OIDC サービスアカウント: `form-sender-dispatcher@formsalespaid.iam.gserviceaccount.com`
 - リクエスト本文に GAS から送られる Payload を貼り付けてテスト可能。
 
-## 3. 監視とアラート推奨事項
+## 5. 監視とアラート推奨事項
 
 | 項目 | 推奨設定 |
 | --- | --- |
@@ -52,7 +109,7 @@ GAS → Cloud Tasks → Cloud Run dispatcher → Cloud Batch の本番ルート�
 | Cloud Tasks 遅延 | `Queue latency > 300 秒` でアラート |
 | Supabase 異常滞留 | `job_executions` の `pending` が一定件数を超えたら通知 |
 
-## 4. トラブルシューティング例
+## 6. トラブルシューティング例
 
 | 症状 | 確認ポイント | 対応 |
 | --- | --- | --- |
@@ -61,7 +118,52 @@ GAS → Cloud Tasks → Cloud Run dispatcher → Cloud Batch の本番ルート�
 | Supabase に `execution_mode=cloud_run` が残る | GAS Script Properties `USE_GCP_BATCH` などを確認 | targeting 側フラグが `false` の場合は切り替え漏れ。GAS Property と targeting を更新 |
 | Cloud Tasks で 401/403 | ターゲット URL または OIDC サービスアカウントの権限不足 | Cloud Run dispatcher の URL と SA (`form-sender-dispatcher@...`) に `roles/run.invoker` が設定されているか確認 |
 
-## 5. 変更管理の流れ（例）
+## 7. targeting シート設定リファレンス
+
+| 列名 | 役割 | 値の優先順位 | 備考 |
+| --- | --- | --- | --- |
+| `useGcpBatch` / `useServerless` | Batch／Serverless の切り替え | targeting列 → Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`) → デフォルト | `true/false` のほか `1/0` や `yes/no` も可。Batch を使わない案件は `false`。 |
+| `concurrent_workflow` | Cloud Batch タスク総数 | targeting列のみ | GAS 側で `task_count` として使用。未指定なら 1。 |
+| `batch_max_parallelism` | 同時実行タスクの上限 | targeting列 → Script Property `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT`（既定 100） | `concurrent_workflow` と合わせて並列度を調整。 |
+| `batch_prefer_spot` | Spot VM を優先するか | targeting列 → Script Property `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` | `true` で Spot 優先、`false` でオンデマンドのみ。 |
+| `batch_allow_on_demand_fallback` | Spot 枯渇時にオンデマンドへ切り替えるか | targeting列 → Script Property `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | 省略時は `false`。必要な案件のみ `true` にしてフォールバックを許可。 |
+| `batch_machine_type` | 利用したいマシンタイプ | targeting列 → Script Property `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 自動計算 (`n2d-custom-<workers>-<memory>`) | `n2d-custom-8-32768` など。必要な案件だけ上書き。 |
+| `batch_vcpu_per_worker` | 1 ワーカーあたりの vCPU | targeting列 → Script Property `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` | 1 以上の整数。 |
+| `batch_memory_per_worker_mb` | 1 ワーカーあたりのメモリ (MiB) | targeting列 → Script Property `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | 2048 以上推奨。 |
+| `batch_memory_buffer_mb` | 追加メモリバッファ | targeting列 → Script Property `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` | 全体バッファ（共有）。 |
+| `batch_signed_url_ttl_hours` | 署名付き URL の有効期限 (時間) | targeting列 → Script Property `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` | 1〜168 の整数。 |
+| `batch_signed_url_refresh_threshold_seconds` | 署名付き URL を更新する閾値 (秒) | targeting列 → Script Property `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` | TTL より短い値に設定。 |
+| `batch_max_attempts` | Cloud Batch のリトライ上限 | targeting列 → Script Property `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT` | 1 以上の整数。 |
+| `branch` | Git リファレンス | targeting列 → Script Properties（`FORM_SENDER_GIT_REF_DEFAULT` などがある場合） | GitHub Actions ルート併用時のみ利用。 |
+| `use_extra_table` などクライアント固有列 | GAS `client_config` の挙動制御 | targeting列のみ | Extra テーブル使用有無などを制御。 |
+
+### 優先順位ルールのまとめ
+- **targeting シート** > **Script Properties** > **アプリ既定値** の順で評価されます。
+- targeting に空欄がある場合のみ Script Property が利用され、両方が未設定ならコード側のハードコード既定値（例: 並列数 1）が使われます。
+- 案件ごとの個別調整は targeting シートで行うのが基本。全案件共通の既定値を変えたい場合のみ Script Property を更新します。
+
+---
+
+## 8. targeting シートの並列設定ガイド
+
+- `concurrent_workflow` は「総タスク数」を決める値です。GAS → Cloud Batch へ渡され、Cloud Batch の `task_count` に相当します（例: 5 を指定するとタスク 5 本が順次投入される）。
+- `batch_max_parallelism` は「同時実行するタスクの上限」を決める値です。指定がある場合はその値、空欄の場合は Script Property `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT`（既定 100）が上限として適用されます。
+
+挙動のまとめ:
+
+```
+実行されるタスクの総数 = concurrent_workflow
+同時実行の最大本数   = min(concurrent_workflow, batch_max_parallelism または デフォルト)
+```
+
+運用の目安:
+- 総投入数を増やしたい → `concurrent_workflow` を増やす。
+- ピーク負荷やリソースを抑えたい → `batch_max_parallelism` で上限を小さく設定する。
+- 案件ごとに細かく調整したい場合は targeting シートで制御し、全案件で一律上限を変えたい場合は Script Property `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` を調整してください。
+
+---
+
+## 9. 変更管理の流れ（例）
 
 1. 変更内容をローカルで検証 (`.env` を使って Playwright 実行やユニットテストを実施)。
 2. Cloud Build トリガーで `dispatcher` / `playwright` イメージを更新。

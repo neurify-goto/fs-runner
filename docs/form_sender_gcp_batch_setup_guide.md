@@ -93,16 +93,30 @@ Cloud Batch では `job_executions.metadata.batch` を新しく利用するた�
 #### 4.2.0 Cloud Batch / Dispatcher / Cloud Build 用サービスアカウントの準備
 
 1. Cloud Console → **IAM と管理** → **サービス アカウント** を開き、右上の **サービス アカウントを作成** をクリックします。
-2. 画面上で次の 4 種類が揃っているか確認し、存在しないものだけ作成します。
+2. 画面上で次の 5 種類が揃っているか確認し、存在しないものだけ作成します。
    - **Cloud Batch Runner 用**（例: `form-sender-batch`）
    - **Cloud Run dispatcher 用**（例: `form-sender-dispatcher`）
+   - **GAS オーケストレーター用**（例: `form-sender-gas`）※Apps Script から Cloud Tasks / GCS / Cloud Run API を呼び出すための専用アカウント
    - **Cloud Build 実行用**: 自動で用意される `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` をそのまま使うのが最も簡単です。プロジェクト番号は Cloud Console 上部のプロジェクトセレクタに表示されています。独自に権限を分離したい場合は、追加でカスタム SA（例: `form-sender-cloudbuild`）を作成しても構いません。
    - **Terraform 実行（GitHub Actions）用**: `form-sender-terraform` など（GitHub Actions 連携が必要な場合のみ）。詳細は `docs/github_actions_batch_ci.md` を参照します。
 3. 作成直後のロール割り当てウィザード、またはサービスアカウント詳細 → **権限** → **権限を追加** で最低限以下のロールを付与します。
    - Batch Runner 用: `roles/batch.admin`, `roles/secretmanager.secretAccessor`, `roles/storage.objectAdmin`, `roles/artifactregistry.reader`
    - Dispatcher 用: `roles/run.admin`, `roles/secretmanager.secretAccessor`, `roles/cloudtasks.enqueuer`, `roles/iam.serviceAccountTokenCreator`
+   - GAS オーケストレーター用: `roles/cloudtasks.enqueuer`, `roles/storage.objectAdmin`, `roles/run.invoker`, `roles/iam.serviceAccountUser`
    - Cloud Build 実行用: `roles/artifactregistry.writer`, `roles/storage.admin`, `roles/logging.logWriter`, `roles/cloudtrace.agent`（既定の Cloud Build サービスアカウントには `roles/cloudbuild.builds.builder` が自動付与されています。新規プロジェクトではステージング用 Cloud Storage バケットを自動作成するため `roles/storage.admin` が必須です。カスタム SA を使う場合は同ロールも追加してください）
    - Terraform 実行用: `roles/run.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/batch.admin`, `roles/artifactregistry.admin`, `roles/secretmanager.admin`, `roles/storage.admin`, `roles/cloudtasks.admin`, `roles/logging.admin`（インフラを Terraform で一括管理できるよう、事前準備チェックリスト 4. の権限と同等に揃えます）
+
+> 💡 Cloud Tasks のサービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）にも `roles/iam.serviceAccountTokenCreator` と `roles/iam.serviceAccountUser` を付与しておく必要があります。例:
+> ```bash
+> gcloud iam service-accounts add-iam-policy-binding \
+>   form-sender-dispatcher@formsalespaid.iam.gserviceaccount.com \
+>   --member="serviceAccount:service-621668223275@gcp-sa-cloudtasks.iam.gserviceaccount.com" \
+>   --role="roles/iam.serviceAccountTokenCreator"
+> gcloud iam service-accounts add-iam-policy-binding \
+>   form-sender-dispatcher@formsalespaid.iam.gserviceaccount.com \
+>   --member="serviceAccount:service-621668223275@gcp-sa-cloudtasks.iam.gserviceaccount.com" \
+>   --role="roles/iam.serviceAccountUser"
+> ```
 4. Cloud Build 実行用サービスアカウントは「ビルドを実行する主体」であり、Cloud Batch Runner / dispatcher 用とは別物です。5.2.3.2 節の Cloud Build トリガー画面では、このサービスアカウントを選択してください。
 5. Terraform 実行用サービスアカウントは、GitHub Actions 連携ガイド（`docs/github_actions_batch_ci.md`）で説明する Workload Identity Federation で利用します。必要がなければ作成・設定しなくても構いません。
 6. 後からロールを追加したい場合は、**IAM と管理** 画面で対象サービスアカウントの **アクセス権** を編集します。
@@ -150,7 +164,11 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
    - Dispatcher: `roles/run.admin`, `roles/secretmanager.secretAccessor`, `roles/cloudtasks.enqueuer`, `roles/iam.serviceAccountTokenCreator`
 
 2. **Cloud Storage バケット（client_config 保存先）**\
-   Cloud Console → **Cloud Storage** → **バケットを作成**。名前は `fs-prod-001-form-sender-client-config` のようにプロジェクトを識別できるものにし、リージョンは `asia-northeast1`（Batch/dispatcher と同じ）を選択します。アクセス制御は「一様」を選択し、作成後にバケット詳細 → **ライフサイクル** → **ルールを追加** で「オブジェクトの年齢 7 日」を条件に削除ルールを作成します。**権限** タブでは `form-sender-batch` と `form-sender-dispatcher` に `Storage Object Admin` を付与してください。
+   Cloud Console → **Cloud Storage** → **バケットを作成**。名前は `formsalespaid-form-sender-client-config`（推奨）などプロジェクトを識別できるものにし、リージョンは `asia-northeast1`（Batch/dispatcher と同じ）を選択します。アクセス制御は「一様」を選択し、作成後にバケット詳細 → **ライフサイクル** → **ルールを追加** で「オブジェクトの年齢 7 日」を条件に削除ルールを作成します。**権限** タブでは以下のサービスアカウントに `Storage Object Admin` を付与してください。\
+   - GAS (Apps Script) 実行用: `<project-number>@appspot.gserviceaccount.com`\
+   - Cloud Batch Runner 用: `form-sender-batch@<project>.iam.gserviceaccount.com`\
+   - Cloud Run dispatcher 用: `form-sender-dispatcher@<project>.iam.gserviceaccount.com`\
+   このバケット名を後続の Script Properties `FORM_SENDER_GCS_BUCKET` および Terraform 設定（`terraform.tfvars` の `gcs_bucket`）に転記しておくと、GAS からの `client_config` アップロードや dispatcher からの署名付き URL 発行が正しく動作します。
 
 3. **Artifact Registry（コンテナリポジトリ）**\
    1. Cloud Console → **Artifact Registry** → **リポジトリを作成** を開き、次の値で作成します。\
@@ -267,7 +285,14 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
    4. **作成** を押してデプロイし、完了後に表示される **エンドポイント URL**（例: `https://form-sender-dispatcher-xxxx.a.run.app`）を控えます。リビジョンが起動エラーになっても URL 自体は変わらないため、この時点で `terraform.tfvars` の `dispatcher_base_url` / `dispatcher_audience` や Script Properties `FORM_SENDER_DISPATCHER_BASE_URL` に反映して構いません。
 
 6. **Cloud Tasks キュー**\
-   Cloud Console → **Cloud Tasks** → **キューを作成**。名前は `form-sender-dispatcher`、リージョンは `asia-northeast1` を指定。ターゲットに HTTP を選択し、URL に `https://<cloud-run-url>/v1/form-sender/tasks` を入力します。認証方式は OIDC を選択し、サービスアカウントに `form-sender-dispatcher@<project>.iam.gserviceaccount.com` を設定。リトライ設定は既定値をベースに運用ポリシーへ合わせて調整します。
+Cloud Console → **Cloud Tasks** → **キューを作成**。名前は `form-sender-dispatcher`、リージョンは `asia-northeast1` を指定。ターゲットに HTTP を選択し、URL に `https://<cloud-run-url>/v1/form-sender/tasks` を入力します。**認証方式は「認証なし」で問題ありません**（GAS 側で署名付き ID トークンを `Authorization` ヘッダーとして付与します）。リトライは **キュー設定** で管理します（タスク作成時に `retryConfig` を渡すことはできません）。推奨設定例: 
+   - **Maximum attempts**: 3（再送回数の上限）
+   - **Minimum backoff**: 60 秒 / **Maximum backoff**: 600 秒（指数バックオフ）
+   - **Maximum retry duration**: 当日 19:00 JST（=10:00 UTC）までを許容する場合は 32,400 秒程度を目安に調整
+   - Spot 枯渇時にフォールバックさせない案件では、最大試行回数を 1 にするのも選択肢です。
+   これらの値は運用ポリシーに応じて調整し、必要に応じて Monitoring と連携してアラートを設定してください。
+   > Cloud Tasks のサービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）と GAS オーケストレーター用サービスアカウント（`form-sender-gas@<project>.iam.gserviceaccount.com`）の両方に、`form-sender-dispatcher@<project>.iam.gserviceaccount.com` へ `roles/iam.serviceAccountTokenCreator` と `roles/iam.serviceAccountUser` を付与しておくと、タスク作成時に OIDC トークンが確実に生成されます。
+   > Cloud Tasks サービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）にも `roles/iam.serviceAccountTokenCreator` を、GAS オーケストレーター用サービスアカウントには `roles/iam.serviceAccountUser` を付与しておくと、タスク作成時に `form-sender-dispatcher@...` の OIDC トークンが確実に生成されます。
 
 7. **最終確認**\
    Secret Manager のアクセス権、Cloud Storage バケットの権限、Cloud Batch テンプレートと Cloud Run dispatcher の環境変数が意図どおりかを確認し、GAS Script Properties（`FORM_SENDER_TASKS_QUEUE`, `FORM_SENDER_DISPATCHER_BASE_URL`, `FORM_SENDER_BATCH_*` など）を最新値に更新します。その後、テスト用 targeting で dispatcher が正しく呼び出せるかを確認してください。
@@ -281,25 +306,43 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 ## 6. GAS (Apps Script) 設定
 
 ### 6.1 Script Properties の初期設定
-1. GAS エディタ → **プロジェクトの設定** → **スクリプト プロパティ** を開き、既存の dispatcher 関連設定が空になっていないか必ず確認します。
-   - `FORM_SENDER_TASKS_QUEUE`
-   - `FORM_SENDER_DISPATCHER_URL` または `FORM_SENDER_DISPATCHER_BASE_URL`
+1. GAS エディタ → **プロジェクトの設定** → **スクリプト プロパティ** を開き、次のキーが正しく設定されているか確認・更新します。
+
+   | キー | 設定例 | 説明 |
+   | --- | --- | --- |
+| `FORM_SENDER_TASKS_QUEUE` | `projects/formsalespaid/locations/asia-northeast1/queues/form-sender-dispatcher` | Cloud Tasks で作成したキューのフルリソース名。`projects/<project>/locations/<region>/queues/<queue>` 形式で入力します。 |
+| `FORM_SENDER_DISPATCHER_BASE_URL` | `https://form-sender-dispatcher-621668223275.asia-northeast1.run.app` | Cloud Run dispatcher のベース URL。旧プロパティ `FORM_SENDER_DISPATCHER_URL` を利用している場合も同じ値を設定します。末尾にエンドポイントパスは付与しません。 |
+| `FORM_SENDER_DISPATCHER_SERVICE_ACCOUNT` | `form-sender-dispatcher@formsalespaid.iam.gserviceaccount.com` | Cloud Tasks → Cloud Run dispatcher 呼び出し時の OIDC トークン用サービスアカウント。未設定だとタスクに認証情報が付与されず 403 になります。 |
+| `FORM_SENDER_GCS_BUCKET` | `formsalespaid-form-sender-client-config` | 5.2.2 で作成した Cloud Storage バケット名。Apps Script から client_config JSON を格納し、dispatcher が署名付き URL を生成する際に利用します。 |
+| `SERVICE_ACCOUNT_JSON` | `{"type":"service_account","project_id":"formsalespaid","private_key_id":"...","private_key":"-----BEGIN PRIVATE KEY-----\\n...","client_email":"form-sender-gas@formsalespaid.iam.gserviceaccount.com",...}` | GAS から Cloud Tasks / Cloud Run / Cloud Storage API を呼び出すためのサービスアカウント鍵。4.2.0 節で作成した **GAS オーケストレーター用** サービスアカウントの JSON を貼り付けます。改行は `\n` のまま保存して問題ありません。 |
+
    > これらが未設定の場合、GAS 側は自動的に GitHub Actions 経路へフォールバックし Cloud Batch を利用しません。移行前後で値を控えておくと復旧が容易です。
+   > `FORM_SENDER_GCS_BUCKET` は Cloud Storage で作成したバケット名と完全一致させてください。間違えていると GAS が client_config をアップロードできず dispatcher 側で `FORM_SENDER_GCS_BUCKET が設定されていません` というエラーになります。
+   > `SERVICE_ACCOUNT_JSON` を取得する手順: Cloud Console → **IAM** → GAS オーケストレーター用サービスアカウント（例: `form-sender-gas@<project>.iam.gserviceaccount.com`）→ **鍵** → **鍵を追加** → **新しい鍵を作成** → JSON を選択 → ダウンロードしたファイルの内容をそのまま Script Property に貼り付けます。鍵は機密情報のため、ダウンロード後は安全な場所（社内パスワードマネージャなど）に保管し、不要なローカルファイルは削除してください。既存キーを使い回す場合でも、Cloud Tasks / Storage / Cloud Run へのアクセス権が最新かを必ず再確認してください。
+
 2. 同じ画面で次のキーを追加または更新します。
    - `USE_GCP_BATCH = true`
    - `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT = true`
-   - `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = true`
+   - `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = false`
    - `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT = 100`
    - `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT = n2d-custom-4-10240`
    - `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT = 1`
    - `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT = 2048`
    - `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT = 2048`
-   - `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE =` （必要に応じて）
+   - `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE =` （必要に応じて。設定方法は下記参照）
    - `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH = 48`
    - `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH = 21600`
    - `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT = 1`
 
    > ⚠️ `batch_machine_type` 系の値は **カスタムマシンタイプ（例: `n2d-custom-*`）を推奨** します。`e2-standard-2` などプリセットを指定すると dispatcher がメモリ不足を事前検知できず、Cloud Batch 提出時に失敗する恐れがあります。
+   > 💡 `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` はコスト最適化のため既定値を `false` としています。オンデマンドへの自動切り替えが必要な案件のみ targeting シートの `batch_allow_on_demand_fallback` を `true` に設定してください。
+   > `SERVICE_ACCOUNT_JSON` を取得する手順: Cloud Console → **IAM** → GAS オーケストレーター用サービスアカウント（例: `form-sender-gas@<project>.iam.gserviceaccount.com`）→ **鍵** → **鍵を追加** → **新しい鍵を作成** → JSON を選択 → ダウンロードしたファイルの内容をそのまま Script Property に貼り付けます。鍵は機密情報のため、ダウンロード後は安全な場所（社内パスワードマネージャなど）に保管し、不要なローカルファイルは削除してください。
+
+3. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` の設定目安:
+   - targeting 側で `batch_machine_type` を指定する予定が無く、全案件で固定のマシンタイプを使いたい場合のみ設定します。
+   - 形式は `n2d-custom-<vCPU>-<memoryMB>`（例: `n2d-custom-16-65536`）。`memoryMB` は MiB 単位です。
+   - 特定案件だけ増強したい場合は targeting シートの `batch_machine_type` 列で調整し、この Script Property は空文字のままにしてください。
+
 
 ### 6.2 Targeting シートの更新
 1. targeting シートに以下の列が存在するか確認し、なければ追加します。
@@ -317,7 +360,7 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 | 項目 | 参照優先度 | 備考 |
 | --- | --- | --- |
 | 実行モード (`useGcpBatch` / `useServerless`) | 1. targeting列 → 2. Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`) → 3. GitHub Actions | `true` / `false` だけでなく `1` / `0` / `yes` も受け付けます。|
-| 並列数 (`batch_max_parallelism`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` → 3. GAS推奨値 | 未入力時は Script Property の既定 (デフォルト 100)。 |
+| Cloud Batch タスク並列数 (`batch_max_parallelism`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` → 3. GAS 推奨値 | 1 つのジョブで同時に実行する Cloud Batch タスク数の上限。未入力時は Script Property の既定 (デフォルト 100)。 |
 | Spot 設定 (`batch_prefer_spot`, `batch_allow_on_demand_fallback`) | 1. targeting列 → 2. Script Properties | `prefer_spot=true` で Spot 優先、fallback を false にするとスポット枯渇時に失敗します。 |
 | マシンタイプ (`batch_machine_type`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 3. GAS がワーカー数から自動計算 | 自動計算は `n2d-custom-<workers>-<memory_mb>` 形式 (2GB/worker + 2GB バッファ)。|
 | 署名付き URL TTL (`batch_signed_url_ttl_hours`) | 1. targeting列 → 2. `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` (既定 48h) | 1〜168 の整数を指定。 |

@@ -258,12 +258,18 @@ function isDispatcherConfigured_() {
   var queue = props.getProperty('FORM_SENDER_TASKS_QUEUE');
   var dispatcherUrl = props.getProperty('FORM_SENDER_DISPATCHER_URL');
   var dispatcherBase = props.getProperty('FORM_SENDER_DISPATCHER_BASE_URL');
+  var dispatcherServiceAccount = props.getProperty('FORM_SENDER_DISPATCHER_SERVICE_ACCOUNT');
 
   function hasValue(value) {
     return value && typeof value === 'string' && value.trim() !== '';
   }
 
   if (!hasValue(queue)) {
+    return false;
+  }
+
+  if (!hasValue(dispatcherServiceAccount)) {
+    console.warn('FORM_SENDER_DISPATCHER_SERVICE_ACCOUNT が未設定のため dispatcher を使用できません');
     return false;
   }
 
@@ -374,7 +380,7 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
   var scriptProps = PropertiesService.getScriptProperties();
   var defaultMaxParallelism = getScriptPropertyInt_('FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT', 100);
   var defaultPreferSpot = parseBooleanProperty_(scriptProps.getProperty('FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT') || 'true');
-  var defaultAllowOnDemand = parseBooleanProperty_(scriptProps.getProperty('FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT') || 'true');
+  var defaultAllowOnDemand = parseBooleanProperty_(scriptProps.getProperty('FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT') || 'false');
   var machineTypeDefault = getScriptPropertyString_('FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT', null);
   var machineTypeOverride = getScriptPropertyString_('FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE', null);
   var defaultTtlHours = getScriptPropertyInt_('FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH', 48);
@@ -1057,8 +1063,20 @@ function processTargeting(targetingId, options) {
       resolvedOptions.workflowTrigger = 'automated';
     }
 
+    var modeDetails = resolveTargetingExecutionMode_(targetingConfig || {});
+    var modePriority = resolveExecutionModePriority_();
     var selectedMode = resolveExecutionMode_(targetingConfig);
     var dispatcherReady = isDispatcherConfigured_();
+
+    console.log(JSON.stringify({
+      level: 'debug',
+      event: 'execution_mode_decision',
+      targeting_id: targetingId,
+      requested_mode: selectedMode,
+      dispatcher_ready: dispatcherReady,
+      mode_priority: modePriority,
+      mode_flags: modeDetails
+    }));
 
     if ((selectedMode === 'batch' || selectedMode === 'serverless') && !dispatcherReady) {
       console.warn('dispatcher 未設定のため GitHub Actions 経路へフォールバックします');
@@ -1901,19 +1919,68 @@ function triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, opti
 
 function triggerFormSenderWorkflow(targetingId, options) {
   try {
-    console.log(`GitHub Actions 連続処理ワークフローをトリガー: targetingId=${targetingId}`);
+    const effectiveTargetingId = targetingId || CONFIG.DEFAULT_TARGETING_ID;
+    if (!targetingId) {
+      console.log(`targetingId が指定されていないため、既定値(${CONFIG.DEFAULT_TARGETING_ID})を使用します`);
+    }
+    console.log(`フォーム送信ワークフローのトリガー処理を開始: targetingId=${effectiveTargetingId}`);
     
     // スプレッドシートから完全なクライアント設定を取得
-    const clientConfig = getTargetingConfig(targetingId);
+    const clientConfig = getTargetingConfig(effectiveTargetingId);
     
     if (!clientConfig) {
-      console.error(`targeting_id ${targetingId} の設定が見つかりません`);
+      console.error(`targeting_id ${effectiveTargetingId} の設定が見つかりません`);
       return { success: false, message: 'ターゲティング設定が見つからない' };
     }
     
     // 機微情報は出さない
     console.log(`クライアント設定取得完了: ***COMPANY_REDACTED*** (client_id: ${clientConfig.client_id})`);
     
+    var modeDetails = resolveTargetingExecutionMode_(clientConfig || {});
+    var modePriority = resolveExecutionModePriority_();
+    var selectedMode = resolveExecutionMode_(clientConfig);
+    var globalMode = resolveExecutionMode_(null);
+    var dispatcherReady = isDispatcherConfigured_();
+    var resolvedMode = selectedMode;
+    var fallbackReason = null;
+
+    if ((resolvedMode !== 'batch' && resolvedMode !== 'serverless') && dispatcherReady) {
+      var hasExplicitMode = modeDetails.batchHasExplicit || modeDetails.serverlessHasExplicit;
+      if (!hasExplicitMode && (globalMode === 'batch' || globalMode === 'serverless')) {
+        resolvedMode = globalMode;
+        fallbackReason = 'global_default_without_explicit';
+        console.log(`ターゲティング設定に明示的なモード指定が無いため、グローバル設定(${resolvedMode})へフォールバックします`);
+      }
+    }
+
+    console.log(JSON.stringify({
+      level: 'debug',
+      event: 'trigger_workflow_mode_decision',
+      targeting_id: effectiveTargetingId,
+      requested_mode: selectedMode,
+      global_mode: globalMode,
+      resolved_mode: resolvedMode,
+      dispatcher_ready: dispatcherReady,
+      fallback_reason: fallbackReason,
+      mode_priority: modePriority,
+      mode_flags: modeDetails
+    }));
+
+    if ((resolvedMode === 'batch' || resolvedMode === 'serverless') && dispatcherReady) {
+      var dispatcherOptions = Object.assign({}, options || {});
+      dispatcherOptions.executionMode = (resolvedMode === 'batch') ? 'batch' : 'serverless';
+      if (typeof dispatcherOptions.useExtra === 'undefined') {
+        dispatcherOptions.useExtra = !!clientConfig.use_extra_table;
+      }
+      console.log(`GitHub 経路ではなく Cloud Tasks/dispatcher 経由で処理を開始します (mode=${dispatcherOptions.executionMode})`);
+      var dispatcherResult = triggerServerlessFormSenderWorkflow_(effectiveTargetingId, clientConfig, dispatcherOptions);
+      return dispatcherResult;
+    }
+
+    if ((selectedMode === 'batch' || selectedMode === 'serverless') && !dispatcherReady) {
+      console.warn('dispatcher が未設定のため GitHub Actions 経路にフォールバックします');
+    }
+
     // extraテーブル利用判定（options指定が無い場合はシート設定を採用）
     const useExtra = (function() {
       if (options && typeof options.useExtra !== 'undefined') {
@@ -1926,11 +1993,13 @@ function triggerFormSenderWorkflow(targetingId, options) {
     const cw = Math.max(1, parseInt(clientConfig?.targeting?.concurrent_workflow || 1) || 1);
     console.log(`並列起動数(concurrent_workflow): ${cw}`);
 
+    console.log(`GitHub Actions 連続処理ワークフローをトリガー: targetingId=${effectiveTargetingId}`);
+
     let ok = 0;
     let fail = 0;
     const dispatchOptions = Object.assign({}, options || {}, { useExtra });
     for (let i = 1; i <= cw; i++) {
-      const result = sendRepositoryDispatch('form_sender_task', targetingId, clientConfig, i, cw, dispatchOptions);
+      const result = sendRepositoryDispatch('form_sender_task', effectiveTargetingId, clientConfig, i, cw, dispatchOptions);
       if (result && result.success) {
         ok++;
       } else {
@@ -1944,12 +2013,12 @@ function triggerFormSenderWorkflow(targetingId, options) {
       console.log(`GitHub Actions 連続処理ワークフロートリガー成功（${ok}/${cw}）`);
       return {
         success: true,
-        targetingId: targetingId,
+        targetingId: effectiveTargetingId,
         started_runs: ok
       };
     } else if (ok > 0 && fail > 0) {
       console.warn(`GitHub Actions ワークフロートリガー一部成功（成功:${ok} 失敗:${fail} 合計:${cw}）`);
-      return { success: true, partial: true, targetingId: targetingId, started_runs: ok, failed_runs: fail };
+      return { success: true, partial: true, targetingId: effectiveTargetingId, started_runs: ok, failed_runs: fail };
     } else {
       console.error('GitHub Actions ワークフロートリガー失敗');
       return { success: false, message: 'ワークフロートリガー失敗', started_runs: 0 };
