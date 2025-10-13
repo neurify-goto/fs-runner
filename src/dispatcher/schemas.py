@@ -6,7 +6,7 @@ import re
 from typing import Optional, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, HttpUrl, root_validator, validator
+from pydantic import BaseModel, Field, root_validator, validator
 
 
 class TableConfig(BaseModel):
@@ -65,7 +65,7 @@ class SignedUrlRefreshRequest(BaseModel):
 class FormSenderTask(BaseModel):
     execution_id: Optional[str] = Field(default=None)
     targeting_id: int
-    client_config_ref: HttpUrl
+    client_config_ref: str
     client_config_object: str
     tables: TableConfig = Field(default_factory=TableConfig)
     execution: ExecutionConfig
@@ -81,6 +81,17 @@ class FormSenderTask(BaseModel):
     def validate_gcs_uri(cls, value: str) -> str:  # type: ignore[override]
         if not value.startswith("gs://"):
             raise ValueError("client_config_object must be a gs:// URI")
+        return value
+
+    @validator("client_config_ref")
+    def validate_client_config_ref(cls, value: str) -> str:  # type: ignore[override]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("client_config_ref must be a non-empty string")
+        parsed = urlparse(value)
+        if parsed.scheme != "https":
+            raise ValueError("client_config_ref must use https scheme")
+        if not parsed.netloc:
+            raise ValueError("client_config_ref must include host")
         return value
 
     @validator("branch")

@@ -72,6 +72,18 @@ def test_job_execution_meta_round_trip():
     assert "shards" in decoded
 
 
+def test_form_sender_task_accepts_long_signed_url():
+    issue_time = datetime.now(timezone.utc)
+    long_signature = "A" * 4096
+    long_url = (
+        "https://storage.googleapis.com/fs-bucket/config.json"
+        f"?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Date={issue_time.strftime('%Y%m%dT%H%M%SZ')}"
+        f"&X-Goog-Expires=54000&X-Goog-Signature={long_signature}"
+    )
+    task = _task_payload(issue_time, ref_url=long_url)
+    assert task.client_config_ref.endswith(long_signature)
+
+
 def test_signed_url_manager_resign_threshold(monkeypatch):
     issue_time = datetime.now(timezone.utc) - timedelta(hours=1)
     task = _task_payload(issue_time)
@@ -277,26 +289,35 @@ def test_signed_url_manager_validates_origin_success(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "ref_url, error_message",
+    "ref_url, error_message, expect_validation_error",
     [
-        ("http://storage.googleapis.com/fs-bucket/config.json?X-Goog-Algorithm=GOOG4-RSA-SHA256", "https scheme"),
+        ("http://storage.googleapis.com/fs-bucket/config.json?X-Goog-Algorithm=GOOG4-RSA-SHA256", "https scheme", True),
         (
             "https://example.com/fs-bucket/config.json?X-Goog-Algorithm=GOOG4-RSA-SHA256",
             "storage.googleapis.com",
+            False,
         ),
         (
             "https://storage.googleapis.com/other-bucket/config.json?X-Goog-Algorithm=GOOG4-RSA-SHA256",
             "does not match",
+            False,
         ),
         (
             "https://storage.googleapis.com/fs-bucket/config.json",
             "V4 signed URL",
+            False,
         ),
     ],
 )
-def test_signed_url_manager_rejects_invalid_origin(monkeypatch, ref_url, error_message):
+def test_signed_url_manager_rejects_invalid_origin(monkeypatch, ref_url, error_message, expect_validation_error):
     issue_time = datetime.now(timezone.utc)
     payload = _task_payload_dict(issue_time, ref_url=ref_url)
+    if expect_validation_error:
+        with pytest.raises(ValueError) as excinfo:
+            FormSenderTask.parse_obj(payload)
+        assert error_message in str(excinfo.value)
+        return
+
     task = FormSenderTask.parse_obj(payload)
 
     class _FakeBlob:
