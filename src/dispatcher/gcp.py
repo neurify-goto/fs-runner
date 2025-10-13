@@ -455,7 +455,7 @@ class CloudBatchJobRunner:
         if runnable.container is None:
             runnable.container = batch_v1.Runnable.Container()
 
-        runnable.container.image = self._settings.batch_container_image
+        runnable.container.image_uri = self._settings.batch_container_image
         if self._settings.batch_container_entrypoint:
             runnable.container.entrypoint = self._settings.batch_container_entrypoint
 
