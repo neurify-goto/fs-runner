@@ -8,6 +8,8 @@ from supabase import Client, create_client
 from .metadata import merge_metadata
 
 
+from postgrest.exceptions import APIError
+
 class JobExecutionRepository:
     """Supabase access helper shared between dispatcher and runner."""
 
@@ -68,8 +70,26 @@ class JobExecutionRepository:
             "execution_mode": execution_mode,
             "metadata": metadata,
         }
-        response = self._client.table("job_executions").insert(record).execute()
-        return response.data[0]
+
+        try:
+            response = self._client.table("job_executions").insert(record).execute()
+            return response.data[0]
+        except APIError as exc:
+            error_payload: Optional[Dict[str, Any]] = getattr(exc, "payload", None)
+            error_code: Optional[str] = None
+            if isinstance(error_payload, dict):
+                error_code = error_payload.get("code")
+            elif exc.args:
+                first_arg = exc.args[0]
+                if isinstance(first_arg, dict):
+                    error_code = first_arg.get("code")
+
+            if error_code == "23505":
+                existing = self.get_execution(job_execution_id)
+                if existing:
+                    return existing
+
+            raise
 
     def update_metadata(self, job_execution_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         current = self.get_execution(job_execution_id)
