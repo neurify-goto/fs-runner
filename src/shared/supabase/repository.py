@@ -89,14 +89,27 @@ class JobExecutionRepository:
         if execution_mode:
             update_payload["execution_mode"] = execution_mode
             merged_meta["execution_mode"] = execution_mode
-        response = (
+
+        query = (
             self._client
             .table("job_executions")
             .update(update_payload)
             .eq("execution_id", job_execution_id)
-            .select("*")
-            .execute()
         )
+        try:
+            response = query.execute()
+        except AttributeError:
+            # Older postgrest client versions do not support select() after update; re-fetch row instead.
+            query.execute()
+            response = (
+                self._client
+                .table("job_executions")
+                .select("*")
+                .eq("execution_id", job_execution_id)
+                .limit(1)
+                .execute()
+            )
+
         data = response.data or []
         return data[0] if data else {"execution_id": job_execution_id, "metadata": metadata}
 
