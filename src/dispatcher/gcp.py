@@ -383,14 +383,13 @@ class CloudBatchJobRunner:
         if self._job_template_cache is None:
             try:
                 self._job_template_cache = self._client.get_job(name=template_name)
-            except gcloud_exceptions.NotFound as exc:  # pragma: no cover - network path
-                logger.error(
-                    "Configured Cloud Batch job template '%s' was not found; check FORM_SENDER_BATCH_JOB_TEMPLATE.",
+            except gcloud_exceptions.NotFound:  # pragma: no cover - network path
+                logger.warning(
+                    "Configured Cloud Batch job template '%s' was not found; continuing without template.",
                     template_name,
                 )
-                raise RuntimeError(
-                    "Cloud Batch job template not found; verify FORM_SENDER_BATCH_JOB_TEMPLATE"
-                ) from exc
+                self._job_template_cache = None
+                return None
             except gcloud_exceptions.PermissionDenied as exc:  # pragma: no cover - network path
                 logger.error(
                     "Permission denied when fetching Cloud Batch job template '%s': %s",
