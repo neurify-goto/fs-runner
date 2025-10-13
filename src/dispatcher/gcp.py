@@ -419,7 +419,7 @@ class CloudBatchJobRunner:
             return None
 
         job = batch_v1.Job()
-        job.CopyFrom(self._job_template_cache)
+        job.copy_from(self._job_template_cache)
         return job
 
     def _build_task_spec(
