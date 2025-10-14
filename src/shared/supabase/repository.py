@@ -138,6 +138,9 @@ class JobExecutionRepository:
 
         return self.update_metadata(job_execution_id, metadata)
 
+    def update_parallelism(self, job_execution_id: str, parallelism: int) -> None:
+        self._client.table("job_executions").update({"parallelism": parallelism}).eq("execution_id", job_execution_id).execute()
+
     def find_latest_signed_url(self, targeting_id: int, client_config_object: str) -> Optional[str]:
         response = (
             self._client

@@ -50,6 +50,9 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 | `FORM_SENDER_BATCH_TASK_GROUP` | タスクグループ名 | `form-sender-task-group` | 同上 |
 | `FORM_SENDER_BATCH_SERVICE_ACCOUNT` | Batch 実行用 SA | `form-sender-batch@formsalespaid.iam.gserviceaccount.com` | テンプレートの `serviceAccountEmail` と一致させる |
 | `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` | targeting 未指定時の並列上限 | `100` | `batch_max_parallelism` 列のデフォルト |
+| `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` / `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` | Batch マシンタイプ既定 / 強制上書き | `n2d-standard-2` / 任意 | デフォルトは Spot 在庫を確保しやすい `n2d-standard-2`。案件ごとに変えたい場合は targeting 列を推奨。 |
+| `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT` / `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE` | 起動インスタンス数の既定 / 上書き | `2` / 任意 | Spot VM を複数確保したい場合に利用。`concurrent_workflow` が少なくてもこの台数を最低限確保します。 |
+| `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT` / `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE` | 1 インスタンスあたりのワーカー数 | `2` / 任意 | Python ワーカー上限は 16。負荷やメモリに応じて調整。 |
 | `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` / `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | ワーカーリソース既定 | `1` / `2048` | dispatcher がマシンタイプを自動算出する際に使用 |
 | `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` | 共有メモリバッファ | `2048` | 追加メモリを確保したい場合に調整 |
 | `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` / `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | Spot 優先 / フォールバック既定 | `true` / `false` | targeting 側が空欄の場合の挙動（フォールバックは明示的に有効化が必要） |
@@ -127,7 +130,9 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 | `batch_max_parallelism` | 同時実行タスクの上限 | targeting列 → Script Property `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT`（既定 100） | `concurrent_workflow` と合わせて並列度を調整。 |
 | `batch_prefer_spot` | Spot VM を優先するか | targeting列 → Script Property `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` | `true` で Spot 優先、`false` でオンデマンドのみ。 |
 | `batch_allow_on_demand_fallback` | Spot 枯渇時にオンデマンドへ切り替えるか | targeting列 → Script Property `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | 省略時は `false`。必要な案件のみ `true` にしてフォールバックを許可。 |
-| `batch_machine_type` | 利用したいマシンタイプ | targeting列 → Script Property `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 自動計算 (`n2d-custom-<workers>-<memory>`) | `n2d-custom-8-32768` など。必要な案件だけ上書き。 |
+| `batch_machine_type` | 利用したいマシンタイプ | targeting列 → Script Property `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | デフォルトは `n2d-standard-2`。不足時は dispatcher が自動で `n2d-custom-*` にフォールバック。必要な案件のみ上書き。 |
+| `batch_instance_count` | 起動する Spot インスタンス数 | targeting列 → Script Property `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE` → `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT` (既定 2) | `concurrent_workflow` より小さくてもこの台数は確保。1 台だけにしたい場合は `1` を指定。 |
+| `batch_workers_per_workflow` | 1 インスタンスあたりの Python ワーカー数 | targeting列 → Script Property `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE` → `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT` (既定 2) | 1〜16 の範囲で設定。ワーカーを増やす場合はメモリも確認。 |
 | `batch_vcpu_per_worker` | 1 ワーカーあたりの vCPU | targeting列 → Script Property `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` | 1 以上の整数。 |
 | `batch_memory_per_worker_mb` | 1 ワーカーあたりのメモリ (MiB) | targeting列 → Script Property `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | 2048 以上推奨。 |
 | `batch_memory_buffer_mb` | 追加メモリバッファ | targeting列 → Script Property `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` | 全体バッファ（共有）。 |
@@ -146,14 +151,15 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 
 ## 8. targeting シートの並列設定ガイド
 
-- `concurrent_workflow` は「総タスク数」を決める値です。GAS → Cloud Batch へ渡され、Cloud Batch の `task_count` に相当します（例: 5 を指定するとタスク 5 本が順次投入される）。
-- `batch_max_parallelism` は「同時実行するタスクの上限」を決める値です。指定がある場合はその値、空欄の場合は Script Property `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT`（既定 100）が上限として適用されます。
+- `concurrent_workflow` は「ターゲティングで要求するタスク数」です。GAS は `batch_instance_count` と比較し、大きい方を Cloud Batch の `task_count` として送信します。
+- `batch_instance_count` は「確保したい Spot VM 台数」の下限です。Script Properties 既定は 2。1 台運用にしたい案件は targeting シートで `1` を指定してください。
+- `batch_max_parallelism` は「同時実行するタスクの上限」を決める値です。指定がある場合はその値、空欄の場合は Script Property `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT`（既定 100）が上限として適用されます。実際には `max_parallelism` も `batch_instance_count` 以上になるよう GAS が自動調整します。
 
 挙動のまとめ:
 
 ```
-実行されるタスクの総数 = concurrent_workflow
-同時実行の最大本数   = min(concurrent_workflow, batch_max_parallelism または デフォルト)
+実行されるタスクの総数 = max(concurrent_workflow, batch_instance_count)
+同時実行の最大本数   = min(task_count, batch_max_parallelism または デフォルト)
 ```
 
 運用の目安:

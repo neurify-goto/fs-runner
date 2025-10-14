@@ -263,6 +263,7 @@ class CloudBatchJobRunner:
         parallelism: int,
     ) -> tuple[batch_v1.Job, Dict[str, Any]]:
         job_id = self._generate_job_id()
+        batch_opts = task.batch if task.batch else None
         (
             machine_type,
             cpu_milli,
@@ -347,6 +348,8 @@ class CloudBatchJobRunner:
             "max_retry_count": max_retry_count,
         }
         metadata.update(resource_metadata)
+        if batch_opts and batch_opts.instance_count is not None:
+            metadata["instance_count"] = batch_opts.instance_count
         if job_template:
             metadata["job_template"] = job_template.name
         if configured_task_group_id:
@@ -544,6 +547,22 @@ class CloudBatchJobRunner:
         if parsed:
             machine_vcpu, machine_memory = parsed
             if machine_vcpu < vcpu or machine_memory < memory_mb:
+                needs_fallback = True
+        else:
+            # Non-custom machine types (e.g., n2d-standard-2/8). Apply fallback if requirements exceed capacity.
+            normalized_type = machine_type.strip().lower()
+            standard_match = re.match(r"^n2d-standard-(\d+)$", normalized_type)
+            if standard_match:
+                try:
+                    machine_vcpu = int(standard_match.group(1))
+                except ValueError:
+                    machine_vcpu = None
+                machine_memory = None
+                if machine_vcpu is not None:
+                    machine_memory = machine_vcpu * 4096  # n2-standard has 4 GiB per vCPU
+                    if machine_vcpu < vcpu or memory_mb > machine_memory:
+                        needs_fallback = True
+            elif normalized_type.startswith("n2d-standard-2") and (vcpu > 2 or memory_mb > 8192):
                 needs_fallback = True
 
         if needs_fallback:

@@ -697,6 +697,8 @@ function getTargetingConfig(targetingId) {
     const batchPreferSpotIndex = resolveColumnIndex(targetingColMap, ['batch_prefer_spot', 'batchpreferspot']);
     const batchAllowOnDemandIndex = resolveColumnIndex(targetingColMap, ['batch_allow_on_demand_fallback', 'batchallowondemandfallback']);
     const batchMachineTypeIndex = resolveColumnIndex(targetingColMap, ['batch_machine_type', 'batchmachinetype']);
+    const batchInstanceCountIndex = resolveColumnIndex(targetingColMap, ['batch_instance_count', 'batchinstancecount']);
+    const batchWorkersPerWorkflowIndex = resolveColumnIndex(targetingColMap, ['batch_workers_per_workflow', 'batchworkersperworkflow']);
     const batchSignedUrlTtlIndex = resolveColumnIndex(targetingColMap, ['batch_signed_url_ttl_hours', 'batchsignedurlttlhours']);
     const batchSignedUrlRefreshIndex = resolveColumnIndex(targetingColMap, ['batch_signed_url_refresh_threshold_seconds', 'batchsignedurlrefreshthresholdseconds']);
     const batchVcpuPerWorkerIndex = resolveColumnIndex(targetingColMap, ['batch_vcpu_per_worker', 'batchvcpuperworker']);
@@ -708,6 +710,8 @@ function getTargetingConfig(targetingId) {
     const batchPreferSpot = batchPreferSpotIndex >= 0 ? parseOptionalBoolean(targetingRow[batchPreferSpotIndex]) : undefined;
     const batchAllowOnDemand = batchAllowOnDemandIndex >= 0 ? parseOptionalBoolean(targetingRow[batchAllowOnDemandIndex]) : undefined;
     const batchMachineType = batchMachineTypeIndex >= 0 ? String(targetingRow[batchMachineTypeIndex] || '').trim() : '';
+    const batchInstanceCount = batchInstanceCountIndex >= 0 ? parseOptionalInteger(targetingRow[batchInstanceCountIndex]) : null;
+    const batchWorkersPerWorkflow = batchWorkersPerWorkflowIndex >= 0 ? parseOptionalInteger(targetingRow[batchWorkersPerWorkflowIndex]) : null;
     const batchSignedUrlTtlHours = batchSignedUrlTtlIndex >= 0 ? parseOptionalInteger(targetingRow[batchSignedUrlTtlIndex]) : null;
     const batchSignedUrlRefreshSeconds = batchSignedUrlRefreshIndex >= 0 ? parseOptionalInteger(targetingRow[batchSignedUrlRefreshIndex]) : null;
     const batchVcpuPerWorker = batchVcpuPerWorkerIndex >= 0 ? parseOptionalInteger(targetingRow[batchVcpuPerWorkerIndex]) : null;
@@ -854,6 +858,12 @@ function getTargetingConfig(targetingId) {
     }
     if (batchMachineType) {
       batchConfig.machine_type = batchMachineType;
+    }
+    if (batchInstanceCount !== null && isFinite(batchInstanceCount) && batchInstanceCount >= 1) {
+      batchConfig.instance_count = batchInstanceCount;
+    }
+    if (batchWorkersPerWorkflow !== null && isFinite(batchWorkersPerWorkflow) && batchWorkersPerWorkflow >= 1) {
+      batchConfig.workers_per_workflow = Math.min(batchWorkersPerWorkflow, 16);
     }
     if (batchSignedUrlTtlHours !== null) {
       batchConfig.signed_url_ttl_hours = batchSignedUrlTtlHours;

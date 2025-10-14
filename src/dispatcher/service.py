@@ -85,16 +85,36 @@ class DispatcherService:
         try:
             if execution_mode == "batch":
                 batch_runner = self._ensure_batch_runner()
+                task_count = max(1, task.execution.run_total)
+                requested_instance_count = task.batch.instance_count if task.batch and task.batch.instance_count else None
+
+                effective_parallelism = task.effective_parallelism()
+                desired_parallelism = effective_parallelism
+                if requested_instance_count is not None:
+                    desired_parallelism = max(desired_parallelism, min(task_count, requested_instance_count))
+                    if task.batch and task.batch.max_parallelism is not None:
+                        desired_parallelism = min(desired_parallelism, task.batch.max_parallelism)
+
+                parallelism_value = max(1, min(task_count, desired_parallelism))
+                if parallelism_value != task.execution.parallelism:
+                    try:
+                        self._supabase.update_parallelism(job_execution_id, parallelism_value)
+                    except Exception as exc:  # pragma: no cover - best effort
+                        logger.warning(
+                            "Failed to update Supabase parallelism for execution %s: %s",
+                            job_execution_id,
+                            exc,
+                        )
                 job, batch_meta = batch_runner.run_job(
                     task=task,
                     env_vars=env_vars,
-                    task_count=task.execution.run_total,
-                    parallelism=task.effective_parallelism(),
+                    task_count=task_count,
+                    parallelism=parallelism_value,
                 )
                 batch_metadata: Dict[str, Any] = {
                     "job_name": job.name,
-                    "task_count": task.execution.run_total,
-                    "parallelism": batch_meta.get("parallelism"),
+                    "task_count": task_count,
+                    "parallelism": batch_meta.get("parallelism", parallelism_value),
                     "machine_type": batch_meta.get("machine_type"),
                     "cpu_milli": batch_meta.get("cpu_milli"),
                     "memory_mb": batch_meta.get("memory_mb"),
@@ -103,6 +123,10 @@ class DispatcherService:
                     "allow_on_demand": batch_meta.get("allow_on_demand"),
                     "latest_signed_url": signed_url,
                 }
+                if batch_meta.get("instance_count") is not None:
+                    batch_metadata["instance_count"] = batch_meta.get("instance_count")
+                elif task.batch and task.batch.instance_count is not None:
+                    batch_metadata["instance_count"] = task.batch.instance_count
                 task_group_name = None
                 if job.task_groups:
                     task_group_name = job.task_groups[0].name
@@ -113,7 +137,7 @@ class DispatcherService:
                 configured_task_group_id = batch_meta.get("configured_task_group_id")
                 if configured_task_group_id:
                     batch_metadata["configured_task_group"] = configured_task_group_id
-                batch_metadata["array_size"] = batch_meta.get("array_size", task.execution.run_total)
+                batch_metadata["array_size"] = batch_meta.get("array_size", task_count)
                 if batch_meta.get("attempts") is not None:
                     batch_metadata["attempts"] = batch_meta.get("attempts")
                 if batch_meta.get("max_retry_count") is not None:

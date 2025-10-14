@@ -43,6 +43,7 @@ class Metadata(BaseModel):
 class BatchOptions(BaseModel):
     enabled: bool = Field(default=False)
     max_parallelism: Optional[int] = Field(default=None, ge=1)
+    instance_count: Optional[int] = Field(default=None, ge=1, le=16)
     prefer_spot: bool = Field(default=True)
     allow_on_demand_fallback: bool = Field(default=True)
     machine_type: Optional[str] = None

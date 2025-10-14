@@ -376,7 +376,37 @@ function parseCustomMachineProfile_(machineType) {
   };
 }
 
-function buildBatchPayload_(targetingConfig, workers, parallelism) {
+function parseStandardMachineProfile_(machineType) {
+  if (typeof machineType !== 'string') {
+    return null;
+  }
+  var normalized = machineType.trim().toLowerCase();
+  var match = normalized.match(/^(n2d|n2|e2)-(standard|highmem|highcpu)-(\d+)$/);
+  if (!match) {
+    return null;
+  }
+  var tier = match[2];
+  var vcpu = parseInt(match[3], 10);
+  if (!isFinite(vcpu) || vcpu < 1) {
+    return null;
+  }
+  var memoryPerVcpuMb;
+  if (tier === 'standard') {
+    memoryPerVcpuMb = 4096;
+  } else if (tier === 'highmem') {
+    memoryPerVcpuMb = 8192;
+  } else if (tier === 'highcpu') {
+    memoryPerVcpuMb = 1024;
+  } else {
+    return null;
+  }
+  return {
+    vcpu: vcpu,
+    memoryMb: vcpu * memoryPerVcpuMb
+  };
+}
+
+function buildBatchPayload_(targetingConfig, workers, parallelism, instanceCount) {
   var scriptProps = PropertiesService.getScriptProperties();
   var defaultMaxParallelism = getScriptPropertyInt_('FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT', 100);
   var defaultPreferSpot = parseBooleanProperty_(scriptProps.getProperty('FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT') || 'true');
@@ -458,10 +488,40 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
   }
 
   var resourceProfile = calculateBatchResourceProfile_(workers, resolvedVcpuPerWorker, resolvedMemoryPerWorkerMb, defaultBufferMb);
-  var machineType = machineTypeOverride || machineTypeField || machineTypeDefault;
+  var machineType = machineTypeOverride || machineTypeField;
+  var normalizedMachineType = machineType ? String(machineType).trim().toLowerCase() : '';
+  var usingImplicitStandard = false;
+  if (!machineType || normalizedMachineType === '' || normalizedMachineType === 'n2d-standard-2') {
+    if (!machineType || normalizedMachineType === '') {
+      if (typeof machineTypeDefault === 'string' && machineTypeDefault.trim() !== '') {
+        machineType = machineTypeDefault;
+      } else {
+        machineType = 'n2d-standard-2';
+      }
+    }
+    usingImplicitStandard = true;
+    normalizedMachineType = String(machineType).trim().toLowerCase();
+  }
+
   var requestedMachineType = machineType;
-  if (!machineType) {
-    machineType = 'n2d-custom-' + resourceProfile.vcpu + '-' + resourceProfile.memoryMb;
+
+  if (usingImplicitStandard) {
+    var standardProfile = parseStandardMachineProfile_(normalizedMachineType);
+    var standardVcpuLimit = standardProfile ? standardProfile.vcpu : 2;
+    var standardMemoryLimitMb = standardProfile ? standardProfile.memoryMb : 8192;
+    var requiresCustomShape = resourceProfile.vcpu > standardVcpuLimit || resourceProfile.memoryMb > standardMemoryLimitMb;
+    if (requiresCustomShape) {
+      machineType = 'n2d-custom-' + resourceProfile.vcpu + '-' + resourceProfile.memoryMb;
+      requestedMachineType = machineType;
+    }
+  }
+
+  var resolvedInstanceCount = null;
+  if (typeof instanceCount !== 'undefined' && instanceCount !== null && String(instanceCount).trim() !== '') {
+    var parsedInstanceCount = parseInt(instanceCount, 10);
+    if (isFinite(parsedInstanceCount) && parsedInstanceCount >= 1) {
+      resolvedInstanceCount = Math.min(parsedInstanceCount, 16);
+    }
   }
 
   var parsedMachine = parseCustomMachineProfile_(machineType);
@@ -502,9 +562,17 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
     }
   }
 
+  var resolvedMaxParallelism = Math.max(1, Math.min(maxParallelism, parallelism || maxParallelism));
+  if (resolvedInstanceCount !== null) {
+    var instanceTarget = Math.max(1, Math.min(maxParallelism, resolvedInstanceCount));
+    if (resolvedMaxParallelism < instanceTarget) {
+      resolvedMaxParallelism = instanceTarget;
+    }
+  }
+
   var payload = {
     enabled: true,
-    max_parallelism: Math.max(1, Math.min(maxParallelism, parallelism || maxParallelism)),
+    max_parallelism: resolvedMaxParallelism,
     prefer_spot: !!preferSpot,
     allow_on_demand_fallback: !!allowOnDemand,
     machine_type: machineType,
@@ -515,6 +583,10 @@ function buildBatchPayload_(targetingConfig, workers, parallelism) {
     max_attempts: resolvedMaxAttempts,
     memory_per_worker_mb: resolvedMemoryPerWorkerMb
   };
+
+  if (resolvedInstanceCount !== null) {
+    payload.instance_count = resolvedInstanceCount;
+  }
 
   if (memoryWarning) {
     payload.memory_warning = true;
@@ -558,6 +630,64 @@ function resolveWorkersPerWorkflow_() {
     return CONFIG.WORKERS_PER_WORKFLOW;
   }
   return Math.max(1, Math.min(4, value));
+}
+
+function resolveBatchInstanceCount_(targetingConfig) {
+  var defaultCount = getScriptPropertyInt_('FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT', 2);
+  if (!isFinite(defaultCount) || defaultCount < 1) {
+    defaultCount = 2;
+  }
+
+  var overrideCount = getScriptPropertyInt_('FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE', 0);
+  if (isFinite(overrideCount) && overrideCount >= 1) {
+    defaultCount = overrideCount;
+  }
+
+  var fieldValue = readTargetingField_(targetingConfig, ['batch_instance_count', 'batchInstanceCount', 'instance_count']);
+  if (typeof fieldValue !== 'undefined' && fieldValue !== null && String(fieldValue).trim() !== '') {
+    var parsed = parseInt(fieldValue, 10);
+    if (isFinite(parsed) && parsed >= 1) {
+      defaultCount = parsed;
+    }
+  }
+
+  if (!isFinite(defaultCount) || defaultCount < 1) {
+    defaultCount = 1;
+  }
+  if (defaultCount > 16) {
+    defaultCount = 16;
+  }
+  return defaultCount;
+}
+
+function resolveBatchWorkersPerWorkflow_(targetingConfig, fallbackWorkers) {
+  var base = Math.max(1, parseInt(fallbackWorkers, 10) || 1);
+  var defaultFallback = base > 2 ? 2 : base;
+  var defaultWorkers = getScriptPropertyInt_('FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT', defaultFallback);
+  if (!isFinite(defaultWorkers) || defaultWorkers < 1) {
+    defaultWorkers = defaultFallback;
+  }
+
+  var overrideWorkers = getScriptPropertyInt_('FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE', 0);
+  if (isFinite(overrideWorkers) && overrideWorkers >= 1) {
+    defaultWorkers = overrideWorkers;
+  }
+
+  var fieldValue = readTargetingField_(targetingConfig, ['batch_workers_per_workflow', 'batchWorkersPerWorkflow']);
+  if (typeof fieldValue !== 'undefined' && fieldValue !== null && String(fieldValue).trim() !== '') {
+    var parsed = parseInt(fieldValue, 10);
+    if (isFinite(parsed) && parsed >= 1) {
+      defaultWorkers = parsed;
+    }
+  }
+
+  if (!isFinite(defaultWorkers) || defaultWorkers < 1) {
+    defaultWorkers = base;
+  }
+  if (defaultWorkers > 16) {
+    defaultWorkers = 16;
+  }
+  return defaultWorkers;
 }
 
 function resolveSignedUrlTtlSeconds_(mode) {
@@ -1821,12 +1951,25 @@ function triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, opti
   var uploadInfo = null;
   try {
     var clientConfig = targetingConfig;
+    var executionMode = (options && options.executionMode) || 'cloud_run';
+    var dispatcherMode = executionMode === 'batch' ? 'batch' : 'cloud_run';
     var targeting = clientConfig.targeting || {};
     var testMode = !!(options && options.testMode === true);
     var useExtra = testMode ? false : !!((options && options.useExtra === true) || clientConfig.use_extra_table || (clientConfig.targeting && clientConfig.targeting.use_extra_table));
-    var runTotal = Math.max(1, parseInt(targeting.concurrent_workflow || 1, 10) || 1);
+    var baseRunTotal = Math.max(1, parseInt(targeting.concurrent_workflow || 1, 10) || 1);
+    var batchInstanceCount = null;
+    if (dispatcherMode === 'batch') {
+      batchInstanceCount = resolveBatchInstanceCount_(targetingConfig);
+    }
+    var runTotal = baseRunTotal;
+    if (dispatcherMode === 'batch' && typeof batchInstanceCount === 'number' && isFinite(batchInstanceCount)) {
+      runTotal = Math.max(baseRunTotal, batchInstanceCount);
+    }
     var parallelism = resolveParallelism_(runTotal);
     var workers = resolveWorkersPerWorkflow_();
+    if (dispatcherMode === 'batch') {
+      workers = resolveBatchWorkersPerWorkflow_(targetingConfig, workers);
+    }
     var shards = resolveShardCount_();
     var runIndexBase = allocateRunIndexBase_(targetingId, runTotal);
 
@@ -1846,8 +1989,6 @@ function triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, opti
     }
 
     uploadInfo = storage.uploadClientConfig(targetingId, clientConfig, { runId: Utilities.getUuid() });
-    var executionMode = (options && options.executionMode) || 'cloud_run';
-    var dispatcherMode = executionMode === 'batch' ? 'batch' : 'cloud_run';
     var signedUrlTtlSeconds = resolveSignedUrlTtlSeconds_(dispatcherMode);
     var signedUrl = storage.generateSignedUrl(uploadInfo.bucket, uploadInfo.objectName, signedUrlTtlSeconds);
 
@@ -1890,7 +2031,7 @@ function triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, opti
     };
 
     if (dispatcherMode === 'batch') {
-      var batchPayload = buildBatchPayload_(targetingConfig, workers, payload.execution.parallelism);
+      var batchPayload = buildBatchPayload_(targetingConfig, workers, payload.execution.parallelism, batchInstanceCount !== null ? batchInstanceCount : runTotal);
       payload.batch = batchPayload;
       payload.execution.parallelism = Math.min(payload.execution.parallelism, batchPayload.max_parallelism);
       payload.cpu_class = 'gcp_spot';

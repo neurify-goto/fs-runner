@@ -325,23 +325,29 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
    - `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT = true`
    - `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = false`
    - `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT = 100`
-   - `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT = n2d-custom-4-10240`
+   - `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT = n2d-standard-2`
+   - `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE =` （必要に応じて。設定方法は下記参照）
+   - `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT = 2`
+   - `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE =` （必要に応じて）
+   - `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT = 2`
+   - `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE =` （必要に応じて）
    - `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT = 1`
    - `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT = 2048`
    - `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT = 2048`
-   - `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE =` （必要に応じて。設定方法は下記参照）
    - `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH = 48`
    - `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH = 21600`
    - `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT = 1`
 
-   > ⚠️ `batch_machine_type` 系の値は **カスタムマシンタイプ（例: `n2d-custom-*`）を推奨** します。`e2-standard-2` などプリセットを指定すると dispatcher がメモリ不足を事前検知できず、Cloud Batch 提出時に失敗する恐れがあります。
+   > ✅ デフォルトでは **n2d-standard-2 を 2 台同時起動** する構成です。Spot 在庫の確保率とコストのバランスが良く、ほとんどの targeting で追加設定なしに動作します。
+   > ⚠️ メモリ不足が発生した案件では `batch_machine_type` / Script Properties をカスタム形状（`n2d-custom-*` など）へ切り替えるか、`batch_workers_per_workflow` / `batch_instance_count` を調整してください。dispatcher は必要に応じて自動でカスタム形状へフォールバックしますが、課金も増える点に留意が必要です。
    > 💡 `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` はコスト最適化のため既定値を `false` としています。オンデマンドへの自動切り替えが必要な案件のみ targeting シートの `batch_allow_on_demand_fallback` を `true` に設定してください。
    > `SERVICE_ACCOUNT_JSON` を取得する手順: Cloud Console → **IAM** → GAS オーケストレーター用サービスアカウント（例: `form-sender-gas@<project>.iam.gserviceaccount.com`）→ **鍵** → **鍵を追加** → **新しい鍵を作成** → JSON を選択 → ダウンロードしたファイルの内容をそのまま Script Property に貼り付けます。鍵は機密情報のため、ダウンロード後は安全な場所（社内パスワードマネージャなど）に保管し、不要なローカルファイルは削除してください。
 
 3. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` の設定目安:
-   - targeting 側で `batch_machine_type` を指定する予定が無く、全案件で固定のマシンタイプを使いたい場合のみ設定します。
+   - デフォルトの `n2d-standard-2`（2 vCPU / 8 GiB）で問題が無い場合は **空文字のまま** にしてください。
+   - targeting 側で `batch_machine_type` を指定する予定が無く、全案件でカスタム形状を固定利用したい場合だけ設定します。
    - 形式は `n2d-custom-<vCPU>-<memoryMB>`（例: `n2d-custom-16-65536`）。`memoryMB` は MiB 単位です。
-   - 特定案件だけ増強したい場合は targeting シートの `batch_machine_type` 列で調整し、この Script Property は空文字のままにしてください。
+   - 特定案件のみメモリや vCPU を増強したい場合は、targeting シートの `batch_machine_type` 列を優先的に利用してください。
 
 
 ### 6.2 Targeting シートの更新
@@ -351,6 +357,8 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
    - `batch_prefer_spot`
    - `batch_allow_on_demand_fallback`
    - `batch_machine_type`
+   - `batch_instance_count`
+   - `batch_workers_per_workflow`
    - `batch_signed_url_ttl_hours`
    - `batch_signed_url_refresh_threshold_seconds`
    - `batch_vcpu_per_worker`
@@ -362,7 +370,9 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 | 実行モード (`useGcpBatch` / `useServerless`) | 1. targeting列 → 2. Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`) → 3. GitHub Actions | `true` / `false` だけでなく `1` / `0` / `yes` も受け付けます。|
 | Cloud Batch タスク並列数 (`batch_max_parallelism`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` → 3. GAS 推奨値 | 1 つのジョブで同時に実行する Cloud Batch タスク数の上限。未入力時は Script Property の既定 (デフォルト 100)。 |
 | Spot 設定 (`batch_prefer_spot`, `batch_allow_on_demand_fallback`) | 1. targeting列 → 2. Script Properties | `prefer_spot=true` で Spot 優先、fallback を false にするとスポット枯渇時に失敗します。 |
-| マシンタイプ (`batch_machine_type`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 3. GAS がワーカー数から自動計算 | 自動計算は `n2d-custom-<workers>-<memory_mb>` 形式 (2GB/worker + 2GB バッファ)。|
+| マシンタイプ (`batch_machine_type`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 3. `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | 既定値は `n2d-standard-2`。不足時は dispatcher が自動で `n2d-custom-<workers>-<memory_mb>` にフォールバックします。 |
+| Batch インスタンス数 (`batch_instance_count`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE` → 3. `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT` (既定 2) | 起動する Spot VM 数の下限。`concurrent_workflow` が小さくてもここで指定した台数を確保します。|
+| Batch ワーカー数 (`batch_workers_per_workflow`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE` → 3. `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT` (既定 2) | 1 インスタンスあたりの Python ワーカー数。1〜16 の範囲で調整してください。 |
 | 署名付き URL TTL (`batch_signed_url_ttl_hours`) | 1. targeting列 → 2. `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` (既定 48h) | 1〜168 の整数を指定。 |
 | 署名付き URL リフレッシュ閾値 (`batch_signed_url_refresh_threshold_seconds`) | 1. targeting列 → 2. `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` (既定 21600 秒) | 60〜604800 の範囲で指定。 |
 | リソース単位 (`batch_vcpu_per_worker`, `batch_memory_per_worker_mb`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` / `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | 未指定時は vCPU=1, メモリ=2048MB（共有バッファとして 2048MB を別途確保）。 |
@@ -436,7 +446,7 @@ Terraform を使わずに手動で Cloud Run サービスを更新する場合�
 A. 初回はプレースホルダでも plan は可能です。Cloud Console → **Cloud Run** → 対象サービスを開き、右上に表示される URL（例: `https://form-sender-dispatcher-xxxx.a.run.app`）をコピーして `terraform.tfvars` の `dispatcher_base_url` に貼り付けます。その後、GitHub Actions から再度 `Deploy Cloud Batch Runner` ワークフローを実行し、plan の差分が解消されることを確認してください。
 
 **Q2. Batch マシンタイプが足りずにフォールバックされました。どうすれば良いですか？**  
-A. ログに `Requested Batch machine_type ... Falling back to n2d-custom-4-10240` と表示された場合、`job_executions.metadata.batch.memory_warning` が `true` になります。GAS 側の `batch_machine_type` か Script Property `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` を増やして再実行してください。
+A. ログに `Requested Batch machine_type ... Falling back to n2d-custom-...` のようなメッセージが出た場合、`job_executions.metadata.batch.memory_warning` が `true` になります。対象案件の `batch_machine_type` をより大きい形状へ変更するか、Script Property `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` を調整してください。ワーカー数やバッファを減らすことで回避できるケースもあります。
 
 **Q3. Supabase Service Role Key をローカルに置きたくありません。**  
 A. Terraform の `supabase_secret_names` を利用して Secret Manager に格納し、Cloud Run/Batch からのみ参照する運用にしてください。ローカル検証時は `.env` に一時的に書くか、GitHub Actions のシークレットを使ってください。

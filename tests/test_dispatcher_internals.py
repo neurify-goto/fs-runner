@@ -545,8 +545,11 @@ def test_handle_form_sender_task_preserves_execution_id(monkeypatch):
 def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypatch):
     issue_time = datetime.now(timezone.utc)
     payload_dict = _task_payload_dict(issue_time, execution_id=None)
+    payload_dict["execution"]["run_total"] = 1
     payload_dict["mode"] = "batch"
-    payload_dict["batch"] = {"enabled": True, "max_parallelism": 2}
+    payload_dict["batch"] = {"enabled": True, "max_parallelism": 2, "instance_count": 2}
+    payload_dict["execution"]["run_total"] = 2
+    payload_dict["execution"]["parallelism"] = 2
     task = FormSenderTask.parse_obj(payload_dict)
 
     settings = DispatcherSettings(
@@ -577,6 +580,11 @@ def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypat
         patched_metadata.append(metadata)
         return {"execution_id": execution_id, "metadata": metadata}
 
+    parallelism_updates: list[tuple[str, int]] = []
+
+    def _update_parallelism(exec_id: str, value: int) -> None:
+        parallelism_updates.append((exec_id, value))
+
     service = object.__new__(DispatcherService)
     service._settings = settings
     service._supabase = SimpleNamespace(
@@ -585,6 +593,7 @@ def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypat
         insert_execution=_insert_execution,
         update_status=lambda *args, **kwargs: None,
         update_metadata=_update_metadata,
+        update_parallelism=_update_parallelism,
     )
 
     def _capture_signed_url(task_obj, **kwargs):
@@ -593,19 +602,27 @@ def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypat
 
     service._signed_url_manager = SimpleNamespace(ensure_fresh=_capture_signed_url)
 
+    captured_batch_kwargs: Dict[str, Any] = {}
+
     def _ensure_runner(self):
         job = SimpleNamespace(name="projects/proj/locations/asia/jobs/form-sender/jobs/job123", task_groups=[SimpleNamespace(name="group0")])
         meta = {
-            "machine_type": "n2d-custom-4-10240",
-            "cpu_milli": 4000,
-            "memory_mb": 10240,
+            "machine_type": "n2d-standard-2",
+            "cpu_milli": 2000,
+            "memory_mb": 6144,
             "memory_buffer_mb": 2048,
             "prefer_spot": True,
             "allow_on_demand": True,
             "parallelism": 2,
             "array_size": task.execution.run_total,
+            "instance_count": 2,
         }
-        return SimpleNamespace(run_job=lambda **kwargs: (job, meta), client=MagicMock())
+
+        def _run_job(**kwargs):
+            captured_batch_kwargs.update(kwargs)
+            return job, meta
+
+        return SimpleNamespace(run_job=_run_job, client=MagicMock())
 
     service._ensure_batch_runner = MethodType(_ensure_runner, service)
     service._job_runner = None
@@ -621,7 +638,163 @@ def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypat
     final_metadata = patched_metadata[-1]
     assert final_metadata["batch"]["latest_signed_url"] == "https://example.com/refreshed"
     assert final_metadata["batch"]["monitor"]["state"] == "scheduled"
+    assert captured_batch_kwargs.get("parallelism") == 2
+    assert captured_batch_kwargs.get("task_count") == task.execution.run_total
+    if parallelism_updates:
+        assert parallelism_updates[-1][1] == 2
 
+
+def test_handle_form_sender_task_respects_parallelism_override(monkeypatch):
+    issue_time = datetime.now(timezone.utc)
+    payload_dict = _task_payload_dict(issue_time, execution_id=None)
+    payload_dict["execution"]["parallelism"] = 1
+    payload_dict["mode"] = "batch"
+    payload_dict["batch"] = {"enabled": True, "instance_count": 2}
+    task = FormSenderTask.parse_obj(payload_dict)
+
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender-runner",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="form-sender",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+    )
+
+    parallelism_updates: list[tuple[str, int]] = []
+
+    def _update_parallelism(exec_id: str, value: int) -> None:
+        parallelism_updates.append((exec_id, value))
+
+    service = object.__new__(DispatcherService)
+    service._settings = settings
+    service._supabase = SimpleNamespace(
+        find_active_execution=lambda *args, **kwargs: None,
+        find_latest_signed_url=lambda *args, **kwargs: None,
+        insert_execution=lambda *args, **kwargs: {"execution_id": "exec-123", "metadata": {}},
+        update_status=lambda *args, **kwargs: None,
+        update_metadata=lambda *args, **kwargs: {"execution_id": "exec-123", "metadata": {"batch": {}}},
+        update_parallelism=_update_parallelism,
+    )
+
+    captured_batch_kwargs: Dict[str, Any] = {}
+
+    def _ensure_runner(self):
+        job = SimpleNamespace(name="projects/proj/locations/asia/jobs/form-sender/jobs/job456", task_groups=[SimpleNamespace(name="group0")])
+        meta = {
+            "machine_type": "n2d-standard-2",
+            "cpu_milli": 2000,
+            "memory_mb": 6144,
+            "memory_buffer_mb": 2048,
+            "prefer_spot": True,
+            "allow_on_demand": True,
+            "parallelism": 1,
+            "array_size": task.execution.run_total,
+            "instance_count": 2,
+        }
+
+        def _run_job(**kwargs):
+            captured_batch_kwargs.update(kwargs)
+            return job, meta
+
+        return SimpleNamespace(run_job=_run_job, client=MagicMock())
+
+    service._ensure_batch_runner = MethodType(_ensure_runner, service)
+    service._job_runner = None
+    service._secret_manager = None
+    service._signed_url_manager = SimpleNamespace(ensure_fresh=lambda task_obj, **kwargs: task_obj.client_config_ref)
+    service._build_env = MethodType(lambda self, *_args, **_kwargs: {}, service)
+
+    response = service.handle_form_sender_task(task)
+
+    assert response["batch_job_name"].endswith("job456")
+    assert captured_batch_kwargs.get("parallelism") == 2
+    assert captured_batch_kwargs.get("task_count") == task.execution.run_total
+    assert parallelism_updates and parallelism_updates[-1][1] == 2
+
+
+def test_handle_form_sender_task_respects_batch_max_parallelism(monkeypatch):
+    issue_time = datetime.now(timezone.utc)
+    payload_dict = _task_payload_dict(issue_time, execution_id=None)
+    payload_dict["execution"]["parallelism"] = 10
+    payload_dict["execution"]["run_total"] = 10
+    payload_dict["mode"] = "batch"
+    payload_dict["batch"] = {"enabled": True, "instance_count": 8, "max_parallelism": 3}
+    task = FormSenderTask.parse_obj(payload_dict)
+
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender-runner",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="form-sender",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+    )
+
+    parallelism_updates: list[tuple[str, int]] = []
+
+    def _update_parallelism(exec_id: str, value: int) -> None:
+        parallelism_updates.append((exec_id, value))
+
+    service = object.__new__(DispatcherService)
+    service._settings = settings
+    service._supabase = SimpleNamespace(
+        find_active_execution=lambda *args, **kwargs: None,
+        find_latest_signed_url=lambda *args, **kwargs: None,
+        insert_execution=lambda *args, **kwargs: {"execution_id": "exec-789", "metadata": {}},
+        update_status=lambda *args, **kwargs: None,
+        update_metadata=lambda *args, **kwargs: {"execution_id": "exec-789", "metadata": {"batch": {}}},
+        update_parallelism=_update_parallelism,
+    )
+
+    captured_batch_kwargs: Dict[str, Any] = {}
+
+    def _ensure_runner(self):
+        job = SimpleNamespace(name="projects/proj/locations/asia/jobs/form-sender/jobs/job789", task_groups=[SimpleNamespace(name="group0")])
+        meta = {
+            "machine_type": "n2d-standard-2",
+            "cpu_milli": 2000,
+            "memory_mb": 6144,
+            "memory_buffer_mb": 2048,
+            "prefer_spot": True,
+            "allow_on_demand": True,
+            "parallelism": 3,
+            "array_size": task.execution.run_total,
+            "instance_count": 3,
+        }
+
+        def _run_job(**kwargs):
+            captured_batch_kwargs.update(kwargs)
+            return job, meta
+
+        return SimpleNamespace(run_job=_run_job, client=MagicMock())
+
+    service._ensure_batch_runner = MethodType(_ensure_runner, service)
+    service._job_runner = None
+    service._secret_manager = None
+    service._signed_url_manager = SimpleNamespace(ensure_fresh=lambda task_obj, **kwargs: task_obj.client_config_ref)
+    service._build_env = MethodType(lambda self, *_args, **_kwargs: {}, service)
+
+    response = service.handle_form_sender_task(task)
+
+    assert response["batch_job_name"].endswith("job789")
+    assert captured_batch_kwargs.get("parallelism") == 3
+    assert captured_batch_kwargs.get("task_count") == task.execution.run_total
+    assert parallelism_updates and parallelism_updates[-1][1] == 3
 
 def test_find_latest_signed_url_falls_back_to_client_config_ref():
     fallback_url = "https://example.com/fallback"
