@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from google.api_core import exceptions as gcloud_exceptions
+from google.cloud import batch_v1
 
 from dispatcher.config import DispatcherSettings
 from dispatcher.schemas import ExecutionConfig, FormSenderTask, Metadata, SignedUrlRefreshRequest, TableConfig
@@ -1223,6 +1224,75 @@ def test_batch_runner_continues_when_job_template_missing(monkeypatch, caplog):
     assert "was not found; continuing without template" in caplog.text
 
 
+def test_batch_runner_retries_with_on_demand_when_spot_unavailable(monkeypatch, caplog):
+    class _StubBatchClient:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+            self.job_ids: list[str] = []
+            self.records: list[Any] = []
+
+        def get_job(self, name):
+            raise gcloud_exceptions.NotFound("template missing")
+
+        def create_job(self, parent, job, job_id):
+            self.calls += 1
+            self.job_ids.append(job_id)
+            if self.calls == 1:
+                raise gcloud_exceptions.ResourceExhausted("Spot capacity unavailable")
+            record = SimpleNamespace(name=f"{parent}/jobs/{job_id}", task_groups=job.task_groups)
+            self.records.append(record)
+            return record
+
+        def delete_job(self, name):  # pragma: no cover - not used
+            return None
+
+    monkeypatch.setattr(gcp_module.batch_v1, "BatchServiceClient", lambda *args, **kwargs: _StubBatchClient())
+
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="form-sender",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+        batch_supabase_url_secret="projects/proj/secrets/url",
+        batch_supabase_service_role_secret="projects/proj/secrets/key",
+    )
+    runner = CloudBatchJobRunner(settings)
+
+    payload = _task_payload_dict(datetime.now(timezone.utc))
+    payload["mode"] = "batch"
+    payload["batch"] = {"enabled": True, "prefer_spot": True, "allow_on_demand_fallback": True}
+    task = FormSenderTask.parse_obj(payload)
+
+    caplog.set_level(logging.WARNING, logger="dispatcher.gcp")
+
+    job, metadata = runner.run_job(
+        task=task,
+        env_vars={},
+        task_count=task.execution.run_total,
+        parallelism=task.effective_parallelism(),
+    )
+
+    assert runner._client.calls == 2
+    assert len(runner._client.job_ids) == 2
+    assert runner._client.job_ids[0] != runner._client.job_ids[1]
+    assert metadata["effective_provisioning_model"] == "standard"
+    assert metadata["prefer_spot"] is True
+    assert metadata["allow_on_demand"] is True
+    assert metadata["spot_fallback"]["applied"] is True
+    assert metadata["spot_fallback"]["original_job_id"] == runner._client.job_ids[0]
+    assert "Retrying Batch job with on-demand provisioning" in caplog.text
+    assert job.name.endswith(runner._client.job_ids[1])
+
+
 def test_calculate_resources_warns_when_memory_below_recommendation(caplog):
     settings = DispatcherSettings(
         project_id="proj",
@@ -1333,6 +1403,24 @@ def test_apply_secret_variables_defaults_to_plain_strings():
     runner._apply_secret_variables(environment, {"SUPABASE_SERVICE_ROLE_KEY": secret_path})
 
     assert environment.secret_variables["SUPABASE_SERVICE_ROLE_KEY"] == secret_path
+
+
+def test_allocation_policy_uses_single_instance_entry():
+    runner = object.__new__(CloudBatchJobRunner)
+    runner._settings = SimpleNamespace(batch_service_account_email=None)
+
+    policy = CloudBatchJobRunner._build_allocation_policy(
+        runner,
+        machine_type="n2d-custom-2-8192",
+        prefer_spot=True,
+        allow_on_demand=True,
+    )
+
+    assert len(policy.instances) == 1
+    assert (
+        policy.instances[0].policy.provisioning_model
+        == batch_v1.AllocationPolicy.ProvisioningModel.SPOT
+    )
 
 
 def test_batch_mode_normalized_when_batch_payload_present():

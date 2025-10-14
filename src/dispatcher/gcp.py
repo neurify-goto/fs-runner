@@ -334,7 +334,40 @@ class CloudBatchJobRunner:
         if template_logs_policy:
             job.logs_policy = template_logs_policy
 
-        response = self._client.create_job(parent=self._parent, job=job, job_id=job_id)
+        effective_provisioning = "spot" if prefer_spot else "standard"
+        fallback_details: Dict[str, Any] = {}
+        try:
+            response = self._client.create_job(parent=self._parent, job=job, job_id=job_id)
+        except gcloud_exceptions.GoogleAPICallError as exc:
+            if prefer_spot and allow_on_demand and self._should_retry_with_on_demand(exc):
+                logger.warning(
+                    "Retrying Batch job with on-demand provisioning after Spot failure",
+                    extra={
+                        "machine_type": machine_type,
+                        "batch_location": self._settings.batch_location,
+                        "original_job_id": job_id,
+                        "error": self._truncate_error_message(str(exc)),
+                    },
+                )
+                fallback_details = {
+                    "applied": True,
+                    "reason": self._truncate_error_message(str(exc)),
+                    "error_type": exc.__class__.__name__,
+                    "original_job_id": job_id,
+                }
+                status_code = getattr(exc, "code", None)
+                if status_code is not None:
+                    fallback_details["status_code"] = getattr(status_code, "name", str(status_code))
+                job.allocation_policy = self._build_allocation_policy(
+                    machine_type=machine_type,
+                    prefer_spot=False,
+                    allow_on_demand=False,
+                )
+                job_id = self._generate_job_id()
+                response = self._client.create_job(parent=self._parent, job=job, job_id=job_id)
+                effective_provisioning = "standard"
+            else:
+                raise
         logger.info("Submitted Cloud Batch job", extra={"job_name": response.name})
         metadata = {
             "machine_type": machine_type,
@@ -346,6 +379,7 @@ class CloudBatchJobRunner:
             "array_size": task_count,
             "attempts": attempts,
             "max_retry_count": max_retry_count,
+            "effective_provisioning_model": effective_provisioning,
         }
         metadata.update(resource_metadata)
         if batch_opts and batch_opts.instance_count is not None:
@@ -355,6 +389,8 @@ class CloudBatchJobRunner:
         if configured_task_group_id:
             metadata["configured_task_group_id"] = configured_task_group_id
             metadata["task_group_resource_hint"] = f"{self._parent}/jobs/{job_id}/taskGroups/{configured_task_group_id}"
+        if fallback_details:
+            metadata["spot_fallback"] = fallback_details
         return response, metadata
 
     def delete_job(self, job_name: str) -> None:
@@ -645,16 +681,6 @@ class CloudBatchJobRunner:
             )
         ]
 
-        if prefer_spot and allow_on_demand:
-            instances.append(
-                batch_v1.AllocationPolicy.InstancePolicyOrTemplate(
-                    policy=batch_v1.AllocationPolicy.InstancePolicy(
-                        machine_type=machine_type,
-                        provisioning_model=batch_v1.AllocationPolicy.ProvisioningModel.STANDARD,
-                    )
-                )
-            )
-
         service_account = None
         if self._settings.batch_service_account_email:
             service_account = batch_v1.ServiceAccount(
@@ -665,6 +691,33 @@ class CloudBatchJobRunner:
             instances=instances,
             service_account=service_account,
         )
+
+    def _should_retry_with_on_demand(self, exc: gcloud_exceptions.GoogleAPICallError) -> bool:
+        retryable = (
+            gcloud_exceptions.ResourceExhausted,
+            gcloud_exceptions.FailedPrecondition,
+            gcloud_exceptions.ServiceUnavailable,
+        )
+        if not isinstance(exc, retryable):
+            return False
+
+        message = str(exc).lower()
+        keywords = (
+            "spot",
+            "preemptible",
+            "capacity",
+            "quota",
+            "unavailable",
+            "exhausted",
+        )
+        return any(keyword in message for keyword in keywords)
+
+    @staticmethod
+    def _truncate_error_message(message: str, limit: int = 512) -> str:
+        cleaned = " ".join(message.strip().split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return f"{cleaned[: limit - 3]}..."
 
     def _apply_secret_variables(self, environment: batch_v1.Environment, secrets: Dict[str, str]) -> None:
         if not secrets:
