@@ -32,7 +32,7 @@ Cloud Batch workers
 Supabase / Cloud Logging / Monitoring
 ```
 
-> Spot VM が確保できない場合、`batch_allow_on_demand_fallback` が `true` のターゲティングではオンデマンドへ自動切り替えされます。フォールバック結果は `job_executions.metadata.batch` に記録されます。
+> Spot VM が確保できない場合、`batch_allow_on_demand_fallback` が `TRUE` のターゲティングではオンデマンドへ自動切り替えされます。フォールバック結果は `job_executions.metadata.batch` に記録されます。
 
 ## 2. Script Properties チェックリスト
 
@@ -59,7 +59,7 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 | `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` / `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` | 署名付き URL の TTL と更新閾値 | `48` / `21600` | 長時間ジョブの URL 期限切れを防ぐ |
 
 > Supabase 関連 (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) や GitHub Actions フォールバック用のプロパティも環境ごとに整合性を保ってください。`.env` と Script Properties の差分がないか定期的に確認することを推奨します。
-> オンデマンドへの自動切り替えは既定で無効 (`FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = false`) です。Spot VM でのみ実行したい案件は何も設定せず、フォールバックが必要な案件のみ targeting シートで `batch_allow_on_demand_fallback = true` をオンにしてください。
+> オンデマンドへの自動切り替えは既定で無効 (`FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = false`) です。Spot VM でのみ実行したい案件は何も設定せず、フォールバックが必要な案件のみ targeting シートで `batch_allow_on_demand_fallback = TRUE` をオンにしてください（チェックボックスの場合は `TRUE`、手入力の場合は大文字小文字不問）。
 > `SERVICE_ACCOUNT_JSON` に使用する `form-sender-gas` サービスアカウントには `roles/cloudtasks.enqueuer`, `roles/storage.objectAdmin`, `roles/run.invoker`, `roles/iam.serviceAccountUser` を付与し、Cloud Tasks・GCS・Cloud Run dispatcher へのアクセスに利用します。また、`form-sender-dispatcher@...` 側には `roles/iam.serviceAccountTokenCreator` を付けたうえで、Cloud Tasks サービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）にも同ロールを与えておくと OIDC トークン生成が安定します。
 
 ## 3. 日次・定期チェック
@@ -118,18 +118,20 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 | --- | --- | --- |
 | Cloud Run dispatcher が起動しない | Cloud Logging で `RuntimeError: 環境変数 ...` を検索 | `docs/form_sender_gcp_batch_setup_guide.md` の 6.3 節を参照し、環境変数・シークレットを再設定 |
 | Batch ジョブが `FAILED` を繰り返す | `job_executions.metadata.batch` の `memory_warning`、`machine_type` を確認 | targeting の `batch_memory_per_worker_mb`/`batch_machine_type` を増やす |
-| Supabase に `execution_mode=cloud_run` が残る | GAS Script Properties `USE_GCP_BATCH` などを確認 | targeting 側フラグが `false` の場合は切り替え漏れ。GAS Property と targeting を更新 |
+| Supabase に `execution_mode=cloud_run` が残る | GAS Script Properties `USE_GCP_BATCH` などを確認 | targeting 側フラグが `FALSE` の場合は切り替え漏れ。GAS Property と targeting を更新 |
 | Cloud Tasks で 401/403 | ターゲット URL または OIDC サービスアカウントの権限不足 | Cloud Run dispatcher の URL と SA (`form-sender-dispatcher@...`) に `roles/run.invoker` が設定されているか確認 |
 
 ## 7. targeting シート設定リファレンス
 
+> **真偽値の記法について**: チェックボックス列（`TRUE`/`FALSE`）や手入力の真偽値は、大文字小文字を区別せずに処理されます。`TRUE`、`true`、`True` のいずれも同じ意味として扱われます。
+
 | 列名 | 役割 | 値の優先順位 | 備考 |
 | --- | --- | --- | --- |
-| `useGcpBatch` / `useServerless` | Batch／Serverless の切り替え | targeting列 → Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`) → デフォルト | `true/false` のほか `1/0` や `yes/no` も可。Batch を使わない案件は `false`。 |
+| `useGcpBatch` / `useServerless` | Batch／Serverless の切り替え | targeting列 → Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`) → デフォルト | `TRUE`/`FALSE` のほか `1`/`0` や `yes`/`no` も可（大文字小文字不問）。Batch を使わない案件は `FALSE`。 |
 | `concurrent_workflow` | Cloud Batch タスク総数 | targeting列のみ | GAS 側で `task_count` として使用。未指定なら 1。 |
 | `batch_max_parallelism` | 同時実行タスクの上限 | targeting列 → Script Property `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT`（既定 100） | `concurrent_workflow` と合わせて並列度を調整。 |
-| `batch_prefer_spot` | Spot VM を優先するか | targeting列 → Script Property `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` | `true` で Spot 優先、`false` でオンデマンドのみ。 |
-| `batch_allow_on_demand_fallback` | Spot 枯渇時にオンデマンドへ切り替えるか | targeting列 → Script Property `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | 省略時は `false`。必要な案件のみ `true` にしてフォールバックを許可。 |
+| `batch_prefer_spot` | Spot VM を優先するか | targeting列 → Script Property `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` | `TRUE` で Spot 優先、`FALSE` でオンデマンドのみ。 |
+| `batch_allow_on_demand_fallback` | Spot 枯渇時にオンデマンドへ切り替えるか | targeting列 → Script Property `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | 省略時は `FALSE`。必要な案件のみ `TRUE` にしてフォールバックを許可。 |
 | `batch_machine_type` | 利用したいマシンタイプ | targeting列 → Script Property `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | 既定値は `e2-standard-2`。標準形状を指定した場合はその形状の上限を使い切るまでは維持され、超過時のみ自動で `n2d-custom-*` にフォールバックします。必要な案件のみ上書き。 |
 | `batch_instance_count` | 起動する Spot インスタンス数 | targeting列 → Script Property `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE` → `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT` (既定 2) | `concurrent_workflow` より小さくてもこの台数は確保。1 台だけにしたい場合は `1` を指定。 |
 | `batch_workers_per_workflow` | 1 インスタンスあたりの Python ワーカー数 | targeting列 → Script Property `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE` → `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT` (既定 2) | 1〜16 の範囲で設定。ワーカーを増やす場合はメモリも確認。 |

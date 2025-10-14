@@ -28,6 +28,7 @@ import dispatcher.gcp as gcp_module
 
 
 from dispatcher.supabase_client import JobExecutionRepository
+from postgrest.exceptions import APIError
 
 def _task_payload_dict(
     issue_time: datetime,
@@ -863,6 +864,41 @@ def test_dispatcher_list_executions_returns_public_fields():
     assert result["executions"][0]["execution_id"] == "exec-1"
     assert result["executions"][0]["metadata"]["cloud_run_execution"].endswith("/executions/foo")
     assert result["executions"][0]["execution_mode"] == "cloud_run"
+
+
+def test_insert_execution_returns_existing_on_unique_violation():
+    repo = object.__new__(JobExecutionRepository)
+
+    class _FakeTable:
+        def __init__(self):
+            self.inserted_record = None
+
+        def insert(self, record):
+            self.inserted_record = record
+            return self
+
+        def execute(self):
+            raise APIError({
+                "code": "23505",
+                "message": "duplicate key value violates unique constraint \"ux_job_executions_execution_id\"",
+            })
+
+    repo._client = SimpleNamespace(table=lambda name: _FakeTable())  # type: ignore[attr-defined]
+    existing = {"execution_id": "exec-123", "metadata": {"execution_mode": "batch"}}
+    repo.get_execution = MethodType(lambda self, execution_id: existing if execution_id == "exec-123" else None, repo)  # type: ignore[assignment]
+
+    payload = _task_payload_dict(datetime.now(timezone.utc))
+
+    result = JobExecutionRepository.insert_execution(
+        repo,
+        job_execution_id="exec-123",
+        payload=payload,
+        cloud_run_operation=None,
+        cloud_run_execution=None,
+        execution_mode="batch",
+    )
+
+    assert result is existing
 
 
 def test_dispatcher_cancel_execution_success(monkeypatch):

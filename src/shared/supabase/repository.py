@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -75,21 +76,42 @@ class JobExecutionRepository:
             response = self._client.table("job_executions").insert(record).execute()
             return response.data[0]
         except APIError as exc:
-            error_payload: Optional[Dict[str, Any]] = getattr(exc, "payload", None)
-            error_code: Optional[str] = None
-            if isinstance(error_payload, dict):
-                error_code = error_payload.get("code")
-            elif exc.args:
-                first_arg = exc.args[0]
-                if isinstance(first_arg, dict):
-                    error_code = first_arg.get("code")
-
-            if error_code == "23505":
+            if self._is_unique_violation(exc):
                 existing = self.get_execution(job_execution_id)
                 if existing:
                     return existing
-
             raise
+
+    @staticmethod
+    def _is_unique_violation(exc: APIError) -> bool:
+        error_code = getattr(exc, "code", None)
+        if error_code == "23505":
+            return True
+
+        payload = getattr(exc, "payload", None)
+        if isinstance(payload, dict) and payload.get("code") == "23505":
+            return True
+
+        for arg in exc.args:
+            if isinstance(arg, dict) and arg.get("code") == "23505":
+                return True
+            if isinstance(arg, str):
+                if "23505" in arg:
+                    return True
+                if "duplicate key" in arg.lower():
+                    return True
+                try:
+                    parsed = json.loads(arg)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict) and parsed.get("code") == "23505":
+                    return True
+
+        details = getattr(exc, "details", None)
+        if isinstance(details, str) and "duplicate key" in details.lower():
+            return True
+
+        return False
 
     def update_metadata(self, job_execution_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         current = self.get_execution(job_execution_id)
