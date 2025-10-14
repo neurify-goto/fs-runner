@@ -325,7 +325,7 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
    - `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT = true`
    - `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = false`
    - `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT = 100`
-   - `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT = n2d-standard-2`
+  - `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT = n2d-standard-2`
    - `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE =` （必要に応じて。設定方法は下記参照）
    - `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT = 2`
    - `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE =` （必要に応じて）
@@ -339,7 +339,8 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
    - `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT = 1`
 
    > ✅ デフォルトでは **n2d-standard-2 を 2 台同時起動** する構成です。Spot 在庫の確保率とコストのバランスが良く、ほとんどの targeting で追加設定なしに動作します。
-   > ⚠️ メモリ不足が発生した案件では `batch_machine_type` / Script Properties をカスタム形状（`n2d-custom-*` など）へ切り替えるか、`batch_workers_per_workflow` / `batch_instance_count` を調整してください。dispatcher は必要に応じて自動でカスタム形状へフォールバックしますが、課金も増える点に留意が必要です。
+   > ⚠️ `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` / `batch_machine_type` を `n2d-standard-8` など他の標準形状に設定した場合、GAS はその形状の vCPU / メモリ上限を基準に判定し、リソース要求が上限を超えたときのみ `n2d-custom-*` に自動フォールバックします。標準形状で必要リソースを満たせる間はそのまま維持されるため、意図したメモリ確保が崩れません。
+   > ⚠️ メモリ不足が発生した案件では `batch_machine_type` / Script Properties をカスタム形状（`n2d-custom-*` など）へ切り替えるか、`batch_workers_per_workflow` / `batch_instance_count` を調整してください。フォールバックにより課金が増える点にも留意が必要です。
    > 💡 `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` はコスト最適化のため既定値を `false` としています。オンデマンドへの自動切り替えが必要な案件のみ targeting シートの `batch_allow_on_demand_fallback` を `true` に設定してください。
    > `SERVICE_ACCOUNT_JSON` を取得する手順: Cloud Console → **IAM** → GAS オーケストレーター用サービスアカウント（例: `form-sender-gas@<project>.iam.gserviceaccount.com`）→ **鍵** → **鍵を追加** → **新しい鍵を作成** → JSON を選択 → ダウンロードしたファイルの内容をそのまま Script Property に貼り付けます。鍵は機密情報のため、ダウンロード後は安全な場所（社内パスワードマネージャなど）に保管し、不要なローカルファイルは削除してください。
 
@@ -370,7 +371,7 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 | 実行モード (`useGcpBatch` / `useServerless`) | 1. targeting列 → 2. Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`) → 3. GitHub Actions | `true` / `false` だけでなく `1` / `0` / `yes` も受け付けます。|
 | Cloud Batch タスク並列数 (`batch_max_parallelism`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` → 3. GAS 推奨値 | 1 つのジョブで同時に実行する Cloud Batch タスク数の上限。未入力時は Script Property の既定 (デフォルト 100)。 |
 | Spot 設定 (`batch_prefer_spot`, `batch_allow_on_demand_fallback`) | 1. targeting列 → 2. Script Properties | `prefer_spot=true` で Spot 優先、fallback を false にするとスポット枯渇時に失敗します。 |
-| マシンタイプ (`batch_machine_type`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 3. `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | 既定値は `n2d-standard-2`。不足時は dispatcher が自動で `n2d-custom-<workers>-<memory_mb>` にフォールバックします。 |
+| マシンタイプ (`batch_machine_type`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 3. `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | 既定値は `n2d-standard-2`。標準形状を指定した場合はその形状の vCPU / メモリ上限まで利用し、超過時のみ `n2d-custom-<workers>-<memory_mb>` に自動フォールバックします。 |
 | Batch インスタンス数 (`batch_instance_count`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE` → 3. `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT` (既定 2) | 起動する Spot VM 数の下限。`concurrent_workflow` が小さくてもここで指定した台数を確保します。|
 | Batch ワーカー数 (`batch_workers_per_workflow`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE` → 3. `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT` (既定 2) | 1 インスタンスあたりの Python ワーカー数。1〜16 の範囲で調整してください。 |
 | 署名付き URL TTL (`batch_signed_url_ttl_hours`) | 1. targeting列 → 2. `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` (既定 48h) | 1〜168 の整数を指定。 |
