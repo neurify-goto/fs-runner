@@ -39,6 +39,8 @@ class DispatcherSettings:
     batch_supabase_service_role_secret: Optional[str] = None
     batch_supabase_url_test_secret: Optional[str] = None
     batch_supabase_service_role_test_secret: Optional[str] = None
+    batch_monitor_interval_seconds: int = 60
+    batch_monitor_timeout_seconds: int = 18000
 
     def require_batch_configuration(self) -> None:
         required_fields = {
@@ -119,6 +121,15 @@ class DispatcherSettings:
                 raise RuntimeError(f"環境変数 {name} が設定されていません")
             return value
 
+        def get_int(name: str, default: int) -> int:
+            value = os.getenv(name)
+            if value in (None, ""):
+                return default
+            try:
+                return int(value)
+            except ValueError as exc:
+                raise RuntimeError(f"環境変数 {name} は整数で指定してください") from exc
+
         dispatcher_base_url = os.getenv("FORM_SENDER_DISPATCHER_BASE_URL", "") or ""
         dispatcher_audience = os.getenv("FORM_SENDER_DISPATCHER_AUDIENCE", "") or ""
         dispatcher_url = os.getenv("FORM_SENDER_DISPATCHER_URL")
@@ -130,6 +141,9 @@ class DispatcherSettings:
 
         if not dispatcher_audience:
             dispatcher_audience = dispatcher_base_url or ""
+
+        monitor_interval = get_int("FORM_SENDER_BATCH_MONITOR_INTERVAL_SECONDS", 60)
+        monitor_timeout = get_int("FORM_SENDER_BATCH_MONITOR_TIMEOUT_SECONDS", 18000)
 
         return cls(
             project_id=require("DISPATCHER_PROJECT_ID"),
@@ -163,6 +177,8 @@ class DispatcherSettings:
             batch_supabase_service_role_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET"),
             batch_supabase_url_test_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET"),
             batch_supabase_service_role_test_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_TEST_SECRET"),
+            batch_monitor_interval_seconds=monitor_interval,
+            batch_monitor_timeout_seconds=monitor_timeout,
         )
 
 

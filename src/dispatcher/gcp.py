@@ -710,6 +710,10 @@ class CloudBatchJobRunner:
 
         return True, secret_message_cls, secret_manager_cls
 
+    @property
+    def client(self) -> batch_v1.BatchServiceClient:
+        return self._client
+
     @staticmethod
     @lru_cache(maxsize=1)
     def _secret_value_field():

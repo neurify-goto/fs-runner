@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 
 from .config import DispatcherSettings, get_settings
+from .batch_monitor import BatchJobMonitor
 from .gcp import CloudBatchJobRunner, CloudRunJobRunner, SecretManager, SignedUrlManager
 from .schemas import FormSenderTask, SignedUrlRefreshRequest
 from .supabase_client import JobExecutionRepository
@@ -26,6 +27,7 @@ class DispatcherService:
         self._signed_url_manager = SignedUrlManager(storage_client=self._build_storage_client(), settings=self._settings)
         self._job_runner = CloudRunJobRunner(settings=self._settings)
         self._batch_runner: Optional[CloudBatchJobRunner] = None
+        self._batch_monitor: Optional[BatchJobMonitor] = None
         self._secret_manager = SecretManager() if self._settings.git_token_secret else None
 
     @staticmethod
@@ -124,6 +126,13 @@ class DispatcherService:
                     batch_metadata["requested_machine_type"] = batch_meta.get("requested_machine_type")
                 if batch_meta.get("resolved_machine_type"):
                     batch_metadata["resolved_machine_type"] = batch_meta.get("resolved_machine_type")
+
+                # Schedule monitoring if batch_runner has a proper client
+                if batch_runner.client is not None:
+                    monitor = self._ensure_batch_monitor(batch_runner)
+                    monitor.schedule(job_execution_id, job.name)
+                    batch_metadata["monitor"] = {"state": "scheduled"}
+
                 if task.batch and getattr(task.batch, "memory_warning", None):
                     batch_metadata["memory_warning"] = True
                     if getattr(task.batch, "computed_memory_mb", None):
@@ -236,13 +245,35 @@ class DispatcherService:
         if execution_mode == "batch":
             if not batch_job_name:
                 raise HTTPException(status_code=400, detail="execution missing Batch identifiers")
-            try:
-                batch_runner = self._ensure_batch_runner()
-                batch_runner.delete_job(batch_job_name)
-            except HTTPException:
-                raise
-            except Exception as exc:  # pylint: disable=broad-except
-                raise HTTPException(status_code=502, detail=f"Failed to cancel batch job: {exc}") from exc
+
+            # Check if monitor has already detected job completion
+            monitor_info = batch_meta.get("monitor", {})
+            monitor_state = monitor_info.get("state", "").upper()
+            terminal_states = {"SUCCEEDED", "FAILED", "CANCELLED", "CANCELLATION_IN_PROGRESS"}
+            if monitor_state in terminal_states:
+                logger.info(
+                    "Skipping batch job deletion; monitor already detected terminal state",
+                    extra={
+                        "execution_id": execution_id,
+                        "monitor_state": monitor_state,
+                    },
+                )
+            else:
+                if monitor_state == "TIMEOUT":
+                    logger.info(
+                        "Batch monitor timed out; attempting job deletion regardless",
+                        extra={
+                            "execution_id": execution_id,
+                            "monitor_state": monitor_state,
+                        },
+                    )
+                try:
+                    batch_runner = self._ensure_batch_runner()
+                    batch_runner.delete_job(batch_job_name)
+                except HTTPException:
+                    raise
+                except Exception as exc:  # pylint: disable=broad-except
+                    raise HTTPException(status_code=502, detail=f"Failed to cancel batch job: {exc}") from exc
         else:
             if not execution_name and not operation_name:
                 raise HTTPException(status_code=400, detail="execution missing Cloud Run identifiers")
@@ -290,8 +321,17 @@ class DispatcherService:
 
         return {"status": "ok", "signed_url": signed_url}
 
+    def _ensure_batch_monitor(self, batch_runner: CloudBatchJobRunner) -> BatchJobMonitor:
+        if not hasattr(self, '_batch_monitor') or self._batch_monitor is None:
+            self._batch_monitor = BatchJobMonitor(
+                batch_client=batch_runner.client,
+                supabase=self._supabase,
+                settings=self._settings,
+            )
+        return self._batch_monitor
+
     def _ensure_batch_runner(self) -> CloudBatchJobRunner:
-        if self._batch_runner is None:
+        if not hasattr(self, '_batch_runner') or self._batch_runner is None:
             try:
                 self._batch_runner = CloudBatchJobRunner(settings=self._settings)
             except RuntimeError as exc:  # pragma: no cover - configuration error

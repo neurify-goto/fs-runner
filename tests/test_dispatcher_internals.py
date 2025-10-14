@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from types import MethodType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -604,7 +605,7 @@ def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypat
             "parallelism": 2,
             "array_size": task.execution.run_total,
         }
-        return SimpleNamespace(run_job=lambda **kwargs: (job, meta))
+        return SimpleNamespace(run_job=lambda **kwargs: (job, meta), client=MagicMock())
 
     service._ensure_batch_runner = MethodType(_ensure_runner, service)
     service._job_runner = None
@@ -616,7 +617,10 @@ def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypat
     assert captured_override.get("override_url") == stored_url
     assert response["batch_job_name"].endswith("job123")
     assert patched_metadata
-    assert patched_metadata[0]["batch"]["latest_signed_url"] == "https://example.com/refreshed"
+    # Check the final metadata update (last element) which contains all batch metadata
+    final_metadata = patched_metadata[-1]
+    assert final_metadata["batch"]["latest_signed_url"] == "https://example.com/refreshed"
+    assert final_metadata["batch"]["monitor"]["state"] == "scheduled"
 
 
 def test_find_latest_signed_url_falls_back_to_client_config_ref():
@@ -922,7 +926,7 @@ def test_handle_form_sender_task_batch(monkeypatch):
             "attempts": 3,
             "max_retry_count": 2,
         }
-        return SimpleNamespace(run_job=lambda **kwargs: (job, meta))
+        return SimpleNamespace(run_job=lambda **kwargs: (job, meta), client=MagicMock())
 
     service._ensure_batch_runner = MethodType(_ensure_runner, service)
     service._job_runner = None
@@ -937,14 +941,18 @@ def test_handle_form_sender_task_batch(monkeypatch):
     assert response["batch_job_name"].endswith("job123")
     assert response["batch"]["array_size"] == task.execution.run_total
     assert patched_metadata
-    assert patched_metadata[0]["batch"]["latest_signed_url"] == "https://example.com/config.json"
+    # Check the final metadata update (last element) which contains all batch metadata
+    final_metadata = patched_metadata[-1]
+    assert final_metadata["batch"]["latest_signed_url"] == "https://example.com/config.json"
+    assert final_metadata["batch"]["monitor"]["state"] == "scheduled"
     assert response["batch"]["attempts"] == 3
     assert response["batch"]["max_retry_count"] == 2
     assert response["batch"]["memory_buffer_mb"] == 2048
     assert inserted == ["batch"]
 
 
-def test_batch_runner_raises_when_job_template_missing(monkeypatch):
+def test_batch_runner_continues_when_job_template_missing(monkeypatch, caplog):
+    """Test that runner continues with warning when job template is not found."""
     class _StubBatchClient:
         def __init__(self, *args, **kwargs):
             self.created: list[Any] = []
@@ -952,7 +960,7 @@ def test_batch_runner_raises_when_job_template_missing(monkeypatch):
         def get_job(self, name):
             raise gcloud_exceptions.NotFound("template missing")
 
-        def create_job(self, *args, **kwargs):  # pragma: no cover - not reached
+        def create_job(self, *args, **kwargs):
             job_name = kwargs.get("job_id", "job")
             job_path = f"projects/demo/locations/asia-northeast1/jobs/{job_name}"
             record = SimpleNamespace(name=job_path, task_groups=[])
@@ -988,15 +996,22 @@ def test_batch_runner_raises_when_job_template_missing(monkeypatch):
     payload["batch"] = {"enabled": True}
     task = FormSenderTask.parse_obj(payload)
 
-    with pytest.raises(RuntimeError) as excinfo:
-        runner.run_job(
-            task=task,
-            env_vars={},
-            task_count=task.execution.run_total,
-            parallelism=task.effective_parallelism(),
-        )
+    caplog.set_level(logging.WARNING, logger="dispatcher.gcp")
 
-    assert "job template" in str(excinfo.value)
+    # Template not found should not raise; system continues without template
+    job, metadata = runner.run_job(
+        task=task,
+        env_vars={},
+        task_count=task.execution.run_total,
+        parallelism=task.effective_parallelism(),
+    )
+
+    # Verify job was created successfully
+    assert job.name.startswith("projects/demo/locations/asia-northeast1/jobs/")
+    assert len(runner._client.created) == 1
+
+    # Verify warning was logged
+    assert "was not found; continuing without template" in caplog.text
 
 
 def test_calculate_resources_warns_when_memory_below_recommendation(caplog):
