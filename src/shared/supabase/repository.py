@@ -48,6 +48,24 @@ class JobExecutionRepository:
             "client_config_ref": payload.get("client_config_ref"),
         }
 
+        metadata["task_payload"] = {
+            key: payload.get(key)
+            for key in (
+                "targeting_id",
+                "client_config_ref",
+                "client_config_object",
+                "tables",
+                "execution",
+                "test_mode",
+                "branch",
+                "workflow_trigger",
+                "metadata",
+                "cpu_class",
+                "mode",
+                "batch",
+            )
+        }
+
         if cloud_run_operation or cloud_run_execution:
             metadata["cloud_run"] = {
                 "operation": cloud_run_operation,

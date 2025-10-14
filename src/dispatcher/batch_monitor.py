@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from google.api_core import exceptions as google_exceptions
 from google.cloud import batch_v1
@@ -39,6 +39,9 @@ class BatchJobMonitor:
         batch_client: batch_v1.BatchServiceClient,
         supabase: JobExecutionRepository,
         settings: DispatcherSettings,
+        fallback_handler: Optional[
+            Callable[[str, batch_v1.Job, Dict[str, Any], Sequence[batch_v1.JobStatus.StatusEvent]], Optional[str]]
+        ] = None,
     ) -> None:
         self._client = batch_client
         self._supabase = supabase
@@ -57,6 +60,7 @@ class BatchJobMonitor:
         self._logger = logging.getLogger(__name__)
         self._threads: Dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+        self._fallback_handler = fallback_handler
 
     def schedule(self, job_execution_id: str, job_name: str) -> None:
         with self._lock:
@@ -201,18 +205,52 @@ class BatchJobMonitor:
                 return
 
             if state_enum == batch_v1.JobStatus.State.FAILED:
-                self._logger.warning(
-                    "Batch job failed",
-                    extra={"execution_id": job_execution_id, "state": state_name},
-                )
-                self._record_failure(
-                    job_execution_id,
-                    "batch_failed",
-                    state_name,
-                    job.status.status_events,
-                )
-                self._cleanup_thread(job_execution_id)
-                return
+                handled = False
+                if self._fallback_handler:
+                    try:
+                        new_job_name = self._fallback_handler(
+                            job_execution_id,
+                            job,
+                            execution,
+                            job.status.status_events,
+                        )
+                    except Exception as exc:  # pragma: no cover - fallback errors
+                        self._logger.error(
+                            "Batch fallback handler failed",
+                            extra={
+                                "execution_id": job_execution_id,
+                                "error": str(exc),
+                            },
+                        )
+                        new_job_name = None
+                    if new_job_name:
+                        self._logger.info(
+                            "Batch fallback submitted new job",
+                            extra={
+                                "execution_id": job_execution_id,
+                                "previous_job": job.name,
+                                "new_job": new_job_name,
+                            },
+                        )
+                        job_name = new_job_name
+                        deadline = time.time() + self._timeout
+                        handled = True
+                        time.sleep(self._interval)
+                        continue
+
+                if not handled:
+                    self._logger.warning(
+                        "Batch job failed",
+                        extra={"execution_id": job_execution_id, "state": state_name},
+                    )
+                    self._record_failure(
+                        job_execution_id,
+                        "batch_failed",
+                        state_name,
+                        job.status.status_events,
+                    )
+                    self._cleanup_thread(job_execution_id)
+                    return
 
             if state_enum == batch_v1.JobStatus.State.DELETION_IN_PROGRESS:
                 if monitor_state != "DELETION_IN_PROGRESS":

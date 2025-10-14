@@ -1293,6 +1293,89 @@ def test_batch_runner_retries_with_on_demand_when_spot_unavailable(monkeypatch, 
     assert job.name.endswith(runner._client.job_ids[1])
 
 
+def test_retry_batch_execution_submits_on_demand(monkeypatch):
+    issue_time = datetime.now(timezone.utc)
+    payload = _task_payload_dict(issue_time)
+    payload["mode"] = "batch"
+    payload["batch"] = {"enabled": True, "prefer_spot": True, "allow_on_demand_fallback": True}
+
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="form-sender",
+        batch_task_group="group0",
+        batch_service_account_email="svc@example.iam.gserviceaccount.com",
+        batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+    )
+
+    service = object.__new__(DispatcherService)
+    service._settings = settings
+
+    patches: list[Dict[str, Any]] = []
+
+    service._supabase = SimpleNamespace(
+        update_metadata=lambda execution_id, patch: patches.append(patch),
+        update_status=lambda *args, **kwargs: None,
+    )
+
+    service._signed_url_manager = SimpleNamespace(
+        ensure_fresh=lambda task_obj, override_url=None: override_url or task_obj.client_config_ref
+    )
+
+    new_job = SimpleNamespace(name="projects/demo/jobs/job-on-demand", task_groups=[])
+    batch_meta_new = {
+        "machine_type": "n2d-custom-2-8192",
+        "cpu_milli": 2000,
+        "memory_mb": 8192,
+        "memory_buffer_mb": 2048,
+        "prefer_spot": False,
+        "allow_on_demand": False,
+    }
+
+    class _Runner:
+        def __init__(self):
+            self.client = SimpleNamespace()
+
+        def run_job(self, **kwargs):
+            return new_job, dict(batch_meta_new)
+
+    runner = _Runner()
+    service._batch_runner = runner
+    service._ensure_batch_runner = MethodType(lambda self: runner, service)
+
+    job = SimpleNamespace(name="projects/demo/jobs/job-spot", task_groups=[])
+
+    execution = {
+        "metadata": {
+            "client_config_ref": payload["client_config_ref"],
+            "batch": {
+                "allow_on_demand": True,
+                "prefer_spot": True,
+            },
+            "task_payload": payload,
+        },
+    }
+
+    events = [SimpleNamespace(description="RESOURCE_EXHAUSTED: Spot capacity unavailable")]
+
+    result = service._retry_batch_execution("exec-spot", job, execution, events)
+
+    assert result == new_job.name
+    assert patches
+    batch_patch = patches[-1]["batch"]
+    assert batch_patch["spot_fallback"]["applied"] is True
+    assert batch_patch["prefer_spot"] is False
+    assert batch_patch["allow_on_demand"] is False
+    assert batch_patch["monitor"]["state"] == "scheduled"
+
+
 def test_calculate_resources_warns_when_memory_below_recommendation(caplog):
     settings = DispatcherSettings(
         project_id="proj",

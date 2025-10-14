@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from .config import DispatcherSettings, get_settings
 from .batch_monitor import BatchJobMonitor
@@ -111,45 +112,14 @@ class DispatcherService:
                     task_count=task_count,
                     parallelism=parallelism_value,
                 )
-                batch_metadata: Dict[str, Any] = {
-                    "job_name": job.name,
-                    "task_count": task_count,
-                    "parallelism": batch_meta.get("parallelism", parallelism_value),
-                    "machine_type": batch_meta.get("machine_type"),
-                    "cpu_milli": batch_meta.get("cpu_milli"),
-                    "memory_mb": batch_meta.get("memory_mb"),
-                    "memory_buffer_mb": batch_meta.get("memory_buffer_mb"),
-                    "prefer_spot": batch_meta.get("prefer_spot"),
-                    "allow_on_demand": batch_meta.get("allow_on_demand"),
-                    "latest_signed_url": signed_url,
-                }
-                if batch_meta.get("instance_count") is not None:
-                    batch_metadata["instance_count"] = batch_meta.get("instance_count")
-                elif task.batch and task.batch.instance_count is not None:
-                    batch_metadata["instance_count"] = task.batch.instance_count
-                task_group_name = None
-                if job.task_groups:
-                    task_group_name = job.task_groups[0].name
-                if not task_group_name:
-                    task_group_name = batch_meta.get("task_group_resource_hint")
-                if task_group_name:
-                    batch_metadata["task_group"] = task_group_name
-                configured_task_group_id = batch_meta.get("configured_task_group_id")
-                if configured_task_group_id:
-                    batch_metadata["configured_task_group"] = configured_task_group_id
-                batch_metadata["array_size"] = batch_meta.get("array_size", task_count)
-                if batch_meta.get("attempts") is not None:
-                    batch_metadata["attempts"] = batch_meta.get("attempts")
-                if batch_meta.get("max_retry_count") is not None:
-                    batch_metadata["max_retry_count"] = batch_meta.get("max_retry_count")
-                if batch_meta.get("memory_warning"):
-                    batch_metadata["memory_warning"] = True
-                    if batch_meta.get("computed_memory_mb") is not None:
-                        batch_metadata["computed_memory_mb"] = batch_meta.get("computed_memory_mb")
-                if batch_meta.get("requested_machine_type"):
-                    batch_metadata["requested_machine_type"] = batch_meta.get("requested_machine_type")
-                if batch_meta.get("resolved_machine_type"):
-                    batch_metadata["resolved_machine_type"] = batch_meta.get("resolved_machine_type")
+                batch_metadata = self._build_batch_metadata(
+                    task,
+                    job,
+                    batch_meta,
+                    signed_url,
+                    task_count,
+                    parallelism_value,
+                )
 
                 # Schedule monitoring if batch_runner has a proper client
                 if batch_runner.client is not None:
@@ -238,6 +208,53 @@ class DispatcherService:
                 env_vars["FORM_SENDER_GIT_TOKEN"] = token
 
         return env_vars
+
+    def _build_batch_metadata(
+        self,
+        task: FormSenderTask,
+        job,
+        batch_meta: Dict[str, Any],
+        signed_url: str,
+        task_count: int,
+        parallelism_value: int,
+    ) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = dict(batch_meta)
+        metadata["job_name"] = job.name
+        metadata["task_count"] = task_count
+        metadata.setdefault("parallelism", parallelism_value)
+        metadata["latest_signed_url"] = signed_url
+
+        if batch_meta.get("instance_count") is None and task.batch and task.batch.instance_count is not None:
+            metadata["instance_count"] = task.batch.instance_count
+
+        task_group_name = None
+        if getattr(job, "task_groups", None):
+            first_group = job.task_groups[0]
+            task_group_name = getattr(first_group, "name", None)
+        if not task_group_name:
+            task_group_name = batch_meta.get("task_group_resource_hint")
+        if task_group_name:
+            metadata["task_group"] = task_group_name
+
+        configured_task_group_id = batch_meta.get("configured_task_group_id")
+        if configured_task_group_id:
+            metadata["configured_task_group"] = configured_task_group_id
+
+        metadata.setdefault("array_size", batch_meta.get("array_size", task_count))
+
+        for key in ("attempts", "max_retry_count", "machine_type", "cpu_milli", "memory_mb", "memory_buffer_mb",
+                    "prefer_spot", "allow_on_demand", "memory_warning", "computed_memory_mb",
+                    "requested_machine_type", "resolved_machine_type", "effective_provisioning_model"):
+            if key in batch_meta:
+                metadata[key] = batch_meta[key]
+
+        if batch_meta.get("memory_warning") and batch_meta.get("computed_memory_mb") is not None:
+            metadata["computed_memory_mb"] = batch_meta["computed_memory_mb"]
+
+        if batch_meta.get("job_template"):
+            metadata["job_template"] = batch_meta["job_template"]
+
+        return metadata
 
     def list_executions(self, status: str = "running", targeting_id: Optional[int] = None) -> Dict[str, Any]:
         records = self._supabase.list_executions(status=status, targeting_id=targeting_id)
@@ -351,8 +368,173 @@ class DispatcherService:
                 batch_client=batch_runner.client,
                 supabase=self._supabase,
                 settings=self._settings,
+                fallback_handler=self._retry_batch_execution,
             )
         return self._batch_monitor
+
+    def _retry_batch_execution(
+        self,
+        job_execution_id: str,
+        job,
+        execution: Dict[str, Any],
+        events: Sequence[Any],
+    ) -> Optional[str]:
+        metadata = execution.get("metadata") or {}
+        batch_meta = metadata.get("batch") or {}
+
+        if not batch_meta.get("allow_on_demand"):
+            return None
+
+        if not batch_meta.get("prefer_spot", True):
+            return None
+
+        spot_fallback_meta = batch_meta.get("spot_fallback")
+        if isinstance(spot_fallback_meta, dict) and spot_fallback_meta.get("applied"):
+            return None
+
+        if not self._should_trigger_spot_fallback(events):
+            return None
+
+        task_payload = metadata.get("task_payload")
+        if not isinstance(task_payload, dict):
+            logger.warning(
+                "Missing task payload for batch fallback; skipping",
+                extra={"execution_id": job_execution_id},
+            )
+            return None
+
+        payload = dict(task_payload)
+        batch_payload: Dict[str, Any] = dict(payload.get("batch") or {})
+        batch_payload["enabled"] = True
+        batch_payload["prefer_spot"] = False
+        batch_payload["allow_on_demand_fallback"] = False
+        payload["batch"] = batch_payload
+        payload["mode"] = "batch"
+
+        try:
+            task = FormSenderTask.parse_obj(payload)
+        except ValidationError as exc:
+            logger.error(
+                "Failed to rebuild FormSenderTask for fallback",
+                extra={"execution_id": job_execution_id, "error": str(exc)},
+            )
+            return None
+
+        fallback_url = batch_meta.get("latest_signed_url") or metadata.get("client_config_ref")
+        try:
+            signed_url = self._signed_url_manager.ensure_fresh(task, override_url=fallback_url)
+        except ValueError as exc:
+            logger.error(
+                "Failed to refresh signed URL for fallback",
+                extra={"execution_id": job_execution_id, "error": str(exc)},
+            )
+            return None
+
+        env_vars = self._build_env(task, job_execution_id, signed_url)
+
+        batch_runner = self._ensure_batch_runner()
+        task_count = max(1, task.execution.run_total)
+        requested_instance_count = (
+            task.batch.instance_count if task.batch and task.batch.instance_count else None
+        )
+
+        desired_parallelism = task.effective_parallelism()
+        if requested_instance_count is not None:
+            desired_parallelism = max(desired_parallelism, min(task_count, requested_instance_count))
+            if task.batch and task.batch.max_parallelism is not None:
+                desired_parallelism = min(desired_parallelism, task.batch.max_parallelism)
+
+        parallelism_value = max(1, min(task_count, desired_parallelism))
+
+        try:
+            new_job, batch_meta_new = batch_runner.run_job(
+                task=task,
+                env_vars=env_vars,
+                task_count=task_count,
+                parallelism=parallelism_value,
+            )
+        except Exception as exc:  # pragma: no cover - network path
+            logger.error(
+                "Failed to launch fallback Batch job",
+                extra={"execution_id": job_execution_id, "error": str(exc)},
+            )
+            return None
+
+        batch_metadata = self._build_batch_metadata(
+            task,
+            new_job,
+            batch_meta_new,
+            signed_url,
+            task_count,
+            parallelism_value,
+        )
+
+        fallback_reason = self._summarize_status_events(events)
+        batch_metadata["spot_fallback"] = {
+            "applied": True,
+            "trigger": "monitor",
+            "original_job_name": getattr(job, "name", None),
+            "reason": fallback_reason,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        batch_metadata.setdefault("monitor", {})
+        batch_metadata["monitor"] = {
+            "state": "scheduled",
+            "recorded_at": datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=9))).isoformat(),
+        }
+
+        metadata_patch = {
+            "client_config_ref": signed_url,
+            "batch": batch_metadata,
+        }
+
+        self._supabase.update_metadata(job_execution_id, metadata_patch)
+        logger.info(
+            "Submitted fallback Batch job with on-demand provisioning",
+            extra={
+                "execution_id": job_execution_id,
+                "new_job": new_job.name,
+                "original_job": getattr(job, "name", None),
+            },
+        )
+        return new_job.name
+
+    @staticmethod
+    def _should_trigger_spot_fallback(events: Sequence[Any]) -> bool:
+        if not events:
+            return False
+
+        keywords = (
+            "resource exhausted",
+            "capacity",
+            "quota",
+            "preempt",
+            "spot",
+            "unavailable",
+        )
+
+        for event in events:
+            description = getattr(event, "description", None) or getattr(event, "message", None)
+            if not description:
+                continue
+            lowered = description.lower()
+            if any(keyword in lowered for keyword in keywords):
+                return True
+        return False
+
+    @staticmethod
+    def _summarize_status_events(events: Sequence[Any]) -> Optional[str]:
+        if not events:
+            return None
+        descriptions = [
+            (getattr(event, "description", None) or getattr(event, "message", None) or "").strip()
+            for event in events
+        ]
+        descriptions = [text for text in descriptions if text]
+        if not descriptions:
+            return None
+        summary = "; ".join(descriptions)
+        return summary[:512]
 
     def _ensure_batch_runner(self) -> CloudBatchJobRunner:
         if not hasattr(self, '_batch_runner') or self._batch_runner is None:
