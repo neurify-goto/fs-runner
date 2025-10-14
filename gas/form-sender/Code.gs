@@ -491,12 +491,12 @@ function buildBatchPayload_(targetingConfig, workers, parallelism, instanceCount
   var machineType = machineTypeOverride || machineTypeField;
   var normalizedMachineType = machineType ? String(machineType).trim().toLowerCase() : '';
   var usingImplicitStandard = false;
-  if (!machineType || normalizedMachineType === '' || normalizedMachineType === 'n2d-standard-2') {
+  if (!machineType || normalizedMachineType === '' || normalizedMachineType === 'e2-standard-2') {
     if (!machineType || normalizedMachineType === '') {
       if (typeof machineTypeDefault === 'string' && machineTypeDefault.trim() !== '') {
         machineType = machineTypeDefault;
       } else {
-        machineType = 'n2d-standard-2';
+        machineType = 'e2-standard-2';
       }
     }
     usingImplicitStandard = true;

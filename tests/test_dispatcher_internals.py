@@ -607,7 +607,7 @@ def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypat
     def _ensure_runner(self):
         job = SimpleNamespace(name="projects/proj/locations/asia/jobs/form-sender/jobs/job123", task_groups=[SimpleNamespace(name="group0")])
         meta = {
-            "machine_type": "n2d-standard-2",
+            "machine_type": "e2-standard-2",
             "cpu_milli": 2000,
             "memory_mb": 6144,
             "memory_buffer_mb": 2048,
@@ -689,7 +689,7 @@ def test_handle_form_sender_task_respects_parallelism_override(monkeypatch):
     def _ensure_runner(self):
         job = SimpleNamespace(name="projects/proj/locations/asia/jobs/form-sender/jobs/job456", task_groups=[SimpleNamespace(name="group0")])
         meta = {
-            "machine_type": "n2d-standard-2",
+            "machine_type": "e2-standard-2",
             "cpu_milli": 2000,
             "memory_mb": 6144,
             "memory_buffer_mb": 2048,
@@ -766,7 +766,7 @@ def test_handle_form_sender_task_respects_batch_max_parallelism(monkeypatch):
     def _ensure_runner(self):
         job = SimpleNamespace(name="projects/proj/locations/asia/jobs/form-sender/jobs/job789", task_groups=[SimpleNamespace(name="group0")])
         meta = {
-            "machine_type": "n2d-standard-2",
+            "machine_type": "e2-standard-2",
             "cpu_milli": 2000,
             "memory_mb": 6144,
             "memory_buffer_mb": 2048,
