@@ -186,4 +186,29 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 
 ---
 
+## 10. targeting 単位でのキャンセル運用
+
+### 10.1 GAS から dispatcher 経由で停止する手順
+
+1. GAS の `stopSpecificFormSenderTask(targetingId)` を呼び出すと、`CloudRunDispatcherClient.listRunningExecutions(targetingId)` が `targeting_id` でフィルタした実行一覧を取得します。
+2. 返却された `execution_id` ごとに dispatcher の `/v1/form-sender/executions/{id}/cancel` API を呼び出します。GAS 側では `CloudRunDispatcherClient.cancelExecution()` で処理されています。
+3. dispatcher は Supabase `job_executions` から該当レコードを読み込み、`metadata.execution_mode` に応じて以下を実行します。
+   - **Batch 実行**: `metadata.batch.job_name` を使って Cloud Batch `projects.locations.jobs.delete` を呼び出し、ジョブを停止。
+   - **Cloud Run 実行**: `metadata.cloud_run.execution` / `cloud_run_operation` を使って Cloud Run の Execution をキャンセル。
+4. 停止に成功すると Supabase のステータスが `cancelled` に更新され、GAS 側のレスポンスにもキャンセル結果が含まれます。
+
+> 実装詳細: `gas/form-sender/TaskControl.gs`（`stopSpecificFormSenderTaskServerless_`）、`gas/form-sender/CloudRunDispatcherClient.gs`、`src/dispatcher/service.py`（`cancel_execution`）。
+
+### 10.2 Cloud Batch ジョブの識別
+
+- dispatcher が Batch ジョブを生成する際、`labels` に `workload=form_sender` と `targeting_id=<数値>` を付与しています。GCP コンソールや `gcloud batch jobs list --filter="labels.targeting_id=<ID>"` で該当ジョブを手動確認できます。
+- Supabase `job_executions.metadata.batch.job_name` には Cloud Batch ジョブ名が保存されており、監視ダッシュボードや GAS ログからジョブを突き止めたい場合に利用できます。
+
+### 10.3 Cloud Tasks キュー上のタスクを取り消す場合（オプション）
+
+- dispatcher 呼び出し前（Cloud Tasks に積まれただけ）のジョブを取り消したい場合は、`CloudRunDispatcherClient.enqueue()` が返す `task.name` をどこかに保持しておき、キャンセル時に `cloudtasks.tasks.delete` を呼び出す拡張を追加します。
+- enqueue 時点で生成されるタスク ID は `fs-YYYYMMDD-<targetingId>-<runIndex>` 形式で `targeting_id` が含まれるため、ターゲティング単位での突合が容易です。現在の実装では保持していないため、必要に応じて Supabase などに記録する想定で検討してください。
+
+---
+
 運用中に不明点があれば、セットアップガイドおよび `src/dispatcher` 配下のコードに付属する docstring を参照してください。
