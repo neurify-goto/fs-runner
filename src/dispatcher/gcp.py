@@ -10,6 +10,9 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 import requests
+from google.auth import default, impersonated_credentials
+from google.auth.exceptions import DefaultCredentialsError
+from google.auth.transport.requests import Request
 from google.api_core.client_options import ClientOptions
 from google.api_core.operation import Operation
 from google.api_core import exceptions as gcloud_exceptions
@@ -36,6 +39,8 @@ class SignedUrlManager:
     def __init__(self, storage_client: storage.Client, settings: DispatcherSettings) -> None:
         self._storage = storage_client
         self._settings = settings
+        self._request = Request()
+        self._impersonated_credentials: Optional[impersonated_credentials.Credentials] = None
 
     def ensure_fresh(self, task: FormSenderTask, *, override_url: Optional[str] = None) -> str:
         bucket, blob_name = task.gcs_blob_components()
@@ -73,12 +78,65 @@ class SignedUrlManager:
 
     def _generate_signed_url(self, bucket: str, blob_name: str, ttl_hours: int) -> str:
         blob = self._storage.bucket(bucket).blob(blob_name)
-        return blob.generate_signed_url(
-            expiration=timedelta(hours=max(1, ttl_hours)),
-            method="GET",
-            version="v4",
-            service_account_email=self._settings.dispatcher_service_account_email,
+        signing_kwargs: Dict[str, Any] = {
+            "expiration": timedelta(hours=max(1, ttl_hours)),
+            "method": "GET",
+            "version": "v4",
+        }
+        if self._settings.dispatcher_service_account_email:
+            signing_kwargs["service_account_email"] = self._settings.dispatcher_service_account_email
+
+        try:
+            return blob.generate_signed_url(**signing_kwargs)
+        except AttributeError as exc:
+            if not self._should_fallback_to_impersonation(exc):
+                raise
+
+            signing_credentials = self._ensure_impersonated_credentials(exc)
+            if not signing_credentials.valid:
+                signing_credentials.refresh(self._request)
+
+            signing_kwargs["credentials"] = signing_credentials
+            return blob.generate_signed_url(**signing_kwargs)
+
+    def _build_impersonated_credentials(self) -> Optional[impersonated_credentials.Credentials]:
+        target_principal = self._settings.dispatcher_service_account_email
+        if not target_principal:
+            return None
+
+        source_credentials, _ = default()
+        if getattr(source_credentials, "requires_scopes", False):
+            source_credentials = source_credentials.with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
+
+        return impersonated_credentials.Credentials(
+            source_credentials=source_credentials,
+            target_principal=target_principal,
+            target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            lifetime=300,
         )
+
+    def _ensure_impersonated_credentials(self, cause: Exception) -> impersonated_credentials.Credentials:
+        if self._impersonated_credentials is None:
+            try:
+                self._impersonated_credentials = self._build_impersonated_credentials()
+            except DefaultCredentialsError as exc:
+                raise ValueError(
+                    "ADC が構成されていないためサービスアカウントのインパーソネートに失敗しました"
+                ) from exc
+
+        if self._impersonated_credentials is None:
+            raise ValueError(
+                "dispatcher_service_account_email に対するインパーソネート資格情報が初期化されていません"
+            ) from cause
+
+        return self._impersonated_credentials
+
+    @staticmethod
+    def _should_fallback_to_impersonation(exc: Exception) -> bool:
+        message = str(exc)
+        if "you need a private key to sign credentials" in message:
+            return True
+        return False
 
     def _resolve_signed_url_policy(self, task: FormSenderTask) -> tuple[int, int]:
         if task.batch_enabled():
