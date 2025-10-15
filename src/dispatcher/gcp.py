@@ -77,6 +77,7 @@ class SignedUrlManager:
             expiration=timedelta(hours=max(1, ttl_hours)),
             method="GET",
             version="v4",
+            service_account_email=self._settings.dispatcher_service_account_email,
         )
 
     def _resolve_signed_url_policy(self, task: FormSenderTask) -> tuple[int, int]:

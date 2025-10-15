@@ -21,6 +21,7 @@ class DispatcherSettings:
     default_cpu_class: str = "standard"
     dispatcher_base_url: str = ""
     dispatcher_audience: str = ""
+    dispatcher_service_account_email: Optional[str] = None
     signed_url_ttl_hours_batch: int = 48
     signed_url_refresh_threshold_seconds_batch: int = 21600
     batch_project_id: Optional[str] = None
@@ -159,6 +160,7 @@ class DispatcherSettings:
             default_cpu_class=os.getenv("FORM_SENDER_CPU_CLASS_DEFAULT", "standard"),
             dispatcher_base_url=dispatcher_base_url,
             dispatcher_audience=dispatcher_audience,
+            dispatcher_service_account_email=os.getenv("FORM_SENDER_DISPATCHER_SERVICE_ACCOUNT"),
             signed_url_ttl_hours_batch=int(os.getenv("FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH", "48")),
             signed_url_refresh_threshold_seconds_batch=int(os.getenv("FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH", "21600")),
             batch_project_id=os.getenv("FORM_SENDER_BATCH_PROJECT_ID") or os.getenv("DISPATCHER_PROJECT_ID"),

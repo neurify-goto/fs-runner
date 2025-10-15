@@ -166,6 +166,19 @@ var CloudRunDispatcherClient = (function() {
     });
     var statusCode = response.getResponseCode();
     var responseText = response.getContentText();
+
+    try {
+      console.log(JSON.stringify({
+        level: 'info',
+        event: 'cloud_tasks_enqueue_response',
+        statusCode: statusCode,
+        task_id: taskId,
+        success: statusCode < 300
+      }));
+    } catch (logErr) {
+      // ignore logging failure
+    }
+
     if (statusCode >= 300) {
       var errorPayload = null;
       if (responseText) {

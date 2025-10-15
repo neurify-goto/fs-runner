@@ -124,10 +124,6 @@ function resolveTargetingExecutionMode_(targetingConfig) {
   var serverlessExplicitEnabled = serverlessCandidates.some(parseBooleanProperty_);
   var serverlessEnabled = serverlessExplicitEnabled || (!serverlessHasExplicit && globalServerlessDefault);
 
-  if (!isGlobalResolution && !batchFieldsPresent && !batchHasExplicit && globalBatchDefault) {
-    console.warn('resolveExecutionMode_: targeting設定に useGcpBatch 列が見つからず Script Property USE_GCP_BATCH を使用しました');
-  }
-
   return {
     batchEnabled: !!batchEnabled,
     serverlessEnabled: !!serverlessEnabled,
