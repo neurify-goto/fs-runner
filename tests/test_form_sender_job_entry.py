@@ -240,7 +240,7 @@ def test_main_preserves_cloud_run_env(monkeypatch, tmp_path):
         "FORM_SENDER_ENV": "cloud_run",
         "FORM_SENDER_CLIENT_CONFIG_URL": "https://example.invalid/config.json",
         "FORM_SENDER_CLIENT_CONFIG_OBJECT": "gs://bucket/config.json",
-        "FORM_SENDER_CLIENT_CONFIG_PATH": str(tmp_path / "client.json"),
+        "FORM_SENDER_CLIENT_CONFIG_PATH": str(tmp_path / "client_config_invalid.json"),
         "FORM_SENDER_TARGETING_ID": "42",
         "FORM_SENDER_TOTAL_SHARDS": "8",
         "FORM_SENDER_MAX_WORKERS": "4",

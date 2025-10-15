@@ -13,7 +13,7 @@ class DispatcherSettings:
     job_name: str
     supabase_url: str
     supabase_service_role_key: str
-    default_client_config_path: str = "/tmp/client_config.json"
+    default_client_config_path: str = "/tmp/client_config_default.json"
     signed_url_ttl_hours: int = 15
     signed_url_refresh_threshold_seconds: int = 1800
     client_config_bucket: Optional[str] = None
@@ -152,7 +152,9 @@ class DispatcherSettings:
             job_name=require("FORM_SENDER_CLOUD_RUN_JOB"),
             supabase_url=require("DISPATCHER_SUPABASE_URL"),
             supabase_service_role_key=require("DISPATCHER_SUPABASE_SERVICE_ROLE_KEY"),
-            default_client_config_path=os.getenv("FORM_SENDER_CLIENT_CONFIG_PATH", "/tmp/client_config.json"),
+            default_client_config_path=os.getenv(
+                "FORM_SENDER_CLIENT_CONFIG_PATH", "/tmp/client_config_default.json"
+            ),
             signed_url_ttl_hours=int(os.getenv("FORM_SENDER_SIGNED_URL_TTL_HOURS", "15")),
             signed_url_refresh_threshold_seconds=int(os.getenv("FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD", "1800")),
             client_config_bucket=os.getenv("FORM_SENDER_CLIENT_CONFIG_BUCKET"),
