@@ -337,7 +337,10 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
    - `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH = 48`
    - `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH = 21600`
    - `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT = 1`
+   - `FORM_SENDER_MAX_SESSION_HOURS_DEFAULT = 8`
+   - `FORM_SENDER_DEFAULT_SEND_END_TIME = 18:00`
 
+   > 🕘 `FORM_SENDER_MAX_SESSION_HOURS_DEFAULT` と `FORM_SENDER_DEFAULT_SEND_END_TIME` は targeting シートの `session_max_hours` / `send_end_time` が空欄のときに参照され、両方が未設定の場合のみ GAS ハードコード値（8 時間 / 18:00 JST）が適用されます。長時間運用が必要な案件は targeting シートで直接指定するのが最優先です。
    > ✅ デフォルトでは **e2-standard-2 を 2 台同時起動** する構成です。Spot 在庫の確保率とコストのバランスが良く、ほとんどの targeting で追加設定なしに動作します。
    > ⚠️ `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` / `batch_machine_type` を `e2-standard-8` など他の標準形状に設定した場合、GAS はその形状の vCPU / メモリ上限を基準に判定し、リソース要求が上限を超えたときのみ `n2d-custom-*` に自動フォールバックします。標準形状で必要リソースを満たせる間はそのまま維持されるため、意図したメモリ確保が崩れません。
    > ⚠️ メモリ不足が発生した案件では `batch_machine_type` / Script Properties をカスタム形状（`n2d-custom-*` など）へ切り替えるか、`batch_workers_per_workflow` / `batch_instance_count` を調整してください。フォールバックにより課金が増える点にも留意が必要です。
@@ -355,19 +358,20 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 
 > **真偽値の記法について**: targeting シートのチェックボックス列では `TRUE`/`FALSE` が自動入力されますが、手入力する場合は大文字小文字を区別せず処理されます（`TRUE`、`true`、`True` は同じ意味）。
 
-1. targeting シートに以下の列が存在するか確認し、なければ追加します。
-   - `useGcpBatch`
-   - `batch_max_parallelism`
-   - `batch_prefer_spot`
-   - `batch_allow_on_demand_fallback`
-   - `batch_machine_type`
-   - `batch_instance_count`
-   - `batch_workers_per_workflow`
-   - `batch_signed_url_ttl_hours`
-   - `batch_signed_url_refresh_threshold_seconds`
-   - `batch_vcpu_per_worker`
-   - `batch_memory_per_worker_mb`
-   - `batch_max_attempts`
+   1. targeting シートに以下の列が存在するか確認し、なければ追加します。
+      - `useGcpBatch`
+      - `batch_max_parallelism`
+      - `batch_prefer_spot`
+      - `batch_allow_on_demand_fallback`
+      - `batch_machine_type`
+      - `batch_instance_count`
+      - `batch_workers_per_workflow`
+      - `batch_signed_url_ttl_hours`
+      - `batch_signed_url_refresh_threshold_seconds`
+      - `batch_vcpu_per_worker`
+      - `batch_memory_per_worker_mb`
+      - `batch_max_attempts`
+      - `session_max_hours`（任意。未設定時は Script Property / GAS 既定を使用）
 
 | 項目 | 参照優先度 | 備考 |
 | --- | --- | --- |
@@ -381,6 +385,8 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 | 署名付き URL リフレッシュ閾値 (`batch_signed_url_refresh_threshold_seconds`) | 1. targeting列 → 2. `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` (既定 21600 秒) | 60〜604800 の範囲で指定。 |
 | リソース単位 (`batch_vcpu_per_worker`, `batch_memory_per_worker_mb`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` / `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | 未指定時は vCPU=1, メモリ=2048MB（共有バッファとして 2048MB を別途確保）。 |
 | リトライ回数 (`batch_max_attempts`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT` | Cloud Batch タスクの最大試行回数（1 以上）。設定すると dispatcher が `maxRetryCount` を上書きします。 |
+| セッション最大稼働時間 (`session_max_hours`) | 1. targeting列 → 2. `FORM_SENDER_MAX_SESSION_HOURS_DEFAULT` → 3. GAS 既定 `8` | ランナー全体の強制停止までの時間（時間単位）。長時間案件で延長したい場合のみ指定します。 |
+| 営業終了時刻 (`send_end_time`) | 1. targeting列 → 2. `FORM_SENDER_DEFAULT_SEND_END_TIME` → 3. GAS 既定 `18:00` | targeting の営業時間外チェックと GAS の自動停止の両方で利用されます。JST の `HH:MM` 形式で指定してください。 |
 
    > targeting 列を空にすると Script Properties の値がそのまま使われます。移行初期は Script Properties だけで小さく始め、必要になった Targeting だけ列で上書きする運用が推奨です。
 

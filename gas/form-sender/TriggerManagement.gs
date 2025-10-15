@@ -96,9 +96,16 @@ function createSpecificTimeTriggerFor(handlerFunction, executeDateTime) {
 
 function getNextExecutionTime() {
   const jstNow = new Date();
+  const triggerHour = (typeof CONFIG.DAILY_TRIGGER_HOUR === 'number') ? CONFIG.DAILY_TRIGGER_HOUR : 9;
+  const triggerMinute = (typeof CONFIG.DAILY_TRIGGER_MINUTE === 'number') ? CONFIG.DAILY_TRIGGER_MINUTE : 0;
 
-  let candidate = new Date(jstNow.getTime() + CONFIG.MILLISECONDS_PER_DAY);
-  candidate.setMinutes(0, 0, 0);
+  let candidate = new Date(jstNow);
+  candidate.setHours(triggerHour, triggerMinute, 0, 0);
+
+  if (candidate.getTime() <= jstNow.getTime()) {
+    candidate = new Date(candidate.getTime() + CONFIG.MILLISECONDS_PER_DAY);
+    candidate.setHours(triggerHour, triggerMinute, 0, 0);
+  }
 
   let pushedDays = 0;
   let iter = 0;
@@ -140,8 +147,8 @@ function getNextExecutionTime() {
   const nextDayName = dayNames[candidate.getDay()];
 
   const reason = pushedDays === 0
-    ? '翌日が営業日のためそのまま設定'
-    : `非営業日（週末/祝日）を ${pushedDays} 日スキップ（上限=${CONFIG.MAX_SKIP_DAYS}）`;
+    ? `次回営業日の${String(triggerHour).padStart(2, '0')}:${String(triggerMinute).padStart(2, '0')}に設定`
+    : `非営業日（週末/祝日）を ${pushedDays} 日スキップ（上限=${CONFIG.MAX_SKIP_DAYS}）後の${String(triggerHour).padStart(2, '0')}:${String(triggerMinute).padStart(2, '0')}に設定`;
 
   console.log(`次回実行時刻計算（祝日/週末回避+上限付き）: 現在=${currentDayName} ${jstNow.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}, 次回=${nextDayName} ${candidate.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}`);
   console.log(`回避理由: ${reason}`);

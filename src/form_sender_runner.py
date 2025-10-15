@@ -51,6 +51,8 @@ from utils.gcp_batch import (
     get_preemption_config,
 )
 
+JST = timezone(timedelta(hours=9))
+
 JOB_EXECUTION_ID = os.getenv("JOB_EXECUTION_ID") or os.getenv("CLOUD_RUN_EXECUTION")
 
 DISPATCHER_BASE_URL_ENV = "FORM_SENDER_DISPATCHER_BASE_URL"
@@ -526,6 +528,70 @@ def _resolve_total_shards(default: int = 8) -> int:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = setup_sanitized_logging(__name__)
+
+
+def _resolve_max_runtime_hours(default: float = 8.0, client_data: Optional[Dict[str, Any]] = None) -> float:
+    if client_data:
+        targeting = client_data.get('targeting') if isinstance(client_data, dict) else None
+        if isinstance(targeting, dict):
+            raw = targeting.get('session_max_hours')
+            if isinstance(raw, (int, float)) and raw > 0:
+                return float(raw)
+            if isinstance(raw, str):
+                try:
+                    parsed = float(raw.strip())
+                    if parsed > 0:
+                        return parsed
+                except ValueError:
+                    logger.debug('session_max_hours parse error: %s', raw)
+    env_val = os.getenv('FORM_SENDER_MAX_RUNTIME_HOURS')
+    if env_val:
+        try:
+            parsed = float(env_val)
+            if parsed > 0:
+                return parsed
+            logger.warning('FORM_SENDER_MAX_RUNTIME_HOURS は正の数である必要があります: %s', env_val)
+        except ValueError:
+            logger.warning('FORM_SENDER_MAX_RUNTIME_HOURS の値を数値に変換できません: %s', env_val)
+    return default
+
+
+def _resolve_business_end_grace_minutes(default: int = 2) -> int:
+    env_val = os.getenv('FORM_SENDER_BUSINESS_END_GRACE_MINUTES')
+    if env_val:
+        try:
+            parsed = int(env_val)
+            if parsed >= 0:
+                return parsed
+            logger.warning('FORM_SENDER_BUSINESS_END_GRACE_MINUTES は0以上の整数である必要があります: %s', env_val)
+        except ValueError:
+            logger.warning('FORM_SENDER_BUSINESS_END_GRACE_MINUTES の値を整数に変換できません: %s', env_val)
+    return default
+
+
+def _resolve_business_end_deadline(client_data: Dict[str, Any], target_date: date, grace_minutes: Optional[int] = None) -> Optional[datetime]:
+    try:
+        targeting = client_data.get('targeting') if isinstance(client_data, dict) else None
+        send_end_time = None
+        if isinstance(targeting, dict):
+            send_end_time = targeting.get('send_end_time')
+        if not isinstance(send_end_time, str) or not send_end_time.strip():
+            return None
+
+        parts = send_end_time.strip().split(':')
+        if len(parts) != 2:
+            return None
+        hour = int(parts[0])
+        minute = int(parts[1])
+
+        business_end_jst = datetime(target_date.year, target_date.month, target_date.day, hour, minute, tzinfo=JST)
+        gm = grace_minutes if grace_minutes is not None else _resolve_business_end_grace_minutes()
+        if gm > 0:
+            business_end_jst += timedelta(minutes=gm)
+        return business_end_jst.astimezone(timezone.utc)
+    except Exception as exc:
+        logger.debug('営業終了時刻の判定に失敗しました: %s', exc)
+        return None
 
 # ============ Table / RPC Switching (companies vs companies_extra/test) ============
 # GitHub Actions / Cloud Run から渡される環境変数で切替。CLI からも上書き可能。
@@ -2005,6 +2071,22 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                 logger.error(f"Worker {worker_id}: Playwright init failed")
                 return
             client_data = load_client_data_simple(config_file, targeting_id)
+            session_start_utc = datetime.now(timezone.utc)
+            max_runtime_hours = _resolve_max_runtime_hours(client_data=client_data)
+            session_deadline = session_start_utc + timedelta(hours=max_runtime_hours)
+            business_end_deadline = _resolve_business_end_deadline(client_data, target_date)
+            if business_end_deadline is not None and business_end_deadline <= session_start_utc:
+                adjust_minutes = max(_resolve_business_end_grace_minutes(), 1)
+                business_end_deadline = session_start_utc + timedelta(minutes=adjust_minutes)
+            try:
+                logger.info(
+                    "Worker %s deadlines: max_runtime=%s, business_end=%s",
+                    worker_id,
+                    session_deadline.isoformat(),
+                    business_end_deadline.isoformat() if business_end_deadline else 'N/A'
+                )
+            except Exception:
+                pass
             max_daily = _extract_max_daily_sends(client_data)
             # バックオフ設定（config/worker_config.json → runner）
             try:
@@ -2055,6 +2137,17 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                 requeue_interval, requeue_stale_minutes = 300, 15
             last_requeue_ts = 0.0
             while True:
+                now_utc_dt = datetime.now(timezone.utc)
+                if now_utc_dt >= session_deadline:
+                    logger.info(
+                        "Worker %s: 最大稼働時間(%.2f時間)に達したため終了します", worker_id, max_runtime_hours
+                    )
+                    return
+                if business_end_deadline and now_utc_dt >= business_end_deadline:
+                    logger.info(
+                        "Worker %s: 営業終了時刻に到達したため終了します", worker_id
+                    )
+                    return
                 # 取り残し再配布は仕事の有無に関係なく一定間隔で実行（worker_id=0 のみ）
                 try:
                     now_ts = _time.time()
@@ -2093,6 +2186,11 @@ def _worker_entry(worker_id: int, targeting_id: int, config_file: str, headless_
                     pass
 
                 if not _within_business_hours(client_data):
+                    if business_end_deadline and datetime.now(timezone.utc) >= business_end_deadline:
+                        logger.info(
+                            "Worker %s: 営業時間外のため処理を終了します", worker_id
+                        )
+                        return
                     await asyncio.sleep(60)
                     continue
                 # 当日成功上限（max_daily_sends）をDBのUTC時刻基準でJST境界に合わせて確認
@@ -2285,6 +2383,32 @@ def main():
 
     apply_table_mode(args.table_mode)
 
+    client_data_preview: Optional[Dict[str, Any]] = None
+    try:
+        client_data_preview = load_client_data_simple(config_path, args.targeting_id)
+    except Exception as exc:
+        logger.warning('自動停止判定用のクライアント設定取得に失敗しました: %s', exc)
+
+    session_start_utc = datetime.now(timezone.utc)
+    max_runtime_hours = _resolve_max_runtime_hours(client_data=client_data_preview)
+    session_deadline = session_start_utc + timedelta(hours=max_runtime_hours)
+
+    business_end_deadline = None
+    if client_data_preview:
+        business_end_deadline = _resolve_business_end_deadline(client_data_preview, t_date)
+        if business_end_deadline is not None and business_end_deadline <= session_start_utc:
+            adjust_minutes = max(_resolve_business_end_grace_minutes(), 1)
+            business_end_deadline = session_start_utc + timedelta(minutes=adjust_minutes)
+
+    try:
+        logger.info(
+            'Parent deadlines: max_runtime=%s, business_end=%s',
+            session_deadline.isoformat(),
+            business_end_deadline.isoformat() if business_end_deadline else 'N/A'
+        )
+    except Exception:
+        pass
+
     run_id = _resolve_run_id()
     logger.info("Using run_id=%s", run_id)
 
@@ -2341,14 +2465,77 @@ def main():
         signal.signal(signal.SIGINT, _term)
         signal.signal(signal.SIGTERM, _term)
 
+        auto_stop_reason: Optional[str] = None
+        while True:
+            alive = [pr for pr in procs if pr.is_alive()]
+            if not alive:
+                break
+            now_utc = datetime.now(timezone.utc)
+            if business_end_deadline and now_utc >= business_end_deadline:
+                auto_stop_reason = 'business_end'
+                logger.info('営業終了時刻を迎えたため全ワーカーを停止します')
+                for pr in alive:
+                    try:
+                        pr.terminate()
+                    except Exception:
+                        pass
+                for pr in alive:
+                    try:
+                        pr.join(timeout=10)
+                    except Exception:
+                        pass
+                break
+            if now_utc >= session_deadline:
+                auto_stop_reason = 'max_runtime'
+                logger.info('最大稼働時間(%.2f時間)に達したため全ワーカーを停止します', max_runtime_hours)
+                for pr in alive:
+                    try:
+                        pr.terminate()
+                    except Exception:
+                        pass
+                for pr in alive:
+                    try:
+                        pr.join(timeout=10)
+                    except Exception:
+                        pass
+                break
+            for pr in alive:
+                pr.join(timeout=1)
+
         for pr in procs:
-            pr.join()
+            if pr.is_alive():
+                try:
+                    pr.join(timeout=0)
+                except Exception:
+                    pass
+
+        if auto_stop_reason:
+            metadata = {
+                'auto_stop_reason': auto_stop_reason,
+                'auto_stop_at': datetime.now(timezone.utc).isoformat(),
+            }
+            if business_end_deadline:
+                metadata['business_end_deadline'] = business_end_deadline.isoformat()
+            metadata['max_runtime_deadline'] = session_deadline.isoformat()
+            try:
+                _update_job_execution_metadata(metadata)
+            except Exception:
+                logger.exception('自動停止メタデータの更新に失敗しました')
+            if auto_stop_reason == 'max_runtime' and overall_status != 'failed':
+                overall_status = 'cancelled'
+            if auto_stop_reason == 'business_end' and overall_status != 'failed':
+                overall_status = 'succeeded'
 
         # child exit status を集計
         for pr in procs:
-            if pr.exitcode not in (0, None):
-                overall_status = 'failed'
-                break
+            exitcode = pr.exitcode
+            if exitcode in (0, None):
+                continue
+            if auto_stop_reason and exitcode is not None and exitcode < 0:
+                # auto-stop に伴う SIGTERM 等は想定内として扱う
+                continue
+            overall_status = 'failed'
+            break
 
     except Exception:
         overall_status = 'failed'

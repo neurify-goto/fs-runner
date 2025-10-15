@@ -27,6 +27,108 @@ function getSpreadsheetConfig() {
   };
 }
 
+const DEFAULT_SESSION_HOURS_FALLBACK = 8;
+const DEFAULT_BUSINESS_END_TIME_FALLBACK = '18:00';
+
+function getScriptPropertyNumber_(key, fallback) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const raw = props.getProperty(key);
+    if (raw === null || typeof raw === 'undefined') {
+      return fallback;
+    }
+    const parsed = parseFloat(String(raw).trim());
+    if (!isFinite(parsed)) {
+      return fallback;
+    }
+    return parsed;
+  } catch (e) {
+    console.warn(`getScriptPropertyNumber_(${key}) error: ${e && e.message ? e.message : e}`);
+    return fallback;
+  }
+}
+
+function getScriptPropertyString_(key, fallback) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const raw = props.getProperty(key);
+    if (!raw || String(raw).trim() === '') {
+      return fallback;
+    }
+    return String(raw).trim();
+  } catch (e) {
+    console.warn(`getScriptPropertyString_(${key}) error: ${e && e.message ? e.message : e}`);
+    return fallback;
+  }
+}
+
+function normalizeTimeString_(timeString) {
+  if (!timeString || typeof timeString !== 'string') {
+    return null;
+  }
+  const trimmed = timeString.trim();
+  const match = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const hours = parseInt(match[1], 10);
+  const mins = parseInt(match[2], 10);
+  if (!isFinite(hours) || !isFinite(mins) || hours < 0 || hours > 23 || mins < 0 || mins > 59) {
+    return null;
+  }
+  return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+}
+
+function resolveSessionMaxHours_(rawValue) {
+  const fromRow = (function(value) {
+    if (value === null || typeof value === 'undefined') {
+      return null;
+    }
+    if (typeof value === 'number') {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed === '') {
+        return null;
+      }
+      const parsed = parseFloat(trimmed);
+      if (!isFinite(parsed)) {
+        return null;
+      }
+      return parsed;
+    }
+    return null;
+  })(rawValue);
+
+  if (isFinite(fromRow) && fromRow > 0) {
+    return fromRow;
+  }
+
+  const fromProps = getScriptPropertyNumber_('FORM_SENDER_MAX_SESSION_HOURS_DEFAULT', null);
+  if (isFinite(fromProps) && fromProps > 0) {
+    return fromProps;
+  }
+
+  if (typeof CONFIG !== 'undefined' && CONFIG && typeof CONFIG.MAX_SESSION_DURATION_HOURS === 'number' && CONFIG.MAX_SESSION_DURATION_HOURS > 0) {
+    return CONFIG.MAX_SESSION_DURATION_HOURS;
+  }
+
+  return DEFAULT_SESSION_HOURS_FALLBACK;
+}
+
+function resolveSendEndTime_(rawValue) {
+  const fromRow = normalizeTimeString_(typeof rawValue === 'string' ? rawValue : (rawValue !== null && typeof rawValue !== 'undefined' ? String(rawValue) : ''));
+  if (fromRow) {
+    return fromRow;
+  }
+  const fromProps = normalizeTimeString_(getScriptPropertyString_('FORM_SENDER_DEFAULT_SEND_END_TIME', ''));
+  if (fromProps) {
+    return fromProps;
+  }
+  return normalizeTimeString_(DEFAULT_BUSINESS_END_TIME_FALLBACK) || '18:00';
+}
+
 /**
  * アクティブなターゲティング設定をtargetingシートから取得
  * FORM_SENDER.md 1.3.1節準拠の実装
@@ -763,6 +865,14 @@ function getTargetingConfig(targetingId) {
       throw new Error(`client_id ${clientId} の必須フィールドが不足: ${missingFields.join(', ')}`);
     }
     
+    const sessionMaxHoursIndex = resolveColumnIndex(targetingColMap, ['session_max_hours', 'max_session_hours', 'session_hours']);
+
+    const sendEndTimeRaw = targetingRow[targetingColMap['send_end_time'] || -1];
+    const resolvedSendEndTime = resolveSendEndTime_(sendEndTimeRaw);
+
+    const sessionMaxHoursRaw = sessionMaxHoursIndex >= 0 ? targetingRow[sessionMaxHoursIndex] : null;
+    const resolvedSessionMaxHours = resolveSessionMaxHours_(sessionMaxHoursRaw);
+
     const clientConfig = {
       // 基本管理情報
       targeting_id: targetingId,
@@ -812,9 +922,10 @@ function getTargetingConfig(targetingId) {
         ng_companies: targetingRow[targetingColMap['ng_companies'] || -1] || '',
         max_daily_sends: parseInt(targetingRow[targetingColMap['max_daily_sends'] || -1]) || 100,
         send_start_time: targetingRow[targetingColMap['send_start_time'] || -1] || '09:00',
-        send_end_time: targetingRow[targetingColMap['send_end_time'] || -1] || '18:00',
+        send_end_time: resolvedSendEndTime,
         send_days_of_week: parseSendDaysOfWeek(targetingRow[targetingColMap['send_days_of_week'] || -1]),
         use_extra_table: useExtraTable,
+        session_max_hours: resolvedSessionMaxHours,
         // 追加: 並列起動数（新規 M 列）
         concurrent_workflow: (function() {
           try {
@@ -884,7 +995,8 @@ function getTargetingConfig(targetingId) {
     console.log(`フィールドバリデーション完了: 必須フィールド ${requiredFields.length} 件OK, 空文字許可フィールド ${optionalFields.length} 件`);
     
     // targetingシート固有のバリデーション（targeting_sql, ng_companiesは空文字許可）
-    const targetingRequiredFields = ['subject', 'message', 'max_daily_sends', 'send_start_time', 'send_end_time', 'send_days_of_week'];
+    const targetingRequiredFields = ['subject', 'message', 'max_daily_sends', 'send_start_time', 'send_days_of_week'];
+    const targetingRequiredWithFallback = ['send_end_time'];
     const targetingOptionalFields = ['targeting_sql', 'ng_companies'];
     const targetingMissingFields = [];
     
@@ -894,9 +1006,19 @@ function getTargetingConfig(targetingId) {
         targetingMissingFields.push(field);
       }
     }
-    
-    if (targetingMissingFields.length > 0) {
-      throw new Error(`targeting_id ${targetingId} のtargetingシート必須フィールドが不足: ${targetingMissingFields.join(', ')}`);
+
+    const fallbackMissing = targetingRequiredWithFallback.filter(field => {
+      if (field === 'send_end_time') {
+        return !clientConfig.targeting.send_end_time || clientConfig.targeting.send_end_time.trim() === '';
+      }
+      return false;
+    });
+
+    const effectiveMissing = targetingMissingFields.filter(field => targetingRequiredWithFallback.indexOf(field) === -1);
+
+    if (effectiveMissing.length > 0 || fallbackMissing.length > 0) {
+      const combined = effectiveMissing.concat(fallbackMissing);
+      throw new Error(`targeting_id ${targetingId} のtargetingシート必須フィールドが不足: ${combined.join(', ')}`);
     }
     
     // 空文字許可フィールドのログ出力

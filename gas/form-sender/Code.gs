@@ -19,7 +19,11 @@ const CONFIG = {
   WORKERS_PER_WORKFLOW: 4,
   HOLIDAY_CALENDAR_ID: 'ja.japanese#holiday@group.v.calendar.google.com',
   MILLISECONDS_PER_DAY: 24 * 60 * 60 * 1000,
-  MAX_SKIP_DAYS: 10
+  MAX_SKIP_DAYS: 10,
+  DAILY_TRIGGER_HOUR: 9,
+  DAILY_TRIGGER_MINUTE: 0,
+  MAX_SESSION_DURATION_HOURS: 8,
+  AUTO_STOP_MIN_DELAY_MS: 60 * 1000
 };
 
 var __HOLIDAY_CACHE = {};
@@ -64,6 +68,7 @@ function startFormSenderFromTrigger() {
     }
 
     console.log(`${activeTargetings.length} 件のアクティブなターゲティングを処理開始`);
+    registerFormSenderSessionStart('startFormSenderFromTrigger', { reset: true });
     let triggeredCount = 0;
 
     for (const targeting of activeTargetings) {
@@ -150,6 +155,7 @@ function startFormSenderFromTriggerAt7() {
     if (!activeTargetings || activeTargetings.length === 0) {
       console.log('アクティブなターゲティング設定が見つかりません');
     } else {
+      registerFormSenderSessionStart('startFormSenderFromTriggerAt7', { reset: true });
       let triggered = 0;
       for (const t of activeTargetings) {
         try {
@@ -217,6 +223,7 @@ function startFormSenderFromTriggerAt13() {
     if (!activeTargetings || activeTargetings.length === 0) {
       console.log('アクティブなターゲティング設定が見つかりません');
     } else {
+      registerFormSenderSessionStart('startFormSenderFromTriggerAt13', { reset: true });
       let triggered = 0;
       for (const t of activeTargetings) {
         try {
@@ -257,6 +264,7 @@ function startFormSenderAll() {
       console.log('アクティブなターゲティング設定が見つかりません');
       return { success: false, message: 'アクティブtargetingなし', triggered: 0 };
     }
+    registerFormSenderSessionStart('startFormSenderAll', { reset: true });
     let triggered = 0;
     for (const t of activeTargetings) {
       try {
@@ -279,6 +287,7 @@ function startFormSender(targetingId = null) {
     console.log(`フォーム送信処理を開始（新アーキテクチャ版）: targetingId=${targetingId}`);
 
     const finalTargetingId = targetingId || CONFIG.DEFAULT_TARGETING_ID;
+    registerFormSenderSessionStart('startFormSender', { reset: true });
     const result = processTargeting(finalTargetingId);
 
     if (result && result.success) {
@@ -304,7 +313,7 @@ function processTargeting(targetingId, options) {
     }
 
     console.log(`ターゲティング設定取得完了（2シート結合）: ***COMPANY_REDACTED*** (client_id: ${targetingConfig.client_id})`);
-    console.log('営業時間制御は GitHub Actions 側で実施');
+    console.log('営業時間制御は GitHub Actions 側で実施（GAS側で自動停止スケジュールを登録）');
 
     if (!hasTargetCompaniesBasic(targetingId)) {
       console.log('基本的な設定検証に失敗したためスキップします');
@@ -319,6 +328,15 @@ function processTargeting(targetingId, options) {
     }
     if (!resolvedOptions.workflowTrigger) {
       resolvedOptions.workflowTrigger = 'automated';
+    }
+
+    try {
+      registerAutoStopForTargeting(targetingConfig, {
+        triggerName: resolvedOptions.workflowTrigger,
+        source: 'processTargeting'
+      });
+    } catch (scheduleError) {
+      console.warn(`ターゲティング ${targetingId} の自動停止スケジュール登録に失敗: ${scheduleError && scheduleError.message ? scheduleError.message : scheduleError}`);
     }
 
     var modeDetails = resolveTargetingExecutionMode_(targetingConfig || {});

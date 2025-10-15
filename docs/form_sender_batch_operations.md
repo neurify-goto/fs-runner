@@ -57,6 +57,8 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 | `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` | 共有メモリバッファ | `2048` | 追加メモリを確保したい場合に調整 |
 | `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` / `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | Spot 優先 / フォールバック既定 | `true` / `false` | targeting 側が空欄の場合の挙動（フォールバックは明示的に有効化が必要） |
 | `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` / `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` | 署名付き URL の TTL と更新閾値 | `48` / `21600` | 長時間ジョブの URL 期限切れを防ぐ |
+| `FORM_SENDER_MAX_SESSION_HOURS_DEFAULT` | ランナー全体の最大稼働時間（時間） | `8` | targeting の `session_max_hours` が空欄のときに利用。未設定時は GAS ハードコード 8 時間。 |
+| `FORM_SENDER_DEFAULT_SEND_END_TIME` | 営業終了時刻の既定値 (JST `HH:MM`) | `18:00` | targeting の `send_end_time` が空欄のときに利用。未設定時は GAS ハードコード 18:00。 |
 
 > Supabase 関連 (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) や GitHub Actions フォールバック用のプロパティも環境ごとに整合性を保ってください。`.env` と Script Properties の差分がないか定期的に確認することを推奨します。
 > オンデマンドへの自動切り替えは既定で無効 (`FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT = false`) です。Spot VM でのみ実行したい案件は何も設定せず、フォールバックが必要な案件のみ targeting シートで `batch_allow_on_demand_fallback = TRUE` をオンにしてください（チェックボックスの場合は `TRUE`、手入力の場合は大文字小文字不問）。
@@ -141,12 +143,15 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 | `batch_signed_url_ttl_hours` | 署名付き URL の有効期限 (時間) | targeting列 → Script Property `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` | 1〜168 の整数。 |
 | `batch_signed_url_refresh_threshold_seconds` | 署名付き URL を更新する閾値 (秒) | targeting列 → Script Property `FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH` | TTL より短い値に設定。 |
 | `batch_max_attempts` | Cloud Batch のリトライ上限 | targeting列 → Script Property `FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT` | 1 以上の整数。 |
+| `session_max_hours` | ランナー全体の最大稼働時間 (時間) | targeting列 → Script Property `FORM_SENDER_MAX_SESSION_HOURS_DEFAULT` → GAS 既定 8h | 長時間実行が必要な案件だけ数値を指定。未設定の場合は Script Property / ハードコードの順に適用。 |
+| `send_end_time` | 営業終了時刻 (JST `HH:MM`) | targeting列 → Script Property `FORM_SENDER_DEFAULT_SEND_END_TIME` → GAS 既定 18:00 | GAS の営業時間判定と自動停止に使用。営業終了を前倒ししたい案件で調整。 |
 | `branch` | Git リファレンス | targeting列 → Script Properties（`FORM_SENDER_GIT_REF_DEFAULT` などがある場合） | GitHub Actions ルート併用時のみ利用。 |
 | `use_extra_table` などクライアント固有列 | GAS `client_config` の挙動制御 | targeting列のみ | Extra テーブル使用有無などを制御。 |
 
 ### 優先順位ルールのまとめ
 - **targeting シート** > **Script Properties** > **アプリ既定値** の順で評価されます。
 - targeting に空欄がある場合のみ Script Property が利用され、両方が未設定ならコード側のハードコード既定値（例: 並列数 1）が使われます。
+- `session_max_hours` / `send_end_time` も同じ優先順位で評価され、最終的には GAS ハードコード値（8 時間 / 18:00 JST）がフォールバックとして機能します。
 - 案件ごとの個別調整は targeting シートで行うのが基本。全案件共通の既定値を変えたい場合のみ Script Property を更新します。
 
 ---

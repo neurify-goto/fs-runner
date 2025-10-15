@@ -2,6 +2,130 @@
  * form_sender_task の停止・状況確認など運用向け機能
  */
 
+const AUTO_STOP_STATE_KEY = 'FORM_SENDER_AUTO_STOP_SCHEDULE_V1';
+const AUTO_STOP_TRIGGER_ID_KEY = 'FORM_SENDER_AUTO_STOP_TRIGGER_ID';
+const AUTO_STOP_SESSION_INFO_KEY = 'FORM_SENDER_ACTIVE_SESSION_INFO';
+const AUTO_STOP_TRIGGER_HANDLER = 'autoStopFormSenderFromSchedule';
+const SCRIPT_PROP_DEFAULT_SESSION_HOURS = 'FORM_SENDER_MAX_SESSION_HOURS_DEFAULT';
+const SCRIPT_PROP_DEFAULT_SEND_END_TIME = 'FORM_SENDER_DEFAULT_SEND_END_TIME';
+const SESSION_HOURS_FALLBACK = 8;
+const BUSINESS_END_TIME_FALLBACK = '18:00';
+
+function getScriptPropertyNumberSafe_(key, fallback) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const raw = props.getProperty(key);
+    if (raw === null || typeof raw === 'undefined') {
+      return fallback;
+    }
+    const parsed = parseFloat(String(raw).trim());
+    if (!isFinite(parsed)) {
+      return fallback;
+    }
+    return parsed;
+  } catch (e) {
+    console.warn(`getScriptPropertyNumberSafe_(${key}) error: ${e && e.message ? e.message : e}`);
+    return fallback;
+  }
+}
+
+function getScriptPropertyStringSafe_(key, fallback) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const raw = props.getProperty(key);
+    if (!raw || String(raw).trim() === '') {
+      return fallback;
+    }
+    return String(raw).trim();
+  } catch (e) {
+    console.warn(`getScriptPropertyStringSafe_(${key}) error: ${e && e.message ? e.message : e}`);
+    return fallback;
+  }
+}
+
+function normalizeTimeStringSafe_(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  if (!isFinite(h) || !isFinite(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+    return null;
+  }
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function resolveSessionHours_(targetingConfig) {
+  const configHours = (function() {
+    try {
+      const target = targetingConfig && targetingConfig.targeting ? targetingConfig.targeting : null;
+      const raw = target ? target.session_max_hours : null;
+      if (typeof raw === 'number' && isFinite(raw) && raw > 0) {
+        return raw;
+      }
+      if (typeof raw === 'string') {
+        const parsed = parseFloat(raw.trim());
+        if (isFinite(parsed) && parsed > 0) {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.warn('resolveSessionHours_ config parsing error:', e.message);
+    }
+    return null;
+  })();
+
+  if (configHours && configHours > 0) {
+    return configHours;
+  }
+
+  const propHours = getScriptPropertyNumberSafe_(SCRIPT_PROP_DEFAULT_SESSION_HOURS, null);
+  if (propHours && propHours > 0) {
+    return propHours;
+  }
+
+  if (typeof CONFIG !== 'undefined' && CONFIG && typeof CONFIG.MAX_SESSION_DURATION_HOURS === 'number' && CONFIG.MAX_SESSION_DURATION_HOURS > 0) {
+    return CONFIG.MAX_SESSION_DURATION_HOURS;
+  }
+
+  return SESSION_HOURS_FALLBACK;
+}
+
+function resolveSendEndTimeForTargeting_(targetingConfig) {
+  const fromConfig = (function() {
+    try {
+      const target = targetingConfig && targetingConfig.targeting ? targetingConfig.targeting : null;
+      const raw = target ? target.send_end_time : null;
+      if (typeof raw === 'string') {
+        const normalized = normalizeTimeStringSafe_(raw);
+        if (normalized) {
+          return normalized;
+        }
+      }
+    } catch (e) {
+      console.warn('resolveSendEndTimeForTargeting_ config parsing error:', e.message);
+    }
+    return null;
+  })();
+
+  if (fromConfig) {
+    return fromConfig;
+  }
+
+  const fromProps = normalizeTimeStringSafe_(getScriptPropertyStringSafe_(SCRIPT_PROP_DEFAULT_SEND_END_TIME, ''));
+  if (fromProps) {
+    return fromProps;
+  }
+
+  const fallbackNormalized = normalizeTimeStringSafe_(BUSINESS_END_TIME_FALLBACK);
+  return fallbackNormalized || '18:00';
+}
+
 function stopAllRunningFormSenderTasks() {
   if (shouldUseDispatcherFormSender_()) {
     return stopAllRunningFormSenderTasksServerless_();
@@ -482,6 +606,370 @@ function getRunningFormSenderTasksServerless_(prefetchedResponse) {
     console.error('実行中タスク状況確認エラー:', error.message);
     return { success: false, error: error.message };
   }
+}
+
+function registerFormSenderSessionStart(triggerName, options) {
+  const opts = options || {};
+  const now = new Date();
+
+  if (opts.reset === true) {
+    resetAutoStopSchedule_(now);
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const sessionInfo = {
+    trigger: triggerName || 'unknown',
+    started_at: Utilities.formatDate(now, 'Asia/Tokyo', "yyyy-MM-dd'T'HH:mm:ssXXX")
+  };
+  try {
+    props.setProperty(AUTO_STOP_SESSION_INFO_KEY, JSON.stringify(sessionInfo));
+  } catch (e) {
+    console.warn('セッション情報保存エラー:', e.message);
+  }
+
+  const durationHours = resolveSessionHours_(null);
+  const stopDate = new Date(now.getTime() + durationHours * 60 * 60 * 1000);
+
+  scheduleAutoStopEntries_([
+    {
+      targetingId: null,
+      stopDate: stopDate,
+      reason: 'max_runtime',
+      metadata: {
+        trigger: triggerName || 'unknown'
+      }
+    }
+  ], now);
+}
+
+function registerAutoStopForTargeting(targetingConfig, options) {
+  if (!targetingConfig || !targetingConfig.targeting) {
+    return;
+  }
+
+  const targetingId = typeof targetingConfig.targeting_id === 'number'
+    ? targetingConfig.targeting_id
+    : targetingConfig.targeting.id;
+  if (!targetingId || !isFinite(targetingId)) {
+    return;
+  }
+
+  const now = new Date();
+  const sessionHours = resolveSessionHours_(targetingConfig);
+  const sessionStopDate = new Date(now.getTime() + sessionHours * 60 * 60 * 1000);
+
+  const sendEndTime = resolveSendEndTimeForTargeting_(targetingConfig);
+  const businessEnd = createJstDateForTime_(sendEndTime, now);
+  const normalizedBusinessEnd = ensureMinDelay_(businessEnd, now);
+
+  scheduleAutoStopEntries_([
+    {
+      targetingId: targetingId,
+      stopDate: ensureMinDelay_(sessionStopDate, now),
+      reason: 'max_runtime',
+      metadata: {
+        session_hours: sessionHours,
+        trigger: options && options.triggerName ? String(options.triggerName) : null,
+        source: options && options.source ? String(options.source) : null
+      }
+    },
+    {
+      targetingId: targetingId,
+      stopDate: normalizedBusinessEnd,
+      reason: 'business_end',
+      metadata: {
+        send_end_time: sendEndTime,
+        trigger: options && options.triggerName ? String(options.triggerName) : null,
+        source: options && options.source ? String(options.source) : null
+      }
+    }
+  ], now);
+
+  try {
+    console.log(`ターゲティング${targetingId}向け自動停止（max_runtime=${sessionHours}h, business_end=${sendEndTime}）を登録しました`);
+  } catch (logError) {
+    // ログ出力失敗は無視
+  }
+}
+
+function autoStopFormSenderFromSchedule() {
+  const now = new Date();
+  const schedule = loadAutoStopSchedule_();
+
+  if (!schedule.entries || schedule.entries.length === 0) {
+    refreshAutoStopTrigger_(schedule, now);
+    return;
+  }
+
+  const minDelay = (typeof CONFIG.AUTO_STOP_MIN_DELAY_MS === 'number' && CONFIG.AUTO_STOP_MIN_DELAY_MS > 0)
+    ? CONFIG.AUTO_STOP_MIN_DELAY_MS
+    : 60 * 1000;
+  const dueThreshold = now.getTime() + Math.floor(minDelay / 4);
+
+  const remaining = [];
+  let sessionCompleted = false;
+
+  for (let i = 0; i < schedule.entries.length; i++) {
+    const entry = schedule.entries[i];
+    if (!entry || !entry.stop_at_epoch_ms) {
+      continue;
+    }
+
+    if (entry.stop_at_epoch_ms <= dueThreshold) {
+      try {
+        executeAutoStopEntry_(entry, now);
+        if (entry.targeting_id === null) {
+          sessionCompleted = true;
+        }
+      } catch (e) {
+        console.error('自動停止処理エラー:', e.message);
+      }
+    } else if (!sessionCompleted) {
+      remaining.push(entry);
+    }
+  }
+
+  schedule.entries = sessionCompleted ? [] : remaining.sort(function(a, b) {
+    return a.stop_at_epoch_ms - b.stop_at_epoch_ms;
+  });
+
+  saveAutoStopSchedule_(schedule);
+  refreshAutoStopTrigger_(schedule, now);
+}
+
+function loadAutoStopSchedule_() {
+  const props = PropertiesService.getScriptProperties();
+  try {
+    const raw = props.getProperty(AUTO_STOP_STATE_KEY);
+    if (!raw) {
+      return { version: 1, entries: [] };
+    }
+    const parsed = JSON.parse(raw);
+    const entries = Array.isArray(parsed && parsed.entries) ? parsed.entries : [];
+    return {
+      version: parsed && parsed.version ? parsed.version : 1,
+      entries: entries
+        .map(function(entry) {
+          return {
+            targeting_id: typeof entry.targeting_id === 'number' ? entry.targeting_id : null,
+            reason: entry && entry.reason ? String(entry.reason) : 'unknown',
+            stop_at_epoch_ms: Number(entry && entry.stop_at_epoch_ms) || 0,
+            stop_at_iso: entry && entry.stop_at_iso ? String(entry.stop_at_iso) : null,
+            metadata: entry && entry.metadata ? entry.metadata : {}
+          };
+        })
+        .filter(function(entry) { return entry.stop_at_epoch_ms > 0; })
+        .sort(function(a, b) { return a.stop_at_epoch_ms - b.stop_at_epoch_ms; })
+    };
+  } catch (e) {
+    console.warn('自動停止スケジュールの読み込みに失敗しました:', e.message);
+    return { version: 1, entries: [] };
+  }
+}
+
+function saveAutoStopSchedule_(schedule) {
+  const props = PropertiesService.getScriptProperties();
+  try {
+    props.setProperty(AUTO_STOP_STATE_KEY, JSON.stringify(schedule || { version: 1, entries: [] }));
+  } catch (e) {
+    console.error('自動停止スケジュール保存エラー:', e.message);
+  }
+}
+
+function resetAutoStopSchedule_(now) {
+  const props = PropertiesService.getScriptProperties();
+  try {
+    props.deleteProperty(AUTO_STOP_STATE_KEY);
+    props.deleteProperty(AUTO_STOP_TRIGGER_ID_KEY);
+  } catch (e) {
+    console.warn('自動停止スケジュールのリセットでエラー:', e.message);
+  }
+
+  try {
+    if (typeof deleteTriggersByHandler === 'function') {
+      deleteTriggersByHandler(AUTO_STOP_TRIGGER_HANDLER);
+    } else {
+      const triggers = ScriptApp.getProjectTriggers();
+      triggers.forEach(function(tr) {
+        if (tr.getHandlerFunction() === AUTO_STOP_TRIGGER_HANDLER) {
+          ScriptApp.deleteTrigger(tr);
+        }
+      });
+    }
+  } catch (triggerError) {
+    console.warn('自動停止用トリガー削除に失敗:', triggerError.message);
+  }
+
+  saveAutoStopSchedule_({ version: 1, entries: [] });
+}
+
+function scheduleAutoStopEntries_(entries, now) {
+  if (!entries || entries.length === 0) {
+    return;
+  }
+
+  const baseline = now instanceof Date ? now : new Date();
+  const minDelay = (typeof CONFIG.AUTO_STOP_MIN_DELAY_MS === 'number' && CONFIG.AUTO_STOP_MIN_DELAY_MS > 0)
+    ? CONFIG.AUTO_STOP_MIN_DELAY_MS
+    : 60 * 1000;
+  const schedule = loadAutoStopSchedule_();
+  const retained = [];
+
+  for (let i = 0; i < schedule.entries.length; i++) {
+    const entry = schedule.entries[i];
+    if (entry.stop_at_epoch_ms && entry.stop_at_epoch_ms >= baseline.getTime() - minDelay) {
+      retained.push(entry);
+    }
+  }
+
+  entries.forEach(function(entry) {
+    const normalized = normalizeAutoStopEntry_(entry, baseline);
+    if (!normalized) {
+      return;
+    }
+
+    for (let i = retained.length - 1; i >= 0; i--) {
+      const existing = retained[i];
+      if (existing.targeting_id === normalized.targeting_id && existing.reason === normalized.reason) {
+        retained.splice(i, 1);
+      }
+    }
+
+    retained.push(normalized);
+  });
+
+  retained.sort(function(a, b) { return a.stop_at_epoch_ms - b.stop_at_epoch_ms; });
+
+  const nextSchedule = { version: 1, entries: retained };
+  saveAutoStopSchedule_(nextSchedule);
+  refreshAutoStopTrigger_(nextSchedule, baseline);
+}
+
+function refreshAutoStopTrigger_(schedule, now) {
+  const baseline = now instanceof Date ? now : new Date();
+  try {
+    if (typeof deleteTriggersByHandler === 'function') {
+      deleteTriggersByHandler(AUTO_STOP_TRIGGER_HANDLER);
+    } else {
+      const triggers = ScriptApp.getProjectTriggers();
+      triggers.forEach(function(tr) {
+        if (tr.getHandlerFunction() === AUTO_STOP_TRIGGER_HANDLER) {
+          ScriptApp.deleteTrigger(tr);
+        }
+      });
+    }
+  } catch (e) {
+    console.warn('自動停止トリガー再設定時の削除に失敗:', e.message);
+  }
+
+  const props = PropertiesService.getScriptProperties();
+
+  if (!schedule.entries || schedule.entries.length === 0) {
+    try {
+      props.deleteProperty(AUTO_STOP_TRIGGER_ID_KEY);
+    } catch (e) {
+      // ignore
+    }
+    return;
+  }
+
+  const nextEntry = schedule.entries[0];
+  let nextDate = new Date(nextEntry.stop_at_epoch_ms);
+  nextDate = ensureMinDelay_(nextDate, baseline);
+
+  try {
+    const trigger = ScriptApp.newTrigger(AUTO_STOP_TRIGGER_HANDLER)
+      .timeBased()
+      .at(nextDate)
+      .create();
+    props.setProperty(AUTO_STOP_TRIGGER_ID_KEY, trigger.getUniqueId());
+    console.log(`auto-stopトリガーを設定しました: targeting=${nextEntry.targeting_id === null ? 'ALL' : nextEntry.targeting_id}, 実行予定=${nextDate.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
+  } catch (e) {
+    console.error('auto-stopトリガー設定エラー:', e.message);
+  }
+}
+
+function normalizeAutoStopEntry_(entry, now) {
+  if (!entry) {
+    return null;
+  }
+
+  const baseline = now instanceof Date ? now : new Date();
+
+  const stopDate = ensureMinDelay_(entry.stopDate, baseline);
+  if (!(stopDate instanceof Date) || isNaN(stopDate.getTime())) {
+    return null;
+  }
+
+  const targetingId = (typeof entry.targetingId === 'number' && isFinite(entry.targetingId)) ? entry.targetingId : null;
+  const reason = entry.reason ? String(entry.reason) : (targetingId === null ? 'max_runtime' : 'business_end');
+
+  return {
+    targeting_id: targetingId,
+    reason: reason,
+    stop_at_epoch_ms: stopDate.getTime(),
+    stop_at_iso: Utilities.formatDate(stopDate, 'Asia/Tokyo', "yyyy-MM-dd'T'HH:mm:ssXXX"),
+    metadata: entry.metadata || {}
+  };
+}
+
+function createJstDateForTime_(timeString, baseDate) {
+  if (!timeString || typeof timeString !== 'string') {
+    return null;
+  }
+
+  const trimmed = timeString.trim();
+  if (!/^\d{1,2}:\d{2}$/.test(trimmed)) {
+    return null;
+  }
+
+  const parts = trimmed.split(':');
+  const hours = parseInt(parts[0], 10);
+  const minutes = parseInt(parts[1], 10);
+  if (!isFinite(hours) || !isFinite(minutes)) {
+    return null;
+  }
+
+  const base = baseDate instanceof Date ? baseDate : new Date();
+  const dateStr = Utilities.formatDate(base, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const iso = Utilities.formatString('%sT%02d:%02d:00+09:00', dateStr, hours, minutes);
+  const result = new Date(iso);
+  if (isNaN(result.getTime())) {
+    return null;
+  }
+  return result;
+}
+
+function ensureMinDelay_(dateObj, now) {
+  const baseline = now instanceof Date ? now : new Date();
+  const minDelay = (typeof CONFIG.AUTO_STOP_MIN_DELAY_MS === 'number' && CONFIG.AUTO_STOP_MIN_DELAY_MS > 0)
+    ? CONFIG.AUTO_STOP_MIN_DELAY_MS
+    : 60 * 1000;
+
+  let targetDate = dateObj instanceof Date ? new Date(dateObj) : null;
+  if (!targetDate || isNaN(targetDate.getTime())) {
+    targetDate = new Date(baseline.getTime() + minDelay);
+  }
+
+  if (targetDate.getTime() <= baseline.getTime() + minDelay) {
+    return new Date(baseline.getTime() + minDelay);
+  }
+  return targetDate;
+}
+
+function executeAutoStopEntry_(entry, now) {
+  const timestamp = Utilities.formatDate(now instanceof Date ? now : new Date(), 'Asia/Tokyo', "yyyy-MM-dd'T'HH:mm:ssXXX");
+  if (!entry) {
+    return;
+  }
+
+  if (entry.targeting_id === null) {
+    console.log(`[auto-stop] セッション最大稼働時間に達したため全タスク停止 (${timestamp})`);
+    return stopAllRunningFormSenderTasks();
+  }
+
+  console.log(`[auto-stop] targeting_id ${entry.targeting_id} の営業終了により停止 (${timestamp})`);
+  return stopSpecificFormSenderTask(entry.targeting_id);
 }
 
 function getRunningFormSenderTasksLegacy_() {
