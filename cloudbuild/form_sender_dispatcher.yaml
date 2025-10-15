@@ -1,5 +1,7 @@
 substitutions:
   _IMAGE_NAME: "asia-northeast1-docker.pkg.dev/${PROJECT_ID}/form-sender-runner/dispatcher"
+  _SERVICE_NAME: "form-sender-dispatcher"
+  _REGION: "asia-northeast1"
 
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -18,6 +20,20 @@ steps:
     args: ["push", "${_IMAGE_NAME}:${SHORT_SHA}"]
   - name: gcr.io/cloud-builders/docker
     args: ["push", "${_IMAGE_NAME}:latest"]
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "deploy",
+        "${_SERVICE_NAME}",
+        "--image=${_IMAGE_NAME}:${SHORT_SHA}",
+        "--region=${_REGION}",
+        "--project=${PROJECT_ID}",
+        "--platform=managed",
+        "--no-allow-unauthenticated",
+        "--quiet"
+      ]
 
 images:
   - "${_IMAGE_NAME}:${SHORT_SHA}"

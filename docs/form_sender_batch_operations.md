@@ -66,6 +66,29 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 
 ## 3. 日次・定期チェック
 
+### 3.1 時間トリガーの基本運用手順
+
+1. 初回デプロイまたはプロパティ更新後に GAS エディタで `deleteFormSenderTriggers()` を実行し、既存の時間トリガーをクリアします（`gas/form-sender/TriggerManagement.gs`）。
+2. 続けて `createNextDayTrigger()` を実行すると、翌営業日の `CONFIG.DAILY_TRIGGER_HOUR`（既定 09:00 JST）に `startFormSenderFromTrigger()` が発火するトリガーが自動生成されます。祝日・週末は自動でスキップされ、営業日に再設定されます。
+3. `listFormSenderTriggers()` で作成されたトリガーを確認し、`startFormSenderFromTrigger` ハンドラのみが残っていることをチェックします。
+
+### 3.2 追加トリガー（GitHub Actions 時代のレガシー）
+
+- `startFormSenderFromTriggerAt7()` および `startFormSenderFromTriggerAt13()` は、GitHub Actions（Workflow Dispatch）ベースだった頃の再実行用ハンドラです。Cloud Batch（GCP）運用では利用しません。
+- GAS プロジェクトにこれらの時間トリガーが残っている場合は、以下の手順で削除してください。
+  1. `deleteTriggersByHandler('startFormSenderFromTriggerAt7')`
+  2. `deleteTriggersByHandler('startFormSenderFromTriggerAt13')`
+- 以後は `createSpecificTimeTriggerFor` で同名ハンドラを登録しないよう注意し、`listFormSenderTriggers()` を用いて `startFormSenderFromTrigger` 以外のトリガーが存在しないことを定期的に確認します。
+
+### 3.3 トリガー監視ユーティリティ
+
+- `listFormSenderTriggers()` : 現在登録されている `startFormSender...` 系トリガーを一覧表示。
+- `deleteCurrentFormSenderTrigger()` : 直前に動いた `startFormSenderFromTrigger` トリガーを削除し、再設定漏れを防止。
+- `deleteFormSenderTriggers()` : `startFormSenderFromTrigger` を対象に一括削除。
+- `deleteTriggersByHandler(handlerName)` : 任意のハンドラ（例: `'startFormSenderFromTriggerAt7'`）のみを削除。
+
+### 3.4 日次チェックリスト
+
 1. **Cloud Tasks キューの遅延確認**
    - Cloud Console → **Cloud Tasks** → `form-sender-dispatcher`。
    - `In flight` と `Queue latency` が増加していないか確認。閾値: 遅延が 5 分を超える場合はアラート。
@@ -87,11 +110,24 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 
 ## 4. 手動オペレーション
 
-### 4.1 テスト実行（Dry Run）
+### 4.1 操作できるエントリーポイント
+
+| 用途 | GAS 関数 | 補足 |
+| --- | --- | --- |
+| 営業日朝の定期起動 | `startFormSenderFromTrigger()` | 時間トリガーから呼ばれるメインエントリ。`createNextDayTrigger()` でスケジュール。`gas/form-sender/Code.gs` |
+| 07:00 / 13:00 JST 再起動 | `startFormSenderFromTriggerAt7()` / `startFormSenderFromTriggerAt13()` | GitHub Actions 時代の名残。Batch 運用ではトリガーを登録せず、存在する場合は削除。 |
+| 単一 targeting を手動実行 | `startFormSender(targetingId)` | targeting シート設定を読み込み dispatcher を起動。必要に応じて `options` 引数で `testMode` などを指定。 |
+| 全 targeting を手動実行 | `startFormSenderAll()` | 対象を指定せず全アクティブ targeting を処理。 |
+| dispatcher へ直接 enqueue | `triggerFormSenderWorkflow(targetingId, options)` | Cloud Tasks を経由して dispatcher に直接投入。テストや特殊オプション指定時に利用。 |
+| 実行中ジョブ一覧 | `getRunningFormSenderTasks()` | Supabase / dispatcher から実行中リストを取得し、`batch_job_name` などを確認。 |
+| 全ジョブ停止 | `stopAllRunningFormSenderTasks()` | dispatcher / GitHub Actions を横断して一括停止。Batch 実行への移行後は dispatcher ルートが利用される。 |
+| targeting 単位停止 | `stopSpecificFormSenderTask(targetingId)` | Section 10 を参照。Batch / Cloud Run いずれも `execution_id` 単位でキャンセル。 |
+
+### 4.2 テスト実行（Dry Run）
 - GAS エディタから `triggerFormSenderWorkflow(targetingId, { testMode: true })` を実行。
 - Supabase `job_executions` に `execution_mode=batch` でレコードが追加され、Cloud Batch で `RUNNING` → `SUCCEEDED` となることを確認。
 
-### 4.2 ジョブの停止
+### 4.3 ジョブの停止
 - GAS エディタ：`stopSpecificFormSenderTask(targetingId)`。
 - もしくは CLI：
   ```bash
@@ -99,7 +135,7 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
   ```
 - Supabase 側で `status=cancelled` に更新されているか確認。
 
-### 4.3 Cloud Tasks の手動投入
+### 4.4 Cloud Tasks の手動投入
 - Cloud Console → **Cloud Tasks** → `form-sender-dispatcher` → **タスクを作成**。
 - 送信先 URL: `https://<dispatcher-url>/v1/form-sender/tasks`
 - OIDC サービスアカウント: `form-sender-dispatcher@formsalespaid.iam.gserviceaccount.com`

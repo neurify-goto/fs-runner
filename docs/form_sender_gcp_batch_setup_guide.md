@@ -182,6 +182,7 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
       - Cloud Console → **Cloud Build** → **トリガー** で右上の **作成** を押し、「第 2 世代」を選択します（必要に応じて **リポジトリを接続** から GitHub App を連携）。\
       - 「ソース」を *リポジトリ* に設定し、「マネージド リポジトリ」一覧から対象リポジトリを選択してブランチ条件（例: `^main$`）を指定します。\
       - 「ビルド構成」は *Cloud Build ファイル* を選び、Runner 用トリガーでは `cloudbuild/form_sender_runner.yaml` を、dispatcher 用トリガーでは `cloudbuild/form_sender_dispatcher.yaml` を入力します。どちらも `_IMAGE_NAME` がファイル内に定義されているため追加設定は不要で、`:${SHORT_SHA}` と `:latest` の両方に push されます。\
+      - dispatcher トリガーは 2025-10 時点でビルド完了後に `gcloud run deploy` を実行するステップを含み、Cloud Run サービス `form-sender-dispatcher`（リージョン既定値 `asia-northeast1`）へ自動反映されます。必要に応じてトリガーの「変数」で `_REGION` や `_SERVICE_NAME` を上書きしてください。Cloud Run 側の環境変数・シークレットは初回デプロイで設定しておくと、以降も同じ内容が引き継がれます。\
       - 実行サービスアカウントは 4.2.0 節で準備した Cloud Build 用サービスアカウント（既定の `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` か、用意した `form-sender-cloudbuild` など）を選択します。必須ロールは `Artifact Registry Writer`, `Storage Admin`, `Logging Log Writer`, `Cloud Trace Agent`、および既定で付与される `Cloud Build Service Account` 相当です。\
       - **詳細** セクションの「ビルドログ」カードでは GitHub へのログ送信を無効化（チェックを外す）すると、Cloud Logging のみに記録され機微情報が漏れにくくなります。その他の項目（承認フローなど）はチーム方針に合わせて設定してください。\
       - トリガー保存後、一覧のメニュー（︙）から **トリガーを実行** を選択すると指定ブランチの HEAD でビルドが走り、結果は Cloud Build の **ビルド** タブに記録されます。単発ビルドが必要な場合は右上の **ビルドを作成** → 「Cloud Build ファイルを使用」を選び、Runner 用には `cloudbuild/form_sender_runner.yaml`、dispatcher 用には `cloudbuild/form_sender_dispatcher.yaml` を指定してください。\
@@ -282,7 +283,7 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
         - Batch 連携: `FORM_SENDER_BATCH_PROJECT_ID`, `FORM_SENDER_BATCH_LOCATION`, `FORM_SENDER_BATCH_JOB_TEMPLATE`, `FORM_SENDER_BATCH_TASK_GROUP`, `FORM_SENDER_BATCH_SERVICE_ACCOUNT`, `FORM_SENDER_BATCH_CONTAINER_IMAGE`, `FORM_SENDER_BATCH_SUPABASE_URL_SECRET`, `FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET`\
       - **サービスアカウント**: 画面下部の **セキュリティ** セクションで `form-sender-dispatcher@<project>.iam.gserviceaccount.com` を選択します。存在しない場合は 4.2.0 節の手順で作成してください。\
       - その他の項目（ヘルスチェック、同時実行数、起動時 CPU ブーストなど）は既定値のままで構いません。要件に応じて調整する場合のみ変更してください。\
-   4. **作成** を押してデプロイし、完了後に表示される **エンドポイント URL**（例: `https://form-sender-dispatcher-xxxx.a.run.app`）を控えます。リビジョンが起動エラーになっても URL 自体は変わらないため、この時点で `terraform.tfvars` の `dispatcher_base_url` / `dispatcher_audience` や Script Properties `FORM_SENDER_DISPATCHER_BASE_URL` に反映して構いません。
+   4. **作成** を押してデプロイし、完了後に表示される **エンドポイント URL**（例: `https://form-sender-dispatcher-xxxx.a.run.app`）を控えます。リビジョンが起動エラーになっても URL 自体は変わらないため、この時点で `terraform.tfvars` の `dispatcher_base_url` / `dispatcher_audience` や Script Properties `FORM_SENDER_DISPATCHER_BASE_URL` に反映して構いません。以後は Cloud Build の dispatcher トリガーがビルドごとに `gcloud run deploy` を自動実行するため、サービス設定を変更しない限り追加の手動デプロイは不要です（環境変数を更新したい場合のみ Cloud Console もしくは `gcloud run deploy --set-env-vars ...` を再実行してください）。
 
 6. **Cloud Tasks キュー**\
 Cloud Console → **Cloud Tasks** → **キューを作成**。名前は `form-sender-dispatcher`、リージョンは `asia-northeast1` を指定。ターゲットに HTTP を選択し、URL に `https://<cloud-run-url>/v1/form-sender/tasks` を入力します。**認証方式は「認証なし」で問題ありません**（GAS 側で署名付き ID トークンを `Authorization` ヘッダーとして付与します）。リトライは **キュー設定** で管理します（タスク作成時に `retryConfig` を渡すことはできません）。推奨設定例: 
