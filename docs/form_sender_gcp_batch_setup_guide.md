@@ -1,6 +1,6 @@
 # Form Sender GCP Batch セットアップガイド（初心者向け）
 
-最終更新: 2025-10-09 (JST)  
+最終更新: 2025-10-16 (JST)  
 対象範囲: GAS `form-sender` / Cloud Tasks / Cloud Run Dispatcher / Cloud Batch Runner / Supabase / GitHub Actions
 
 ---
@@ -44,7 +44,36 @@ Cloud Batch へジョブを投入する前に、対象プロジェクトで必�
    - Secret Manager API (`secretmanager.googleapis.com`)
    - IAM Service Account Credentials API (`iamcredentials.googleapis.com`)
 
-> 💡 まとめて有効化したい場合は `gcloud services enable ...` を利用できますが、本ガイドではコンソール操作のみで完結できます。
+> 💡 CLI 派の方は以下のように一括で有効化できます。
+> ```bash
+> export PROJECT_ID="formsales-460604"   # 自身のプロジェクト ID に置き換え
+> gcloud config set project "$PROJECT_ID"
+> gcloud services enable \
+>   batch.googleapis.com \
+>   compute.googleapis.com \
+>   run.googleapis.com \
+>   cloudtasks.googleapis.com \
+>   artifactregistry.googleapis.com \
+>   secretmanager.googleapis.com \
+>   iamcredentials.googleapis.com
+> ```
+
+### 2.2 初期化用スクリプト（推奨コマンド）
+
+以降のコマンド例では下記の環境変数を利用します。作業開始時に設定しておくと再入力を減らせます。
+
+```bash
+export PROJECT_ID="formsales-460604"
+export REGION="asia-northeast1"
+export BUCKET_NAME="formsales-form-sender-client-config"
+export ARTIFACT_REPO="form-sender-runner"
+export BATCH_SA="form-sender-batch@${PROJECT_ID}.iam.gserviceaccount.com"
+export DISPATCHER_SA="form-sender-dispatcher@${PROJECT_ID}.iam.gserviceaccount.com"
+export GAS_SA="form-sender-gas@${PROJECT_ID}.iam.gserviceaccount.com"
+export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+```
+
+> ℹ️ プロジェクト番号は IAM ポリシー更新時に頻繁に利用します。コマンド例では `SERVICE_AGENT="service-${PROJECT_NUMBER}@gcp-sa-cloudtasks.iam.gserviceaccount.com"` のように参照します。
 
 ---
 
@@ -92,36 +121,125 @@ Cloud Batch では `job_executions.metadata.batch` を新しく利用するた�
 
 #### 4.2.0 Cloud Batch / Dispatcher / Cloud Build 用サービスアカウントの準備
 
-1. Cloud Console → **IAM と管理** → **サービス アカウント** を開き、右上の **サービス アカウントを作成** をクリックします。
-2. 画面上で次の 5 種類が揃っているか確認し、存在しないものだけ作成します。
-   - **Cloud Batch Runner 用**（例: `form-sender-batch`）
-   - **Cloud Run dispatcher 用**（例: `form-sender-dispatcher`）
-   - **GAS オーケストレーター用**（例: `form-sender-gas`）※Apps Script から Cloud Tasks / GCS / Cloud Run API を呼び出すための専用アカウント
-   - **Cloud Build 実行用**: 自動で用意される `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` をそのまま使うのが最も簡単です。プロジェクト番号は Cloud Console 上部のプロジェクトセレクタに表示されています。独自に権限を分離したい場合は、追加でカスタム SA（例: `form-sender-cloudbuild`）を作成しても構いません。
-   - **Terraform 実行（GitHub Actions）用**: `form-sender-terraform` など（GitHub Actions 連携が必要な場合のみ）。詳細は `docs/github_actions_batch_ci.md` を参照します。
-3. 作成直後のロール割り当てウィザード、またはサービスアカウント詳細 → **権限** → **権限を追加** で最低限以下のロールを付与します。
-   - Batch Runner 用: `roles/batch.admin`, `roles/secretmanager.secretAccessor`, `roles/storage.objectAdmin`, `roles/artifactregistry.reader`
-   - Dispatcher 用: `roles/run.admin`, `roles/secretmanager.secretAccessor`, `roles/cloudtasks.enqueuer`, `roles/iam.serviceAccountTokenCreator`
-   - GAS オーケストレーター用: `roles/cloudtasks.enqueuer`, `roles/storage.objectAdmin`, `roles/run.invoker`, `roles/iam.serviceAccountUser`
-   - Cloud Build 実行用: `roles/artifactregistry.writer`, `roles/storage.admin`, `roles/logging.logWriter`, `roles/cloudtrace.agent`（既定の Cloud Build サービスアカウントには `roles/cloudbuild.builds.builder` が自動付与されています。新規プロジェクトではステージング用 Cloud Storage バケットを自動作成するため `roles/storage.admin` が必須です。カスタム SA を使う場合は同ロールも追加してください）
-   - Terraform 実行用: `roles/run.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/batch.admin`, `roles/artifactregistry.admin`, `roles/secretmanager.admin`, `roles/storage.admin`, `roles/cloudtasks.admin`, `roles/logging.admin`（インフラを Terraform で一括管理できるよう、事前準備チェックリスト 4. の権限と同等に揃えます）
+この節ではサービスアカウント作成〜権限付与をすべて CLI で実施します（コンソール操作でも構いません）。2.2 節の環境変数を設定済みであることを前提にしています。
 
-> 💡 Cloud Tasks のサービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）にも `roles/iam.serviceAccountTokenCreator` と `roles/iam.serviceAccountUser` を付与しておく必要があります。例:
-> ```bash
-> gcloud iam service-accounts add-iam-policy-binding \
->   form-sender-dispatcher@formsalespaid.iam.gserviceaccount.com \
->   --member="serviceAccount:service-621668223275@gcp-sa-cloudtasks.iam.gserviceaccount.com" \
->   --role="roles/iam.serviceAccountTokenCreator"
-> gcloud iam service-accounts add-iam-policy-binding \
->   form-sender-dispatcher@formsalespaid.iam.gserviceaccount.com \
->   --member="serviceAccount:service-621668223275@gcp-sa-cloudtasks.iam.gserviceaccount.com" \
->   --role="roles/iam.serviceAccountUser"
-> ```
-4. Cloud Build 実行用サービスアカウントは「ビルドを実行する主体」であり、Cloud Batch Runner / dispatcher 用とは別物です。5.2.3.2 節の Cloud Build トリガー画面では、このサービスアカウントを選択してください。
-5. Terraform 実行用サービスアカウントは、GitHub Actions 連携ガイド（`docs/github_actions_batch_ci.md`）で説明する Workload Identity Federation で利用します。必要がなければ作成・設定しなくても構いません。
-6. 後からロールを追加したい場合は、**IAM と管理** 画面で対象サービスアカウントの **アクセス権** を編集します。
+##### (1) サービスアカウントを作成
 
-> ℹ️ Terraform を利用する場合は、この段階で作成したサービスアカウントのメールアドレスを変数ファイルに記載しておくと、後続の設定がスムーズです。
+```bash
+gcloud iam service-accounts create form-sender-batch \
+  --display-name="Form Sender Cloud Batch"
+gcloud iam service-accounts create form-sender-dispatcher \
+  --display-name="Form Sender Dispatcher"
+gcloud iam service-accounts create form-sender-gas \
+  --display-name="Form Sender GAS"
+# Cloud Build 用は既定の PROJECT_NUMBER@cloudbuild.gserviceaccount.com を利用する前提
+```
+
+> Terraform / GitHub Actions で IaC を実行する場合は `form-sender-terraform` 等の追加サービスアカウントを作成し、Workload Identity Federation 設定に利用してください。詳細は `docs/github_actions_batch_ci.md` を参照。
+
+##### (2) プロジェクト ロール付与
+
+```bash
+# Cloud Batch Runner
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${BATCH_SA}" \
+  --role="roles/batch.admin"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${BATCH_SA}" \
+  --role="roles/artifactregistry.reader"
+
+# Dispatcher (Cloud Run)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DISPATCHER_SA}" \
+  --role="roles/run.admin"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DISPATCHER_SA}" \
+  --role="roles/cloudtasks.enqueuer"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DISPATCHER_SA}" \
+  --role="roles/iam.serviceAccountTokenCreator"
+
+# GAS オーケストレーター
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${GAS_SA}" \
+  --role="roles/cloudtasks.enqueuer"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${GAS_SA}" \
+  --role="roles/run.invoker"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${GAS_SA}" \
+  --role="roles/iam.serviceAccountUser"
+
+# Cloud Build（既定 SA を利用する場合）
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/artifactregistry.writer"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/storage.admin"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/logging.logWriter"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/cloudtrace.agent"
+```
+
+> Terraform 実行用サービスアカウントには、事前準備チェックリスト 4. のロール（`roles/run.admin`、`roles/iam.serviceAccountAdmin` など）をまとめて付与してください。IaC を利用しない場合は作成不要です。
+
+##### (3) Cloud Tasks サービス エージェントの設定
+
+Cloud Tasks が dispatcher SA の OIDC トークンを発行できるよう、サービス エージェントにも権限を付与します。
+
+```bash
+SERVICE_AGENT="service-${PROJECT_NUMBER}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
+gcloud iam service-accounts add-iam-policy-binding "${DISPATCHER_SA}" \
+  --member="serviceAccount:${SERVICE_AGENT}" \
+  --role="roles/iam.serviceAccountTokenCreator"
+gcloud iam service-accounts add-iam-policy-binding "${DISPATCHER_SA}" \
+  --member="serviceAccount:${SERVICE_AGENT}" \
+  --role="roles/iam.serviceAccountUser"
+```
+
+##### (4) Cloud Storage バケット権限
+
+```bash
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="serviceAccount:${GAS_SA}" \
+  --role="roles/storage.objectAdmin"
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="serviceAccount:${BATCH_SA}" \
+  --role="roles/storage.objectViewer"
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="serviceAccount:${DISPATCHER_SA}" \
+  --role="roles/storage.objectViewer"
+```
+
+> dispatcher SA に `Storage Object Viewer` を付与することで、署名付き URL の作成時に 403 が発生しなくなります。GAS SA はバケットへアップロードも行うため `Object Admin` 権限が必要です。
+
+##### (5) Secret Manager のアクセス権
+
+`SECRET_PROJECT_ID` にシークレットを保持しているプロジェクト（同一プロジェクトなら `$PROJECT_ID`）を設定し、必要なシークレットへアクセス権を付与します。
+
+```bash
+export SECRET_PROJECT_ID="621668223275"   # シークレットを保存したプロジェクトに置き換え
+for secret in form_sender_supabase_url form_sender_supabase_service_role; do
+  gcloud secrets add-iam-policy-binding "$secret" \
+    --project="$SECRET_PROJECT_ID" \
+    --member="serviceAccount:${BATCH_SA}" \
+    --role="roles/secretmanager.secretAccessor"
+  gcloud secrets add-iam-policy-binding "$secret" \
+    --project="$SECRET_PROJECT_ID" \
+    --member="serviceAccount:${DISPATCHER_SA}" \
+    --role="roles/secretmanager.secretAccessor"
+done
+```
+
+テスト環境用のシークレット（`*_test`）がある場合も同様にアクセサを付与してください。Secret が同一プロジェクト内に存在する場合は `--project` を省略できます。
+
+##### (6) GAS 用サービスアカウント鍵
+
+Apps Script から API を呼び出すため、`form-sender-gas` の JSON キーを 1 つだけ発行し、`SERVICE_ACCOUNT_JSON` Script Property に保存します。鍵は社内の安全な保管場所に移し、ローカルのダウンロードファイルは削除してください。
 
 #### 4.2.1 Secret Manager 登録手順（コンソール中心）
 
@@ -159,16 +277,22 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
 ### 5.2 コンソール手順
 
 1. **サービスアカウントの確認**（未作成の場合は 4.2.0 節で作成）\
-   Cloud Console → **IAM と管理** → **サービス アカウント** に移動し、`form-sender-batch` と `form-sender-dispatcher` が存在し、以下のロールが付与されていることを確認します。\
-   - Batch: `roles/batch.admin`, `roles/secretmanager.secretAccessor`, `roles/storage.objectAdmin`, `roles/artifactregistry.reader`\
-   - Dispatcher: `roles/run.admin`, `roles/secretmanager.secretAccessor`, `roles/cloudtasks.enqueuer`, `roles/iam.serviceAccountTokenCreator`
+   Cloud Console → **IAM と管理** → **サービス アカウント** に移動し、`form-sender-batch` / `form-sender-dispatcher` / `form-sender-gas` が存在し、4.2.0 節で付与したロールと一致していることを確認します。CLI で確認したい場合は `gcloud projects get-iam-policy $PROJECT_ID --flatten='bindings[].members' --filter="form-sender-batch" --format='table(bindings.role)'` が利用できます。
 
 2. **Cloud Storage バケット（client_config 保存先）**\
-   Cloud Console → **Cloud Storage** → **バケットを作成**。名前は `formsalespaid-form-sender-client-config`（推奨）などプロジェクトを識別できるものにし、リージョンは `asia-northeast1`（Batch/dispatcher と同じ）を選択します。アクセス制御は「一様」を選択し、作成後にバケット詳細 → **ライフサイクル** → **ルールを追加** で「オブジェクトの年齢 7 日」を条件に削除ルールを作成します。**権限** タブでは以下のサービスアカウントに `Storage Object Admin` を付与してください。\
-   - GAS (Apps Script) 実行用: `<project-number>@appspot.gserviceaccount.com`\
-   - Cloud Batch Runner 用: `form-sender-batch@<project>.iam.gserviceaccount.com`\
-   - Cloud Run dispatcher 用: `form-sender-dispatcher@<project>.iam.gserviceaccount.com`\
-   このバケット名を後続の Script Properties `FORM_SENDER_GCS_BUCKET` および Terraform 設定（`terraform.tfvars` の `gcs_bucket`）に転記しておくと、GAS からの `client_config` アップロードや dispatcher からの署名付き URL 発行が正しく動作します。
+   Cloud Console → **Cloud Storage** → **バケットを作成**。名前は `formsales-form-sender-client-config` などプロジェクトを識別できるものにし、リージョンは `asia-northeast1` を選択します。アクセス制御は「一様」を選択し、作成後にバケット詳細 → **ライフサイクル** → **ルールを追加** で「オブジェクトの年齢 7 日」を条件に削除ルールを作成します。CLI で作成する場合は以下の通りです。\
+   ```bash
+   gcloud storage buckets create "gs://${BUCKET_NAME}" --project="$PROJECT_ID" --location="$REGION" --uniform-bucket-level-access
+   gcloud storage buckets update "gs://${BUCKET_NAME}" --lifecycle-file=- <<'JSON'
+   {
+     "rule": [{
+       "action": {"type": "Delete"},
+       "condition": {"age": 7}
+     }]
+   }
+JSON
+   ```
+   権限は 4.2.0 節のコマンドで付与済みであることを確認し、必要に応じて GAS 既定 SA（`<project-number>@appspot.gserviceaccount.com`）にも `roles/storage.objectAdmin` を付与してください。バケット名は Script Properties `FORM_SENDER_GCS_BUCKET` や Terraform の `gcs_bucket` でも使用します。
 
 3. **Artifact Registry（コンテナリポジトリ）**\
    1. Cloud Console → **Artifact Registry** → **リポジトリを作成** を開き、次の値で作成します。\
@@ -286,14 +410,23 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
    4. **作成** を押してデプロイし、完了後に表示される **エンドポイント URL**（例: `https://form-sender-dispatcher-xxxx.a.run.app`）を控えます。リビジョンが起動エラーになっても URL 自体は変わらないため、この時点で `terraform.tfvars` の `dispatcher_base_url` / `dispatcher_audience` や Script Properties `FORM_SENDER_DISPATCHER_BASE_URL` に反映して構いません。以後は Cloud Build の dispatcher トリガーがビルドごとに `gcloud run deploy` を自動実行するため、サービス設定を変更しない限り追加の手動デプロイは不要です（環境変数を更新したい場合のみ Cloud Console もしくは `gcloud run deploy --set-env-vars ...` を再実行してください）。
 
 6. **Cloud Tasks キュー**\
-Cloud Console → **Cloud Tasks** → **キューを作成**。名前は `form-sender-dispatcher`、リージョンは `asia-northeast1` を指定。ターゲットに HTTP を選択し、URL に `https://<cloud-run-url>/v1/form-sender/tasks` を入力します。**認証方式は「認証なし」で問題ありません**（GAS 側で署名付き ID トークンを `Authorization` ヘッダーとして付与します）。リトライは **キュー設定** で管理します（タスク作成時に `retryConfig` を渡すことはできません）。推奨設定例: 
+Cloud Console → **Cloud Tasks** → **キューを作成**。名前は `form-sender-dispatcher`、リージョンは `asia-northeast1` を指定します。ターゲットに HTTP を選択し、URL に `https://<cloud-run-url>/v1/form-sender/tasks` を入力、認証方式は *サービス アカウント* を選択して `form-sender-dispatcher@<project>.iam.gserviceaccount.com` を指定してください。CLI で作成する場合は次のように実行します。\
+```bash
+gcloud tasks queues create form-sender-dispatcher \
+  --project="$PROJECT_ID" \
+  --location="$REGION" \
+  --max-attempts=10 \
+  --max-retry-duration=54000s \
+  --min-backoff=60s \
+  --max-backoff=600s
+```
+GAS からタスクを投入する際は、`CloudRunDispatcherClient.enqueue` などで `httpRequest.oidcToken.serviceAccountEmail` と `httpRequest.oidcToken.audience` を必ず設定し（`Authorization` ヘッダーを手動生成しない）、Cloud Tasks 側がディスパッチ時に ID トークンを発行するようにしてください。リトライは **キュー設定** で管理します（タスク作成時に `retryConfig` を渡すことはできません）。推奨設定例: 
    - **Maximum attempts**: 3（再送回数の上限）
    - **Minimum backoff**: 60 秒 / **Maximum backoff**: 600 秒（指数バックオフ）
    - **Maximum retry duration**: 当日 19:00 JST（=10:00 UTC）までを許容する場合は 32,400 秒程度を目安に調整
    - Spot 枯渇時にフォールバックさせない案件では、最大試行回数を 1 にするのも選択肢です。
    これらの値は運用ポリシーに応じて調整し、必要に応じて Monitoring と連携してアラートを設定してください。
-   > Cloud Tasks のサービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）と GAS オーケストレーター用サービスアカウント（`form-sender-gas@<project>.iam.gserviceaccount.com`）の両方に、`form-sender-dispatcher@<project>.iam.gserviceaccount.com` へ `roles/iam.serviceAccountTokenCreator` と `roles/iam.serviceAccountUser` を付与しておくと、タスク作成時に OIDC トークンが確実に生成されます。
-   > Cloud Tasks サービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）にも `roles/iam.serviceAccountTokenCreator` を、GAS オーケストレーター用サービスアカウントには `roles/iam.serviceAccountUser` を付与しておくと、タスク作成時に `form-sender-dispatcher@...` の OIDC トークンが確実に生成されます。
+   > Cloud Tasks サービスエージェント（`service-<PROJECT_NUMBER>@gcp-sa-cloudtasks.iam.gserviceaccount.com`）と GAS オーケストレーター用サービスアカウントに、4.2.0 節で付与した `roles/iam.serviceAccountTokenCreator` / `roles/iam.serviceAccountUser` が設定されていることを必ず確認してください。これが不足するとディスパッチ時に 401 が発生します。
 
 7. **最終確認**\
    Secret Manager のアクセス権、Cloud Storage バケットの権限、Cloud Batch テンプレートと Cloud Run dispatcher の環境変数が意図どおりかを確認し、GAS Script Properties（`FORM_SENDER_TASKS_QUEUE`, `FORM_SENDER_DISPATCHER_BASE_URL`, `FORM_SENDER_BATCH_*` など）を最新値に更新します。その後、テスト用 targeting で dispatcher が正しく呼び出せるかを確認してください。
@@ -464,6 +597,9 @@ A. Terraform の `supabase_secret_names` を利用して Secret Manager に格�
 
 **Q4. GitHub Actions 経由のデプロイで Batch だけ更新したい。**  
 A. `workflow_dispatch` で `apply=true` を指定し、Terraform の plan/apply をバッチ側だけに限定したい場合は `terraform apply -target=module.batch` などを参考にジョブを編集してください。設定手順の詳細は `docs/github_actions_batch_ci.md` を参照してください。
+
+**Q5. Batch タスクが `403 Client Error` で client_config を取得できません。**  
+A. 署名付き URL の署名主体（Cloud Run dispatcher のサービスアカウント）に `roles/storage.objectViewer` が付与されていない可能性があります。`gcloud storage buckets add-iam-policy-binding gs://<bucket> --member="serviceAccount:${DISPATCHER_SA}" --role="roles/storage.objectViewer"` を実行し、同じバケットに Batch Runner / GAS のサービスアカウントにも必要なロールがあるか確認してください。署名 URL の有効期限切れが疑われる場合は Cloud Logging の dispatcher ログで再署名が成功しているかも合わせて確認しましょう。
 
 ---
 

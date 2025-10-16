@@ -24,6 +24,30 @@ function resetSendQueueAllDailyExtra() {
   }
 }
 
+function extractClearedCount_(res, key) {
+  if (res === null || typeof res === 'undefined') return 0;
+  if (typeof res === 'number') return Number(res) || 0;
+  if (Array.isArray(res) && res.length > 0) {
+    const first = res[0];
+    if (first && typeof first === 'object' && first !== null) {
+      const targetKey = key || Object.keys(first)[0];
+      if (typeof targetKey !== 'undefined' && targetKey !== null) {
+        const val = first[targetKey];
+        return typeof val === 'number' ? val : Number(val) || 0;
+      }
+    }
+  }
+  if (typeof res === 'object') {
+    const keys = Object.keys(res);
+    if (keys.length > 0) {
+      const targetKey = key || keys[0];
+      const val = res[targetKey];
+      return typeof val === 'number' ? val : Number(val) || 0;
+    }
+  }
+  return 0;
+}
+
 function buildSendQueueForTargeting(targetingId = null, options) {
   try {
     options = options || {};
@@ -49,7 +73,11 @@ function buildSendQueueForTargeting(targetingId = null, options) {
     const cfg = getTargetingConfig(targetingId);
     if (!cfg || !cfg.client || !cfg.targeting) throw new Error('invalid 2-sheet config');
     const t = cfg.targeting;
-    const useExtra = !!(cfg.use_extra_table || t.use_extra_table);
+    const useExtra = testMode
+      ? false
+      : (Object.prototype.hasOwnProperty.call(options, 'useExtra')
+        ? !!options.useExtra
+        : !!(cfg.use_extra_table || t.use_extra_table));
     const clientName = (function(clientSection) {
       if (!clientSection || typeof clientSection.company_name !== 'string') return '';
       const trimmed = clientSection.company_name.trim();
@@ -61,6 +89,27 @@ function buildSendQueueForTargeting(targetingId = null, options) {
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     const shardCount = resolveShardCount_();
     const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
+    const tableMode = testMode ? 'test' : (useExtra ? 'extra' : 'primary');
+    try {
+      const cleared = clearSendQueueForTargeting(targetingId, testMode ? { testMode: true } : (useExtra ? { useExtra: true } : {}));
+      const clearedCount = extractClearedCount_(cleared, testMode ? 'clear_send_queue_for_targeting_test' : (useExtra ? 'clear_send_queue_for_targeting_extra' : 'clear_send_queue_for_targeting'));
+      console.log(JSON.stringify({
+        level: 'info',
+        event: 'queue_clear_before_build',
+        targeting_id: targetingId,
+        table_mode: tableMode,
+        cleared: clearedCount
+      }));
+    } catch (clearError) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'queue_clear_failed',
+        targeting_id: targetingId,
+        table_mode: tableMode,
+        error: String(clearError && clearError.message ? clearError.message : clearError)
+      }));
+      throw clearError;
+    }
     console.log(JSON.stringify({
       level: 'info', event: 'queue_build_start', targeting_id: targetingId, date_jst: dateJst,
       param_summary: {
@@ -245,6 +294,26 @@ function buildSendQueueForTargetingExtra(targetingId = null) {
     })(cfg.client);
     const dateJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     const ngTokens = (t.ng_companies || '').split(/[，,]/).map(s => s.trim()).filter(Boolean);
+    try {
+      const cleared = clearSendQueueForTargeting(targetingId, { useExtra: true });
+      const clearedCount = extractClearedCount_(cleared, 'clear_send_queue_for_targeting_extra');
+      console.log(JSON.stringify({
+        level: 'info',
+        event: 'queue_clear_before_build_extra',
+        targeting_id: targetingId,
+        table_mode: 'extra',
+        cleared: clearedCount
+      }));
+    } catch (clearError) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'queue_clear_failed_extra',
+        targeting_id: targetingId,
+        table_mode: 'extra',
+        error: String(clearError && clearError.message ? clearError.message : clearError)
+      }));
+      throw clearError;
+    }
     console.log(JSON.stringify({
       level: 'info', event: 'queue_build_start_extra', targeting_id: targetingId, date_jst: dateJst,
       param_summary: { shards: shardCount, limit: 10000, targeting_sql_len: (t.targeting_sql || '').length, ng_companies_tokens: ngTokens.length }

@@ -556,10 +556,10 @@ class CloudBatchJobRunner:
         if self._settings.batch_container_entrypoint:
             runnable.container.entrypoint = self._settings.batch_container_entrypoint
 
-        environment = task_spec.environment or batch_v1.Environment()
         if task_spec.environment is None:
-            task_spec.environment = environment
+            task_spec.environment = batch_v1.Environment()
 
+        environment = task_spec.environment
         environment.variables.update({key: str(value) for key, value in env_vars.items()})
 
         if secret_env:
