@@ -185,7 +185,7 @@ class JobExecutionRepository:
         response = (
             self._client
             .table("job_executions")
-            .select("metadata", "started_at")
+            .select("metadata,started_at")
             .eq("targeting_id", targeting_id)
             .order("started_at", desc=True)
             .limit(20)

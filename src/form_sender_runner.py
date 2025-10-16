@@ -26,7 +26,6 @@ import time
 from datetime import datetime, timezone, timedelta, date
 from functools import lru_cache
 from typing import Optional, Dict, Any, List, Tuple
-from urllib.parse import urljoin
 
 from supabase import create_client
 import random
@@ -427,7 +426,7 @@ def _request_signed_url_refresh(client_config_object: str) -> Optional[str]:
         return None
 
     audience = os.getenv(DISPATCHER_AUDIENCE_ENV) or base_url
-    refresh_url = urljoin(base_url.rstrip('/') + '/', _SIGNED_URL_REFRESH_PATH.lstrip('/'))
+    refresh_url = f"{base_url.rstrip('/')}{_SIGNED_URL_REFRESH_PATH}"
 
     try:
         auth_request = google_requests.Request()
