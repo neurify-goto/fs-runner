@@ -159,6 +159,19 @@ function resetSendQueueAllTestRpc_() {
   return callRpc_('reset_send_queue_all_test', {});
 }
 
+function clearSendQueueForTargeting(targetingId, options) {
+  if (typeof targetingId === 'undefined' || targetingId === null) {
+    throw new Error('targetingId is required for clearSendQueueForTargeting');
+  }
+  const testMode = options && options.testMode === true;
+  const useExtra = options && options.useExtra === true;
+  const fn = testMode
+    ? 'clear_send_queue_for_targeting_test'
+    : (useExtra ? 'clear_send_queue_for_targeting_extra' : 'clear_send_queue_for_targeting');
+  const payload = { p_targeting_id: Number(targetingId) };
+  return callRpc_(fn, payload);
+}
+
 function createQueueForTargetingTest(targetingId, targetDateJst, targetingSql, ngCompaniesCsv, maxDailySends, shards) {
   const payload = {
     p_target_date: targetDateJst,

@@ -94,10 +94,12 @@ function triggerServerlessFormSenderWorkflow_(targetingId, targetingConfig, opti
       return { success: false, message: validationMessage, error_type: 'validation_failed' };
     }
 
-    var queueResult = buildSendQueueForTargeting(targetingId, { testMode: testMode });
+    var queueLogLabel = testMode ? 'send_queue_test' : (useExtra ? 'send_queue_extra' : 'send_queue');
+    console.log(`${queueLogLabel} を再構築します`);
+    var queueResult = buildSendQueueForTargeting(targetingId, { testMode: testMode, useExtra: useExtra });
     if (!queueResult || queueResult.success !== true) {
-      console.error('send_queue 作成に失敗しました');
-      return { success: false, message: 'send_queue 作成失敗' };
+      console.error(`${queueLogLabel} 作成に失敗しました`);
+      return { success: false, message: `${queueLogLabel} 作成失敗` };
     }
 
     uploadInfo = storage.uploadClientConfig(targetingId, clientConfig, { runId: Utilities.getUuid() });
@@ -230,6 +232,14 @@ function triggerFormSenderWorkflow(targetingId, options) {
     const cw = Math.max(1, parseInt(clientConfig?.targeting?.concurrent_workflow || 1) || 1);
     console.log(`並列起動数(concurrent_workflow): ${cw}`);
 
+    const testMode = !!(options && options.testMode === true);
+    const queueLogLabel = testMode ? 'send_queue_test' : (useExtra ? 'send_queue_extra' : 'send_queue');
+    console.log(`${queueLogLabel} を再構築します`);
+    const queueResult = buildSendQueueForTargeting(effectiveTargetingId, { testMode, useExtra });
+    if (!queueResult || queueResult.success !== true) {
+      console.error(`${queueLogLabel} 作成に失敗しました`);
+      return { success: false, message: `${queueLogLabel} 作成失敗` };
+    }
     console.log(`GitHub Actions 連続処理ワークフローをトリガー: targetingId=${effectiveTargetingId}`);
 
     let ok = 0;

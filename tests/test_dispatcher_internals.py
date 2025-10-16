@@ -248,6 +248,62 @@ def test_signed_url_manager_resign_failure_raises_value_error(monkeypatch):
     assert blob.regenerated is True
 
 
+def test_batch_runner_build_task_spec_injects_environment():
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender-runner",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy.dummy",
+        dispatcher_base_url="https://dispatcher.invalid",
+        dispatcher_audience="https://dispatcher.invalid",
+        default_client_config_path="/tmp/client_config.json",
+        signed_url_refresh_threshold_seconds=1800,
+        signed_url_ttl_hours=15,
+        signed_url_ttl_hours_batch=48,
+        signed_url_refresh_threshold_seconds_batch=21600,
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="projects/proj/locations/asia-northeast1/jobs/form-sender-batch-template",
+        batch_task_group="group0",
+        batch_service_account_email="form-sender-batch@proj",
+        batch_container_image="asia-northeast1-docker.pkg.dev/proj/form-sender-runner/playwright:latest",
+        batch_machine_type_default="e2-standard-2",
+        batch_vcpu_per_worker_default=1,
+        batch_memory_per_worker_mb_default=2048,
+        batch_memory_buffer_mb_default=2048,
+        batch_max_attempts_default=1,
+        batch_supabase_url_secret="projects/proj/secrets/url/versions/latest",
+        batch_supabase_service_role_secret="projects/proj/secrets/key/versions/latest",
+    )
+
+    runner = CloudBatchJobRunner.__new__(CloudBatchJobRunner)
+    runner._settings = settings
+    runner._client = None
+    runner._parent = "projects/proj/locations/asia-northeast1"
+    runner._job_template_cache = None
+
+    env_vars = {
+        "FORM_SENDER_CLIENT_CONFIG_URL": "https://example.invalid/client.json",
+        "FORM_SENDER_CLIENT_CONFIG_OBJECT": "gs://bucket/client.json",
+        "JOB_EXECUTION_ID": "abc123",
+    }
+
+    task_spec = runner._build_task_spec(
+        base_task_spec=batch_v1.TaskSpec(),
+        env_vars=env_vars,
+        secret_env={},
+        cpu_milli=2000,
+        memory_mb=4096,
+        max_retry_count=3,
+    )
+
+    assert task_spec.environment is not None
+    variables = dict(task_spec.environment.variables)
+    for key, value in env_vars.items():
+        assert variables[key] == value
+
+
 def test_signed_url_manager_validates_origin_success(monkeypatch):
     issue_time = datetime.now(timezone.utc)
     task = _task_payload(issue_time, object_path="dir/config.json")
