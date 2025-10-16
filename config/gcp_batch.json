@@ -1,0 +1,9 @@
+{
+  "preemption": {
+    "endpoint": "http://metadata.google.internal/computeMetadata/v1/instance/preempted",
+    "header_name": "Metadata-Flavor",
+    "header_value": "Google",
+    "initial_backoff_seconds": 1,
+    "max_backoff_seconds": 30
+  }
+}

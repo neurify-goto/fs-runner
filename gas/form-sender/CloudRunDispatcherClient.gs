@@ -2,7 +2,12 @@
  * Cloud Tasks を利用して Cloud Run dispatcher を呼び出すクライアント
  */
 var CloudRunDispatcherClient = (function() {
-  var serviceAccount = ServiceAccountClient;
+  function resolveServiceAccount_() {
+    if (typeof ServiceAccountClient !== 'undefined' && ServiceAccountClient) {
+      return ServiceAccountClient;
+    }
+    throw new Error('ServiceAccountClient が未定義です');
+  }
 
   function getQueuePath_() {
     var queue = PropertiesService.getScriptProperties().getProperty('FORM_SENDER_TASKS_QUEUE');
@@ -33,11 +38,19 @@ var CloudRunDispatcherClient = (function() {
   }
 
   function getDispatcherUrl_() {
-    var url = PropertiesService.getScriptProperties().getProperty('FORM_SENDER_DISPATCHER_URL');
-    if (!url) {
-      throw new Error('FORM_SENDER_DISPATCHER_URL が設定されていません');
+    var props = PropertiesService.getScriptProperties();
+    var explicitUrl = props.getProperty('FORM_SENDER_DISPATCHER_URL');
+    if (explicitUrl) {
+      return explicitUrl;
     }
-    return url;
+
+    var baseUrl = props.getProperty('FORM_SENDER_DISPATCHER_BASE_URL');
+    if (!baseUrl) {
+      throw new Error('FORM_SENDER_DISPATCHER_URL/BASE_URL が設定されていません');
+    }
+
+    var normalizedBase = String(baseUrl).trim().replace(/\/$/, '');
+    return normalizedBase + '/v1/form-sender/tasks';
   }
 
   function getDispatcherServiceAccount_() {
@@ -61,7 +74,7 @@ var CloudRunDispatcherClient = (function() {
   function fetchDispatcher_(path, options) {
     var base = getDispatcherApiBase_();
     var url = base + (path.charAt(0) === '/' ? path : '/' + path);
-    var token = serviceAccount.getIdToken(base);
+    var token = resolveServiceAccount_().getIdToken(base);
     var requestOptions = options || {};
     requestOptions.muteHttpExceptions = true;
     requestOptions.headers = requestOptions.headers || {};
@@ -104,17 +117,12 @@ var CloudRunDispatcherClient = (function() {
   function enqueue(payload) {
     var queuePath = getQueuePath_();
     var dispatcherUrl = getDispatcherUrl_();
-    var token = serviceAccount.getAccessToken(['https://www.googleapis.com/auth/cloud-platform']);
+    var serviceAccountClient = resolveServiceAccount_();
+    var token = serviceAccountClient.getAccessToken(['https://www.googleapis.com/auth/cloud-platform']);
     var createTaskUrl = 'https://cloudtasks.googleapis.com/v2/' + encodeURI(queuePath) + '/tasks';
 
     var now = new Date();
     var scheduleTimeIso = new Date(now.getTime() + 1000).toISOString();
-    var jstDateStr = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
-    var parts = jstDateStr.split('-');
-    var cutoffUtcMillis = Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]), 10, 0, 0, 0); // 19:00 JST = 10:00 UTC
-    var cutoffDiffSeconds = Math.floor((cutoffUtcMillis - now.getTime()) / 1000);
-    var maxRetryDurationSeconds = Math.max(0, cutoffDiffSeconds);
-
     var body = {
       httpRequest: {
         httpMethod: 'POST',
@@ -124,23 +132,27 @@ var CloudRunDispatcherClient = (function() {
         },
         body: Utilities.base64Encode(JSON.stringify(payload))
       },
-      scheduleTime: scheduleTimeIso,
-      retryConfig: {
-        maxAttempts: 3,
-        maxRetryDuration: maxRetryDurationSeconds + 's',
-        minBackoff: '60s',
-        maxBackoff: '600s'
-      }
+      scheduleTime: scheduleTimeIso
     };
     var taskId = buildTaskId_(payload);
     body.name = queuePath + '/tasks/' + taskId;
     var dispatcherServiceAccount = getDispatcherServiceAccount_();
-    if (dispatcherServiceAccount) {
-      var audienceUrl = getDispatcherApiBase_();
-      body.httpRequest.oidcToken = {
-        serviceAccountEmail: dispatcherServiceAccount,
-        audience: audienceUrl
-      };
+    var audienceUrl = getDispatcherApiBase_();
+    var idToken = serviceAccountClient.getIdToken(audienceUrl);
+    body.httpRequest.headers.Authorization = 'Bearer ' + idToken;
+
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'cloud_tasks_enqueue_request',
+        queue: queuePath,
+        dispatcher_url: dispatcherUrl,
+        request_sa: serviceAccountClient.getServiceAccountEmail(),
+        uses_id_token: true,
+        oidc_service_account: dispatcherServiceAccount || null
+      }));
+    } catch (loggingError) {
+      // ログ出力に失敗しても処理は継続
     }
 
     var response = UrlFetchApp.fetch(createTaskUrl, {
@@ -154,7 +166,42 @@ var CloudRunDispatcherClient = (function() {
     });
     var statusCode = response.getResponseCode();
     var responseText = response.getContentText();
+
+    try {
+      console.log(JSON.stringify({
+        level: 'info',
+        event: 'cloud_tasks_enqueue_response',
+        statusCode: statusCode,
+        task_id: taskId,
+        success: statusCode < 300
+      }));
+    } catch (logErr) {
+      // ignore logging failure
+    }
+
     if (statusCode >= 300) {
+      var errorPayload = null;
+      if (responseText) {
+        try {
+          errorPayload = JSON.parse(responseText);
+        } catch (parseErr) {
+          errorPayload = responseText;
+        }
+      }
+      try {
+        console.error(JSON.stringify({
+          level: 'error',
+          event: 'cloud_tasks_enqueue_failure',
+          statusCode: statusCode,
+          queue: queuePath,
+          dispatcher_url: dispatcherUrl,
+          oidc_service_account: dispatcherServiceAccount || null,
+          uses_id_token: true,
+          response: errorPayload
+        }));
+      } catch (logErr) {
+        // ignore logging failure
+      }
       if (statusCode === 409) {
         var duplicateDetected = false;
         var parsedError = null;

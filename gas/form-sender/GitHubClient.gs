@@ -625,14 +625,17 @@ function testFormSenderOnBranch(branch, testTargetingId = 1) {
     console.log(`✅ 実データ取得成功: ${realClientConfig.client?.company_name} (client_id: ${realClientConfig.client_id})`);
     console.log(`📋 テストモード: GitHub ActionsのTEST_MODE=trueで実際の送信は防止されます`);
     
+    const selectedMode = resolveExecutionMode_(realClientConfig);
+
     let result;
-    if (shouldUseServerlessFormSender_()) {
+    if (selectedMode === 'batch' || selectedMode === 'serverless') {
       result = triggerServerlessFormSenderWorkflow_(testTargetingId, realClientConfig, {
         useExtra: !!realClientConfig.use_extra_table,
         branch: branch,
         testMode: true,
         workflowTrigger: 'branch_test',
-        triggerName: 'testFormSenderOnBranch'
+        triggerName: 'testFormSenderOnBranch',
+        executionMode: selectedMode
       });
     } else {
       result = sendWorkflowDispatchToBranch('form_sender_test', testTargetingId, realClientConfig, branch);
@@ -689,13 +692,16 @@ function testFormSenderWorkflowTrigger(testTargetingId = 1) {
     console.log(`✅ 実データ取得成功: ${realClientConfig.client?.company_name} (client_id: ${realClientConfig.client_id})`);
     console.log(`📋 テストモード: GitHub ActionsのTEST_MODE=trueで実際の送信は防止されます`);
     
+    const selectedMode = resolveExecutionMode_(realClientConfig);
+
     let result;
-    if (shouldUseServerlessFormSender_()) {
+    if (selectedMode === 'batch' || selectedMode === 'serverless') {
       result = triggerServerlessFormSenderWorkflow_(testTargetingId, realClientConfig, {
         useExtra: !!realClientConfig.use_extra_table,
         testMode: true,
         workflowTrigger: 'manual_test',
-        triggerName: 'testFormSenderWorkflowTrigger'
+        triggerName: 'testFormSenderWorkflowTrigger',
+        executionMode: selectedMode
       });
     } else {
       result = sendRepositoryDispatch('form_sender_task', testTargetingId, realClientConfig);

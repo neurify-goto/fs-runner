@@ -9,7 +9,7 @@ import logging
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
 
-from utils.env import is_github_actions, should_sanitize_logs
+from utils.env import is_github_actions, should_sanitize_logs, is_gcp_batch
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,25 @@ class LogSanitizer:
                     self._compiled_patterns.append((compiled_pattern, replacement))
                 except re.error as e:
                     logger.warning(f"Failed to compile GitHub Actions regex pattern '{pattern}': {e}")
+
+        if is_gcp_batch():
+            # Cloud Batch 固有の識別子をマスク
+            self.gcp_batch_patterns = [
+                (r'projects/[A-Za-z0-9\-]+/locations/[A-Za-z0-9\-]+/jobs/[A-Za-z0-9\-]+',
+                 'projects/***/locations/***/jobs/***'),
+                (r'projects/[A-Za-z0-9\-]+/locations/[A-Za-z0-9\-]+/taskGroups/[A-Za-z0-9\-]+',
+                 'projects/***/locations/***/taskGroups/***'),
+                (r'(?i)(batch_job_name|batch_task_group|batch_service_account_email)\s*[=:\-]\s*["\']?([^"\'\s\n,}{]+)["\']?',
+                 r'\1=***BATCH_REDACTED***'),
+            ]
+            self.sensitive_patterns.extend(self.gcp_batch_patterns)
+
+            for pattern, replacement in self.gcp_batch_patterns:
+                try:
+                    compiled_pattern = re.compile(pattern)
+                    self._compiled_patterns.append((compiled_pattern, replacement))
+                except re.error as e:
+                    logger.warning(f"Failed to compile Cloud Batch regex pattern '{pattern}': {e}")
 
     def sanitize_string(self, text: str) -> str:
         """

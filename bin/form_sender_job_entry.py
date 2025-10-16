@@ -28,6 +28,9 @@ from form_sender.config_validation import (
     ClientConfigValidationError,
     transform_client_config,
 )
+from form_sender_runner import _refresh_client_config_url_if_needed
+from utils import env as env_utils
+from utils.gcp_batch import calculate_run_index, calculate_shard_index, extract_batch_meta
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,13 @@ def _get_env_int(name: str, default: int = 0) -> int:
         return int(value)
     except ValueError:
         logger.warning("環境変数 %s に整数以外の値が設定されています: %s", name, value)
+        return default
+
+
+def _coerce_to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return default
 
 
@@ -276,8 +286,30 @@ def _update_job_execution_status(status: str) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    os.environ.setdefault("FORM_SENDER_ENV", "cloud_run")
     os.environ.setdefault("FORM_SENDER_LOG_SANITIZE", "1")
+
+    batch_meta = extract_batch_meta(os.environ)
+    current_env = (os.getenv("FORM_SENDER_ENV") or "").strip().lower()
+    has_native_batch_env = any(
+        os.getenv(name)
+        for name in (
+            "BATCH_TASK_INDEX",
+            "BATCH_TASK_ATTEMPT",
+            "BATCH_TASK_COUNT",
+            "BATCH_JOB_ID",
+            "BATCH_JOB_NAME",
+        )
+    )
+
+    if has_native_batch_env and current_env != "gcp_batch":
+        os.environ["FORM_SENDER_ENV"] = "gcp_batch"
+        env_utils.reset_cache()
+        current_env = "gcp_batch"
+
+    if not current_env:
+        os.environ["FORM_SENDER_ENV"] = "cloud_run"
+        env_utils.reset_cache()
+        current_env = "cloud_run"
 
     client_config_url = os.getenv("FORM_SENDER_CLIENT_CONFIG_URL")
     if not client_config_url:
@@ -287,6 +319,11 @@ def main() -> None:
     client_config_object = os.getenv("FORM_SENDER_CLIENT_CONFIG_OBJECT")
     if not client_config_object:
         raise RuntimeError("FORM_SENDER_CLIENT_CONFIG_OBJECT が設定されていません")
+
+    refreshed_url = _refresh_client_config_url_if_needed(client_config_url, client_config_object)
+    if refreshed_url and refreshed_url != client_config_url:
+        client_config_url = refreshed_url
+        logger.info("Dispatcher から再署名された client_config URL を取得しました")
 
     workspace = PROJECT_ROOT
     job_completed = False
@@ -298,16 +335,29 @@ def main() -> None:
         logger.info("client_config を保存しました: %s", client_config_path)
 
         meta = decode_job_meta(os.getenv("JOB_EXECUTION_META"))
-        run_index_base = int(meta.get("run_index_base", 0))
-        shards = int(meta.get("shards", os.getenv("FORM_SENDER_TOTAL_SHARDS", "1")))
-        workers_per_workflow = int(meta.get("workers_per_workflow", os.getenv("FORM_SENDER_MAX_WORKERS", "4")))
+        run_index_base = _coerce_to_int(meta.get("run_index_base"), 0)
+        shards = _coerce_to_int(meta.get("shards"), _get_env_int("FORM_SENDER_TOTAL_SHARDS", 1))
+        workers_per_workflow = _coerce_to_int(meta.get("workers_per_workflow"), _get_env_int("FORM_SENDER_MAX_WORKERS", 4))
 
-        task_index = _get_env_int("CLOUD_RUN_TASK_INDEX", 0)
-        run_index = run_index_base + task_index + 1
-        shard_id = (run_index - 1) % max(1, shards)
+        if batch_meta.task_index is not None:
+            run_index = calculate_run_index(run_index_base, batch_meta.task_index)
+        else:
+            legacy_task_index = _get_env_int("CLOUD_RUN_TASK_INDEX", 0)
+            run_index = run_index_base + legacy_task_index + 1
+
+        if run_index is None:
+            run_index = run_index_base + 1
+
+        shards = max(1, shards)
+        workers_per_workflow = max(1, workers_per_workflow)
+        shard_id = calculate_shard_index(run_index, shards)
+        if shard_id is None:
+            shard_id = (run_index - 1) % shards if run_index is not None else 0
 
         os.environ["FORM_SENDER_RUN_INDEX"] = str(run_index)
         os.environ["FORM_SENDER_WORKERS_FROM_META"] = str(workers_per_workflow)
+        if batch_meta.attempt is not None and not os.getenv("CLOUD_RUN_TASK_ATTEMPT"):
+            os.environ["CLOUD_RUN_TASK_ATTEMPT"] = str(batch_meta.attempt)
         os.environ.setdefault("FORM_SENDER_TARGETING_ID", os.getenv("FORM_SENDER_TARGETING_ID", ""))
 
         git_ref = os.getenv("FORM_SENDER_GIT_REF")

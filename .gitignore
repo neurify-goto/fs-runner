@@ -216,3 +216,11 @@ tests/tmp/*
 
 # Local agent files
 .serena/
+
+# Terraform
+*.tfvars
+!*.tfvars.example
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl

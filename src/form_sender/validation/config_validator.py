@@ -110,20 +110,18 @@ class ConfigValidator:
                     errors.append(f"GitHub Actions environment: num_workers must be >= 1 when specified, got {num_workers}")
 
                 memory_per_worker = mp_config.get('memory_per_worker_mb', 0)
-                system_memory = 3072  # オーケストレーター + システムプロセス: 3GB
+                system_memory = 2048  # オーケストレーター + システムプロセス: 2GB
                 total_memory = (memory_per_worker * num_workers) + system_memory
 
-                if total_memory > 14336:
+                if total_memory > 10240:
                     errors.append(
-                        f"GitHub Actions: Total memory usage ({total_memory}MB = {num_workers}×{memory_per_worker}MB + {system_memory}MB system) exceeds safe limit (14336MB/16GB)"
+                        f"GitHub Actions: Total memory usage ({total_memory}MB = {num_workers}×{memory_per_worker}MB + {system_memory}MB system) exceeds safe limit (10240MB/10GB)"
                     )
 
-                if memory_per_worker == 3072:
-                    logger.info("Memory allocation suitable for Form-Sender (heavy processing)")
-                elif memory_per_worker == 2048:
-                    logger.info("Memory allocation suitable for Form-Finder (lightweight exploration)")
-                elif memory_per_worker > 3072:
-                    errors.append(f"GitHub Actions: memory_per_worker ({memory_per_worker}MB) may be excessive for current workloads")
+                if memory_per_worker == 2048:
+                    logger.info("Memory allocation suitable for Form-Sender baseline (2GB/worker)")
+                elif memory_per_worker > 2048:
+                    errors.append(f"GitHub Actions: memory_per_worker ({memory_per_worker}MB) exceeds supported baseline (2048MB)")
             
             # 相互関係の検証
             num_workers_value = mp_config.get('num_workers')

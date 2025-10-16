@@ -4,32 +4,64 @@ This repository is `neurify-goto/fs-runner`.
 
 ### **System Overview**
 
-This project implements an automated form submission system with a **GAS (Google Apps Script) → GitHub Actions** workflow architecture. The system consists of multiple specialized modules that coordinate batch processing tasks.
+This project orchestrates automated form operations through a hybrid **GAS (Google Apps Script) → Cloud Tasks → Cloud Run Dispatcher → Cloud Run Jobs / GCP Batch** architecture, while GitHub Actions remains available for selected batch workloads. Specialized modules collaborate to collect company data, discover contact forms, analyze instructions, and execute submissions at scale.
 
 #### **Core Architecture Flow**
-1. **GAS Triggers**: Time-based triggers initiate batch processing
-2. **GitHub Repository Dispatch**: GAS sends workflow trigger events to GitHub Actions
-3. **GitHub Actions Execution**: Python modules in `src/` directory execute the actual processing
-4. **Result Reporting**: Processing results are stored back to Supabase database
+1. **GAS Triggers**: Time-based triggers and spreadsheet actions inside `gas/` modules start processing and prepare Supabase queues.
+2. **Task Enqueue**: Serverless-ready paths package payloads and enqueue Cloud Tasks targeting the Cloud Run dispatcher; legacy or auxiliary paths fall back to GitHub repository dispatch events.
+3. **Cloud Run Dispatcher**: The FastAPI service in `src/dispatcher` validates client configurations, refreshes signed URLs via Cloud Storage, records execution metadata to Supabase, and selects Cloud Run Jobs or GCP Batch for execution.
+4. **Execution Backends**: `bin/form_sender_job_entry.py` boots the Python runner container on Cloud Run Jobs (default) or GCP Batch (high-parallel or long-running workloads), invoking submodules within `src/form_sender`.
+5. **Processing Modules**: Python workers under `src/` coordinate browser automation, data extraction, and Supabase updates for each workload (form sending, form discovery, detail enrichment, analytics).
+6. **Result Reporting**: Status and metrics are written back to Supabase and surfaced to GAS/spreadsheets for operators.
 
-#### **GAS Modules** (Located in `gas/` directory)
-- **fetch-detail**: Company detail information retrieval system
-- **form-finder**: Contact form discovery system
-- **form-analyzer**: Form analysis and instruction generation system  
-- **form-sender**: Automated form submission control system
-- **stats**: Statistics collection and spreadsheet update system
+#### **GAS Modules** (`gas/`)
+- **fetch-detail**: Retrieves company enrichment data and dispatches GitHub Actions jobs with retry support.
+- **form-finder**: Crawls and identifies contact forms, queueing GitHub Actions workers per batch.
+- **form-analyzer**: Generates submission instructions via LLM pipelines and saves outputs to Supabase.
+- **form-sender**: Controls end-to-end submissions; prefers the Cloud Tasks → dispatcher route with GitHub Actions fallback/manual execution.
+- **field-mapping-improvement**: Schedules the field mapping improvement workflow via repository dispatch.
+- **stats**: Aggregates Supabase statistics and synchronizes management spreadsheets.
 
-Each GAS module follows the same pattern:
-- Time-based trigger functions for scheduled execution
-- Batch data retrieval from Supabase
-- GitHub Actions workflow triggering via repository dispatch
-- Error handling and status management
+Each module provides:
+- Time-based trigger functions for scheduled execution.
+- Supabase integrations to pull queued records and update statuses.
+- Dispatch clients (Cloud Tasks or GitHub repository dispatch) with resilient retry and logging.
+- Error handling utilities shared across GAS scripts.
 
-#### **GitHub Actions Integration**
-- GAS modules trigger GitHub Actions workflows using repository dispatch events
-- Python processing modules are located in `src/` directory
-- Workflows handle the heavy computational tasks that exceed GAS limitations
-- Results are persisted back to the database upon completion
+#### **Python Components** (`src/`)
+- **dispatcher/**: Cloud Run API mediating between Cloud Tasks and compute backends, handling verification, signed URLs, Supabase execution records, and Cloud Run/GCP Batch launches.
+- **form_sender/**: Runner implementation split into subpackages (`orchestrator`, `worker`, `browser`, `template`, `communication`, `database`, `security`, `validation`) powering automated submissions.
+- **form_finder/**: Crawling/orchestration modules for discovering forms and coordinating worker processes.
+- **form_analyzer/**: LLM-assisted analysis pipeline with prompt assets and Supabase writers.
+- **fetch_detail/**: Browser automation and data formatting utilities for enrichment jobs.
+- **shared/**: Supabase abstractions reusable by multiple workloads.
+- **utils/** & **config/**: Cross-cutting helpers for feature flags, environment loading, logging, and configuration management.
+
+`bin/form_sender_job_entry.py` serves as the container entry point for Cloud Run Jobs and GCP Batch executions.
+
+#### **Automation & Infrastructure**
+- **.github/workflows/**: Workflow definitions for each workload (form sender, finder, analyzer, fetch detail, field mapping improvement) and deployment tasks such as `deploy-gcp-batch.yml`.
+- **cloudbuild/** & **cloudbuild.yaml**: Google Cloud Build pipelines for building runner and dispatcher container images.
+- **Dockerfile** / **Dockerfile.dispatcher**: Container recipes for the Cloud Run Job runner and dispatcher.
+- **infrastructure/gcp/**: IaC assets for Cloud Batch environments and dispatcher deployment support.
+- **scripts/**: SQL migrations, functions, and manual operations aligned with Supabase schemas.
+- **config/**: JSON-based runtime configuration managed from GAS/Python modules.
+- **tests/** & **test_results/**: Automated test suites, fixtures, and stored artifacts for debugging.
+
+### **Repository Layout Overview**
+
+- `gas/` – GAS projects grouped by workload (fetch-detail, form-finder, form-analyzer, form-sender, field-mapping-improvement, stats).
+- `src/` – Python source tree including dispatcher, workload runners, shared libraries, and utilities.
+- `bin/` – Executable entrypoints (e.g., `form_sender_job_entry.py`) used by Cloud Run Jobs / Batch.
+- `.github/workflows/` – GitHub Actions definitions for batch processing and deployment.
+- `config/` – JSON configuration files for non-secret constants.
+- `docs/` – Design documents and operational guides per feature.
+- `cloudbuild/` & `cloudbuild.yaml` – Cloud Build specifications for container images.
+- `Dockerfile` / `Dockerfile.dispatcher` – Container build definitions.
+- `infrastructure/` – Infrastructure-as-code templates (currently GCP-focused).
+- `scripts/` – Database schema references and SQL utilities.
+- `tests/` & `test_results/` – Automated tests, fixtures, and captured execution results.
+- `artifacts/` – Generated support assets (e.g., PR templates or helper markdown).
 
 ## **Guidelines**
 
@@ -75,6 +107,7 @@ Each GAS module follows the same pattern:
 * **Security for Internal Systems:** As this is an internally operated system, it is not necessary to be overly sensitive to threats like SQL injection.
 * **Timestamps:** When recording time in the database, always use Japan Standard Time (JST).
 * **Never code secret keys on tracked files**
+* **Code File Editing:** When modifying code files, always use the Edit tool. Do not use Python scripts or programmatic approaches for code editing.
 
 #### **Python Module Organization**
 

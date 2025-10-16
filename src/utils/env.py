@@ -9,7 +9,7 @@ import os
 from functools import lru_cache
 from typing import Literal
 
-RuntimeEnv = Literal["cloud_run", "github_actions", "local"]
+RuntimeEnv = Literal["cloud_run", "github_actions", "gcp_batch", "local"]
 
 FORM_SENDER_ENV_VAR = "FORM_SENDER_ENV"
 FORM_SENDER_LOG_SANITIZE_VAR = "FORM_SENDER_LOG_SANITIZE"
@@ -27,7 +27,7 @@ def get_runtime_environment() -> RuntimeEnv:
     explicit_env = os.getenv(FORM_SENDER_ENV_VAR)
     if explicit_env:
         normalized = explicit_env.strip().lower()
-        if normalized in {"cloud_run", "github_actions", "local"}:
+        if normalized in {"cloud_run", "github_actions", "gcp_batch", "local"}:
             return normalized  # type: ignore[return-value]
         return "local"
 
@@ -44,8 +44,10 @@ def should_sanitize_logs() -> bool:
     if override is not None:
         return override.strip().lower() in {"1", "true", "yes"}
 
-    # GHA では常にサニタイズをオンにする
-    if get_runtime_environment() == "github_actions":
+    runtime = get_runtime_environment()
+
+    # GitHub Actions / GCP Batch では常にサニタイズをオンにする
+    if runtime in {"github_actions", "gcp_batch"}:
         return True
 
     return False
@@ -61,9 +63,14 @@ def is_github_actions() -> bool:
     return get_runtime_environment() == "github_actions"
 
 
+def is_gcp_batch() -> bool:
+    """GCP Batch 上で実行されているか判定。"""
+    return get_runtime_environment() == "gcp_batch"
+
+
 def is_ci_environment() -> bool:
     """CI（Cloud Run / GitHub Actions）上での実行か判定。"""
-    return get_runtime_environment() in {"cloud_run", "github_actions"}
+    return get_runtime_environment() in {"cloud_run", "github_actions", "gcp_batch"}
 
 
 def reset_cache() -> None:

@@ -10,6 +10,7 @@ create table if not exists public.job_executions (
   shards integer not null default 1,
   workers_per_workflow integer not null default 4,
   status text not null check (status in ('queued','running','succeeded','failed','cancelled')) default 'running',
+  execution_mode text not null default 'cloud_run',
   started_at timestamp with time zone not null default now(),
   ended_at timestamp with time zone null,
   last_error text null,

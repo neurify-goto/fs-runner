@@ -22,12 +22,13 @@
         },
         "FORM_SENDER_ENV": {
             "required": false,
-            "allowed_values": [
-                "cloud_run",
-                "github_actions",
-                "local"
-            ],
-            "error_msg": "FORM_SENDER_ENV must be cloud_run, github_actions, or local"
+    "allowed_values": [
+      "cloud_run",
+      "github_actions",
+      "gcp_batch",
+      "local"
+    ],
+    "error_msg": "FORM_SENDER_ENV must be cloud_run, github_actions, gcp_batch, or local"
         },
         "FORM_SENDER_LOG_SANITIZE": {
             "required": false,

@@ -1,0 +1,41 @@
+# Cloud Build configuration for Form Sender runner images
+# 詳細手順は docs/form_sender_gcp_batch_setup_guide.md の 5.2.3.2 / 6.1 節を参照
+
+substitutions:
+  _IMAGE_NAME: "asia-northeast1-docker.pkg.dev/${PROJECT_ID}/form-sender-runner/playwright"
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "build",
+        "-t",
+        "${_IMAGE_NAME}:${SHORT_SHA}",
+        "."
+      ]
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "push",
+        "${_IMAGE_NAME}:${SHORT_SHA}"
+      ]
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "tag",
+        "${_IMAGE_NAME}:${SHORT_SHA}",
+        "${_IMAGE_NAME}:latest"
+      ]
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "push",
+        "${_IMAGE_NAME}:latest"
+      ]
+
+images:
+  - "${_IMAGE_NAME}:${SHORT_SHA}"
+  - "${_IMAGE_NAME}:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY

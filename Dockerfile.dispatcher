@@ -1,0 +1,23 @@
+# Cloud Run dispatcher container image
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    TZ=Asia/Tokyo
+
+WORKDIR /app
+
+# Install system dependencies required by some Python packages (FastAPI/google clients)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir fastapi uvicorn[standard] google-cloud-tasks google-cloud-storage google-cloud-secret-manager google-cloud-run \
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY src/ src/
+
+CMD ["uvicorn", "dispatcher.app:app", "--host", "0.0.0.0", "--port", "8080"]
