@@ -269,10 +269,11 @@ Cloud Batch を安定稼働させるために必要な周辺リソース（Cloud
 1. サービスアカウントを作成し、必要なロールが付与されているか確認（4.2.0 節参照）。
 2. client_config を保存する Cloud Storage バケットを作成し、ライフサイクルを設定。
 3. Artifact Registry に Runner／dispatcher 用のコンテナイメージを登録。
-4. Cloud Batch ジョブテンプレートを作成し、Spot 優先・環境変数・リソースを構成。
-5. Cloud Run に dispatcher をデプロイし、Supabase／Batch 関連の環境変数を投入。
-6. Cloud Tasks キューを作成し、dispatcher への OIDC 認証付き呼び出しを設定。
-7. Secret Manager と GAS Script Properties を最新の値に更新し、疎通テストを実施。
+4. Cloud Batch 用の専用 VPC・プライベートサブネット・Cloud NAT を構成し、ワーカーから外部 IP を排除。
+5. Cloud Batch ジョブテンプレートを作成し、Spot 優先・環境変数・リソースを構成。
+6. Cloud Run に dispatcher をデプロイし、Supabase／Batch 関連の環境変数を投入。
+7. Cloud Tasks キューを作成し、dispatcher への OIDC 認証付き呼び出しを設定。
+8. Secret Manager と GAS Script Properties を最新の値に更新し、疎通テストを実施。
 
 ### 5.2 コンソール手順
 
@@ -294,7 +295,43 @@ JSON
    ```
    権限は 4.2.0 節のコマンドで付与済みであることを確認し、必要に応じて GAS 既定 SA（`<project-number>@appspot.gserviceaccount.com`）にも `roles/storage.objectAdmin` を付与してください。バケット名は Script Properties `FORM_SENDER_GCS_BUCKET` や Terraform の `gcs_bucket` でも使用します。
 
-3. **Artifact Registry（コンテナリポジトリ）**\
+3. **専用 VPC / サブネット / Cloud NAT**\
+   Cloud Batch ワーカーはこのネットワーク内でプライベート IP のみを持ち、Cloud NAT を経由して外部と通信します。Cloud Console 手順の例を以下に示します。\
+   1. **VPC ネットワーク** → **VPC ネットワークを作成** で `form-sender-batch-vpc` を作成（サブネット作成モードは *カスタム*）。\
+   2. 作成した VPC の **サブネットワーク** から `form-sender-batch-subnet` を追加し、リージョンは `asia-northeast1`、CIDR は `10.160.0.0/20` など十分なアドレス範囲を指定して **プライベート Google アクセス** を有効化。\
+   3. **ハイブリッド接続** → **Cloud Router** で `form-sender-batch-router` を同リージョンに作成し、上記 VPC を紐付け。\
+   4. Cloud Router 詳細画面 → **NAT** → **別の NAT を追加** から `form-sender-batch-nat` を作成し、対象サブネットに `form-sender-batch-subnet` を指定。`最小ポート数/VM` は想定同時実行数によって 512〜2048 の範囲で設定し、`エンドポイント独立マッピング` は有効化（Playwright の外部サイトアクセス安定化に寄与）。ログは `エラーのみ` 推奨。\
+
+   CLI で同等の構成を行う場合は以下を参考にしてください。\
+   ```bash
+   gcloud compute networks create form-sender-batch-vpc \
+     --project="$PROJECT_ID" \
+     --subnet-mode=custom
+
+   gcloud compute networks subnets create form-sender-batch-subnet \
+     --project="$PROJECT_ID" \
+     --region="$REGION" \
+     --network=form-sender-batch-vpc \
+     --range=10.160.0.0/20 \
+     --enable-private-ip-google-access
+
+   gcloud compute routers create form-sender-batch-router \
+     --project="$PROJECT_ID" \
+     --region="$REGION" \
+     --network=form-sender-batch-vpc
+
+   gcloud compute routers nats create form-sender-batch-nat \
+     --project="$PROJECT_ID" \
+     --region="$REGION" \
+     --router=form-sender-batch-router \
+     --nat-all-subnet-ip-ranges \
+     --min-ports-per-vm=1024 \
+     --enable-endpoint-independent-mapping
+   ```
+
+   Cloud NAT の統計（**ネットワーキング** → **Cloud NAT**）でセッション数やポート使用率を定期確認し、必要に応じて `min-ports-per-vm` や NAT IP の追加を検討してください。Terraform を利用する場合は `batch_network_name` / `batch_subnetwork_name` / `batch_nat_name` などの変数を用いると同等の構成が適用されます。
+
+4. **Artifact Registry（コンテナリポジトリ）**\
    1. Cloud Console → **Artifact Registry** → **リポジトリを作成** を開き、次の値で作成します。\
       - フォーマット: *Docker*\
       - ロケーションタイプ: *リージョン*\
@@ -333,25 +370,25 @@ JSON
       - **コンテナ イメージ**: `asia-northeast1-docker.pkg.dev/<project>/form-sender-runner/playwright:latest`。必要に応じて `Entry point` を `/bin/sh`、`CMD` を `-c "echo Template"` のような軽量コマンドにしておくと初回実行時に成功しやすくなります。\
       - **環境変数**: 6.3 節の一覧に従って `FORM_SENDER_BATCH_*` 系、`FORM_SENDER_DISPATCHER_BASE_URL` などを入力します。Secret Manager の値は「シークレット」タブから `projects/<project>/secrets/.../versions/latest` を選択します。\
       - **追加ストレージ（任意）**: 入出力データを共有する必要がある場合のみ「Additional configurations → Storage volumes → Add new volume」から Cloud Storage バケットをマウントします。バケット名とマウントパス（例: `/mnt/disks/client-config`）を指定するとタスク内でローカルフォルダとして利用できます。不要であれば設定しなくて構いません。citeturn0search0\
-      - **リソース仕様**: Provisioning model は Spot（フォールバックあり）を推奨。コンソールではプリセットのマシンタイプのみ選択できるため、`n2d-standard-4` など最終的に必要となる vCPU/メモリを満たすタイプを選び、`Resources per task` の vCPU（`cpuMilli`）とメモリ（`memoryMiB`）がマシンタイプの上限を超えないようにしてください。`n2d-custom-4-10240` のようなカスタム形状を利用したい場合は、`gcloud batch jobs submit --config job.json` 等で `allocationPolicy.instances[].policy.machineType` にカスタム文字列を指定する必要があります。詳細はコンソールドキュメントの「Resource specifications」節を参照。citeturn0search0\
+      - **リソース仕様**: Provisioning model は Spot（フォールバックあり）を推奨。テンプレートでは既定マシンタイプとして `e2-standard-2`（2 vCPU / 8 GiB）を選択し、`Resources per task` の vCPU（`cpuMilli`）とメモリ（`memoryMiB`）をそれ以下に合わせておきます。より大きなリソースが必要な案件では targeting / Script Properties から `batch_machine_type` を上書きするか、CLI/API で `n2d-custom-<vCPU>-<memoryMB>` を指定してください。citeturn0search0\
         ```json
         {
           "taskGroups": [{
             "taskSpec": {
               "runnables": [{"script": {"text": "#!/bin/bash\necho template"}}],
-              "computeResource": {"cpuMilli": 4000, "memoryMib": 10240}
+              "computeResource": {"cpuMilli": 2000, "memoryMib": 8192}
             },
             "taskCount": 1
           }],
           "allocationPolicy": {
             "instances": [{
-              "policy": {"machineType": "n2d-custom-4-10240", "provisioningModel": "SPOT"}
+              "policy": {"machineType": "e2-standard-2", "provisioningModel": "SPOT"}
             }]
           }
         }
         ```
-        > *参考*: 上記 JSON を `job.json` として保存し、`gcloud batch jobs submit form-sender-template --location=asia-northeast1 --config=job.json --no-run` のように登録するとカスタム形状を含むジョブを作成できます（`--no-run` で即時実行を抑制）。
-      - **コスト注意**: `Resources per task` に 10 GB など小さい値を入れても、課金は選択したマシンタイプ（例: `n2d-standard-4` は 16 GB メモリ搭載）に対して発生します。メモリを節約して課金を抑えたい場合は、CLI/API でカスタム形状を指定して実際の必要量（例: 4 vCPU / 10 GiB）へ合わせてください。カスタム N2D のオンデマンド料金は vCPU が $0.0288771/時間、メモリが $0.0038703/ギビバイト時間（Iowa リージョンの「Default」列）で、4 vCPU・10 GiB と 4 vCPU・16 GiB を 176 時間稼働させた場合の差額は約 $4.09 です。citeturn0search0
+        > *参考*: 上記 JSON を `job.json` として保存し、`gcloud beta batch jobs submit form-sender-template --location=asia-northeast1 --config=job.json` を実行するとテンプレート用のジョブを登録できます。必要に応じて `allocationPolicy.instances[].policy.machineType` を `n2d-custom-*` へ変更してください。
+      - **コスト注意**: Cloud Batch の課金は選択したマシンタイプに対して発生します。テンプレートでは `e2-standard-2` を基準にし、より大きな案件のみ個別に上書きする運用とするとコストを抑えやすくなります。citeturn0search0
       - **ログ**: Cloud Logging 送信を有効にしたままで構いません。\
       作成ボタンを押すとジョブが即時実行されます。数十秒で `SUCCEEDED` になったことを確認し、このジョブは削除せず「テンプレート」として保持します（以後 dispatcher は `get_job` で定義をコピーします）。
    3. ジョブ作成後、Cloud Shell もしくはローカルで次のコマンドを実行し、テンプレート（例: `form-sender`）として利用するジョブ名とタスクグループ名を取得します。実行前に `gcloud config set project formsalespaid` などで対象プロジェクトを切り替えておいてください。citeturn1search1\
@@ -476,7 +513,7 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 
    > 🕘 `FORM_SENDER_MAX_SESSION_HOURS_DEFAULT` と `FORM_SENDER_DEFAULT_SEND_END_TIME` は targeting シートの `session_max_hours` / `send_end_time` が空欄のときに参照され、両方が未設定の場合のみ GAS ハードコード値（8 時間 / 18:00 JST）が適用されます。長時間運用が必要な案件は targeting シートで直接指定するのが最優先です。
    > ✅ デフォルトでは **e2-standard-2 を 2 台同時起動** する構成です。Spot 在庫の確保率とコストのバランスが良く、ほとんどの targeting で追加設定なしに動作します。
-   > ⚠️ `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` / `batch_machine_type` を `e2-standard-8` など他の標準形状に設定した場合、GAS はその形状の vCPU / メモリ上限を基準に判定し、リソース要求が上限を超えたときのみ `n2d-custom-*` に自動フォールバックします。標準形状で必要リソースを満たせる間はそのまま維持されるため、意図したメモリ確保が崩れません。
+   > ⚠️ `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` / `batch_machine_type` を `e2-standard-4` などの標準形状に設定した場合でも、GAS はその形状の vCPU / メモリ上限を基準に判定し、リソース要求が上限を超えたときのみ `n2d-custom-*`（`n2` 系の指定なら `n2-custom-*`）に自動フォールバックします。標準形状で必要リソースを満たせる間はそのまま維持されるため、意図したメモリ確保が崩れません。
    > ⚠️ メモリ不足が発生した案件では `batch_machine_type` / Script Properties をカスタム形状（`n2d-custom-*` など）へ切り替えるか、`batch_workers_per_workflow` / `batch_instance_count` を調整してください。フォールバックにより課金が増える点にも留意が必要です。
    > 💡 `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` はコスト最適化のため既定値を `false` としています。オンデマンドへの自動切り替えが必要な案件のみ targeting シートの `batch_allow_on_demand_fallback` を `TRUE` に設定してください（チェックボックスの場合は `TRUE`、手入力の場合は大文字小文字不問）。
    > `SERVICE_ACCOUNT_JSON` を取得する手順: Cloud Console → **IAM** → GAS オーケストレーター用サービスアカウント（例: `form-sender-gas@<project>.iam.gserviceaccount.com`）→ **鍵** → **鍵を追加** → **新しい鍵を作成** → JSON を選択 → ダウンロードしたファイルの内容をそのまま Script Property に貼り付けます。鍵は機密情報のため、ダウンロード後は安全な場所（社内パスワードマネージャなど）に保管し、不要なローカルファイルは削除してください。
@@ -484,7 +521,7 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 3. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` の設定目安:
    - デフォルトの `e2-standard-2`（2 vCPU / 8 GiB）で問題が無い場合は **空文字のまま** にしてください。
    - targeting 側で `batch_machine_type` を指定する予定が無く、全案件でカスタム形状を固定利用したい場合だけ設定します。
-   - 形式は `n2d-custom-<vCPU>-<memoryMB>`（例: `n2d-custom-16-65536`）。`memoryMB` は MiB 単位です。
+   - 形式は `n2d-custom-<vCPU>-<memoryMB>`（例: `n2d-custom-8-32768`）。`memoryMB` は MiB 単位です。
    - 特定案件のみメモリや vCPU を増強したい場合は、targeting シートの `batch_machine_type` 列を優先的に利用してください。
 
 
@@ -512,7 +549,7 @@ Infrastructure as Code で管理したい場合は、`infrastructure/gcp/batch` 
 | 実行モード (`useGcpBatch` / `useServerless`) | 1. targeting列 → 2. Script Properties (`USE_GCP_BATCH`, `USE_SERVERLESS_FORM_SENDER`) → 3. GitHub Actions | `TRUE` / `FALSE` だけでなく `1` / `0` / `yes` も受け付けます（大文字小文字不問）。|
 | Cloud Batch タスク並列数 (`batch_max_parallelism`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` → 3. GAS 推奨値 | 1 つのジョブで同時に実行する Cloud Batch タスク数の上限。未入力時は Script Property の既定 (デフォルト 100)。 |
 | Spot 設定 (`batch_prefer_spot`, `batch_allow_on_demand_fallback`) | 1. targeting列 → 2. Script Properties | `prefer_spot=TRUE` で Spot 優先、fallback を `FALSE` にするとスポット枯渇時に失敗します。 |
-| マシンタイプ (`batch_machine_type`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 3. `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | 既定値は `e2-standard-2`。標準形状を指定した場合はその形状の vCPU / メモリ上限まで利用し、超過時のみ `n2d-custom-<workers>-<memory_mb>` に自動フォールバックします。 |
+| マシンタイプ (`batch_machine_type`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → 3. `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | 既定値は `e2-standard-2`。標準形状を指定した場合はその形状の vCPU / メモリ上限まで利用し、超過時のみ `n2d-custom-<workers>-<memory_mb>`（`n2` 系指定時は `n2-custom-*`）に自動フォールバックします。 |
 | Batch インスタンス数 (`batch_instance_count`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE` → 3. `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT` (既定 2) | 起動する Spot VM 数の下限。`concurrent_workflow` が小さくてもここで指定した台数を確保します。|
 | Batch ワーカー数 (`batch_workers_per_workflow`) | 1. targeting列 → 2. `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE` → 3. `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT` (既定 2) | 1 インスタンスあたりの Python ワーカー数。1〜16 の範囲で調整してください。 |
 | 署名付き URL TTL (`batch_signed_url_ttl_hours`) | 1. targeting列 → 2. `FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH` (既定 48h) | 1〜168 の整数を指定。 |

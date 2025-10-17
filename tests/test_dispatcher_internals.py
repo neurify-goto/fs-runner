@@ -31,6 +31,10 @@ import dispatcher.gcp as gcp_module
 from dispatcher.supabase_client import JobExecutionRepository
 from postgrest.exceptions import APIError
 
+
+DUMMY_BATCH_NETWORK = "projects/proj/global/networks/form-sender-batch"
+DUMMY_BATCH_SUBNETWORK = "projects/proj/regions/asia-northeast1/subnetworks/form-sender-batch"
+
 def _task_payload_dict(
     issue_time: datetime,
     *,
@@ -275,6 +279,8 @@ def test_batch_runner_build_task_spec_injects_environment():
         batch_max_attempts_default=1,
         batch_supabase_url_secret="projects/proj/secrets/url/versions/latest",
         batch_supabase_service_role_secret="projects/proj/secrets/key/versions/latest",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
 
     runner = CloudBatchJobRunner.__new__(CloudBatchJobRunner)
@@ -624,6 +630,8 @@ def test_handle_form_sender_task_uses_latest_signed_url_when_available(monkeypat
         batch_task_group="group0",
         batch_service_account_email="svc@example.iam.gserviceaccount.com",
         batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
 
     stored_url = "https://example.com/latest-signed"
@@ -724,6 +732,8 @@ def test_handle_form_sender_task_respects_parallelism_override(monkeypatch):
         batch_task_group="group0",
         batch_service_account_email="svc@example.iam.gserviceaccount.com",
         batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
 
     parallelism_updates: list[tuple[str, int]] = []
@@ -801,6 +811,8 @@ def test_handle_form_sender_task_respects_batch_max_parallelism(monkeypatch):
         batch_task_group="group0",
         batch_service_account_email="svc@example.iam.gserviceaccount.com",
         batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
 
     parallelism_updates: list[tuple[str, int]] = []
@@ -1094,7 +1106,9 @@ def test_batch_runner_enforces_minimum_machine_type(caplog):
         batch_container_image="asia-northeast1-docker.pkg.dev/proj/repo/image:latest",
         batch_supabase_url_secret="projects/proj/secrets/url",
         batch_supabase_service_role_secret="projects/proj/secrets/key",
-        batch_machine_type_default="n2d-custom-4-10240",
+        batch_machine_type_default="e2-standard-2",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
     runner = CloudBatchJobRunner(settings)
 
@@ -1105,7 +1119,7 @@ def test_batch_runner_enforces_minimum_machine_type(caplog):
     payload["execution"]["workers_per_workflow"] = 4
     payload["batch"] = {
         "enabled": True,
-        "machine_type": "n2d-custom-2-4096",
+        "machine_type": "e2-custom-2-4096",
     }
     task = FormSenderTask.parse_obj(payload)
 
@@ -1119,8 +1133,51 @@ def test_batch_runner_enforces_minimum_machine_type(caplog):
     assert allow_on_demand is True
     assert metadata.get("memory_warning") is True
     assert metadata.get("computed_memory_mb") == 10240
-    assert metadata.get("requested_machine_type") == "n2d-custom-2-4096"
+    assert metadata.get("requested_machine_type") == "e2-custom-2-4096"
     assert metadata.get("resolved_machine_type") == machine_type
+    assert metadata.get("memory_buffer_mb") == settings.batch_memory_buffer_mb_default
+    assert "insufficient" in caplog.text
+
+
+def test_batch_runner_falls_back_to_n2d_when_e2_standard_insufficient(caplog):
+    settings = DispatcherSettings(
+        project_id="proj",
+        location="asia-northeast1",
+        job_name="form-sender",
+        supabase_url="https://example.supabase.co",
+        supabase_service_role_key="supabase-key",
+        dispatcher_base_url="https://dispatcher.example.com",
+        dispatcher_audience="https://dispatcher.example.com",
+        batch_project_id="proj",
+        batch_location="asia-northeast1",
+        batch_job_template="projects/proj/locations/asia-northeast1/jobs/template",
+        batch_task_group="form-sender-workers",
+        batch_service_account_email="batch-sa@proj.iam.gserviceaccount.com",
+        batch_container_image="asia-northeast1-docker.pkg.dev/proj/repo/image:latest",
+        batch_machine_type_default="e2-standard-2",
+        batch_supabase_url_secret="projects/proj/secrets/url",
+        batch_supabase_service_role_secret="projects/proj/secrets/key",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
+    )
+    runner = CloudBatchJobRunner(settings)
+
+    payload = _task_payload_dict(datetime.now(timezone.utc))
+    payload["mode"] = "batch"
+    task = FormSenderTask.parse_obj(payload)
+
+    caplog.set_level(logging.WARNING, logger="dispatcher.gcp")
+    machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand, metadata = runner._calculate_resources(task)
+
+    assert machine_type == "n2d-custom-4-10240"
+    assert cpu_milli == 4000
+    assert memory_mb == 10240
+    assert prefer_spot is True
+    assert allow_on_demand is True
+    assert metadata.get("memory_warning") is True
+    assert metadata.get("computed_memory_mb") == 10240
+    assert metadata.get("resolved_machine_type") == machine_type
+    assert metadata.get("requested_machine_type") is None
     assert metadata.get("memory_buffer_mb") == settings.batch_memory_buffer_mb_default
     assert "insufficient" in caplog.text
 
@@ -1153,6 +1210,8 @@ def test_handle_form_sender_task_batch(monkeypatch):
         batch_task_group="group0",
         batch_service_account_email="svc@example.iam.gserviceaccount.com",
         batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
 
     inserted: list[str] = []
@@ -1254,6 +1313,8 @@ def test_batch_runner_continues_when_job_template_missing(monkeypatch, caplog):
         batch_container_image="asia/artifact/form-sender:latest",
         batch_supabase_url_secret="projects/proj/secrets/url",
         batch_supabase_service_role_secret="projects/proj/secrets/key",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
     runner = CloudBatchJobRunner(settings)
 
@@ -1320,6 +1381,8 @@ def test_batch_runner_retries_with_on_demand_when_spot_unavailable(monkeypatch, 
         batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
         batch_supabase_url_secret="projects/proj/secrets/url",
         batch_supabase_service_role_secret="projects/proj/secrets/key",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
     runner = CloudBatchJobRunner(settings)
 
@@ -1369,6 +1432,8 @@ def test_retry_batch_execution_submits_on_demand(monkeypatch):
         batch_task_group="group0",
         batch_service_account_email="svc@example.iam.gserviceaccount.com",
         batch_container_image="asia-docker.pkg.dev/project/form-sender:latest",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
 
     service = object.__new__(DispatcherService)
@@ -1450,6 +1515,8 @@ def test_calculate_resources_warns_when_memory_below_recommendation(caplog):
         batch_supabase_url_secret="projects/proj/secrets/url",
         batch_supabase_service_role_secret="projects/proj/secrets/key",
         batch_memory_per_worker_mb_default=1024,
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
     runner = CloudBatchJobRunner(settings)
 
@@ -1491,6 +1558,8 @@ def test_calculate_resources_honours_payload_memory_buffer():
         batch_memory_buffer_mb_default=1024,
         batch_supabase_url_secret="projects/proj/secrets/url",
         batch_supabase_service_role_secret="projects/proj/secrets/key",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
     runner = CloudBatchJobRunner(settings)
 
@@ -1508,7 +1577,7 @@ def test_calculate_resources_honours_payload_memory_buffer():
 
     machine_type, cpu_milli, memory_mb, prefer_spot, allow_on_demand, metadata = runner._calculate_resources(task)
 
-    assert machine_type == "n2d-custom-2-8192"
+    assert machine_type == "e2-custom-2-8192"
     assert cpu_milli == 2000
     assert memory_mb == 8192
     assert metadata["memory_buffer_mb"] == 4096
@@ -1533,6 +1602,8 @@ def test_apply_secret_variables_defaults_to_plain_strings():
         batch_container_image="asia-northeast1-docker.pkg.dev/proj/repo/image:latest",
         batch_supabase_url_secret="projects/proj/secrets/url",
         batch_supabase_service_role_secret="projects/proj/secrets/key",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
     runner = CloudBatchJobRunner(settings)
 
@@ -1546,7 +1617,12 @@ def test_apply_secret_variables_defaults_to_plain_strings():
 
 def test_allocation_policy_uses_single_instance_entry():
     runner = object.__new__(CloudBatchJobRunner)
-    runner._settings = SimpleNamespace(batch_service_account_email=None)
+    runner._settings = SimpleNamespace(
+        batch_service_account_email=None,
+        batch_network=None,
+        batch_subnetwork=None,
+        batch_no_external_ip=True,
+    )
 
     policy = CloudBatchJobRunner._build_allocation_policy(
         runner,

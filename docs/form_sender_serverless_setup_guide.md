@@ -475,7 +475,7 @@ Cloud Batch 実行に関する設定は下記 2 ファイルに分散してい�
 | `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` | targeting で未指定時の Batch `parallelism` 上限（既定 100） |
 | `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` | Spot 優先フラグの既定値。`true` 推奨 |
 | `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | Spot 枯渇時にオンデマンドへフォールバックするか |
-| `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | Batch 用カスタムマシンタイプ初期値（例: `n2d-custom-4-10240`） |
+| `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | Batch 用マシンタイプ初期値（例: `e2-standard-2`。不足時は dispatcher が `n2d-custom-*` / `n2-custom-*` へフォールバック） |
 | `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` | targeting 列よりも優先して強制するマシンタイプ。全体を一時的に固定したい場合に利用 |
 | `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` / `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | ワーカーあたりの CPU / メモリ初期値（既定 1 vCPU / 2048 MB） |
 | `FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT` | 共有バッファのメモリ（既定 2048 MB） |

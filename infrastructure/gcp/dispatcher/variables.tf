@@ -88,6 +88,22 @@ variable "batch_service_account_email" {
   description = "Service account used by Cloud Batch VMs"
 }
 
+variable "batch_network" {
+  type        = string
+  description = "VPC network self link used by Cloud Batch workers"
+}
+
+variable "batch_subnetwork" {
+  type        = string
+  description = "Subnetwork self link used by Cloud Batch workers"
+}
+
+variable "batch_no_external_ip" {
+  type        = bool
+  description = "Whether Batch workers should omit external IP addresses"
+  default     = true
+}
+
 variable "batch_container_image" {
   type        = string
   description = "Default Batch runner container image"
@@ -102,7 +118,7 @@ variable "batch_container_entrypoint" {
 variable "batch_machine_type_default" {
   type        = string
   description = "Default Batch machine type override"
-  default     = "n2d-custom-4-10240"
+  default     = "e2-standard-2"
 }
 
 variable "batch_vcpu_per_worker_default" {

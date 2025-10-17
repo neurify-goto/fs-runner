@@ -10,6 +10,7 @@ GAS → Cloud Tasks → Cloud Run dispatcher → Cloud Batch（Spot VM 優先）
 - **Cloud Tasks**: `form-sender-dispatcher` キューにタスクを積み、リトライとスケジュールを担保。
 - **Cloud Run dispatcher**: タスクを受け取り、client_config を GCS に保存して署名付き URL を生成。Spot 優先で Cloud Batch ジョブを起動。
 - **Cloud Batch (Playwright Runner)**: Supabase から設定を取得し、Spot VM 上でワーカーを並列実行。必要に応じてオンデマンドへフォールバック。
+- **専用 VPC + Cloud NAT**: Batch ワーカーは `form-sender-batch-vpc` 内のプライベートサブネットで起動し、外部 IP を持たず Cloud NAT 経由でインターネットへ出る。`In-use regional external IPv4 addresses` のクォータ消費を抑えつつ、Outbound 通信要件を満たす。
 - **Supabase**: targeting / client マスタと、`job_executions` / `job_execution_attempts` による実行ログを保持。
 
 データフロー（Batch モード）:
@@ -49,8 +50,11 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 | `FORM_SENDER_BATCH_JOB_TEMPLATE` | Cloud Batch テンプレート | `projects/formsalespaid/locations/asia-northeast1/jobs/form-sender` | `gcloud batch jobs describe` の出力を転記 |
 | `FORM_SENDER_BATCH_TASK_GROUP` | タスクグループ名 | `form-sender-task-group` | 同上 |
 | `FORM_SENDER_BATCH_SERVICE_ACCOUNT` | Batch 実行用 SA | `form-sender-batch@formsalespaid.iam.gserviceaccount.com` | テンプレートの `serviceAccountEmail` と一致させる |
+| `FORM_SENDER_BATCH_NETWORK` | Batch 用 VPC | `projects/formsalespaid/global/networks/form-sender-batch-vpc` | Terraform の `batch_network_name` 出力を設定 |
+| `FORM_SENDER_BATCH_SUBNETWORK` | Batch 用サブネット | `projects/formsalespaid/regions/asia-northeast1/subnetworks/form-sender-batch-subnet` | `privateIpGoogleAccess=true` のサブネットを指定 |
+| `FORM_SENDER_BATCH_NO_EXTERNAL_IP` | 外部 IP 割り当て抑止 | `true` | Cloud NAT 越しの通信を強制するフラグ |
 | `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT` | targeting 未指定時の並列上限 | `100` | `batch_max_parallelism` 列のデフォルト |
-| `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` / `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` | Batch マシンタイプ既定 / 強制上書き | `e2-standard-2` / 任意 | デフォルトはコスト効率が高い `e2-standard-2`。標準形状を指定した場合はその vCPU / メモリ枠を上限として利用し、超過したときのみ GAS が `n2d-custom-*` へフォールバックします。案件ごとに変えたい場合は targeting 列を推奨。 |
+| `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` / `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` | Batch マシンタイプ既定 / 強制上書き | `e2-standard-2` / 任意 | デフォルトはコスト効率が高い `e2-standard-2`。標準形状を指定した場合はその vCPU / メモリ枠を上限として利用し、超過したときのみ GAS / dispatcher が `n2d-custom-*`（または `n2-custom-*`）へフォールバックします。案件ごとに変えたい場合は targeting 列を推奨。 |
 | `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT` / `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE` | 起動インスタンス数の既定 / 上書き | `2` / 任意 | Spot VM を複数確保したい場合に利用。`concurrent_workflow` が少なくてもこの台数を最低限確保します。 |
 | `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT` / `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE` | 1 インスタンスあたりのワーカー数 | `2` / 任意 | Python ワーカー上限は 16。負荷やメモリに応じて調整。 |
 | `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` / `FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT` | ワーカーリソース既定 | `1` / `2048` | dispatcher がマシンタイプを自動算出する際に使用 |
@@ -170,7 +174,7 @@ GAS が Batch 経路へフォールバックする条件を満たすには、以
 | `batch_max_parallelism` | 同時実行タスクの上限 | targeting列 → Script Property `FORM_SENDER_BATCH_MAX_PARALLELISM_DEFAULT`（既定 100） | `concurrent_workflow` と合わせて並列度を調整。 |
 | `batch_prefer_spot` | Spot VM を優先するか | targeting列 → Script Property `FORM_SENDER_BATCH_PREFER_SPOT_DEFAULT` | `TRUE` で Spot 優先、`FALSE` でオンデマンドのみ。 |
 | `batch_allow_on_demand_fallback` | Spot 枯渇時にオンデマンドへ切り替えるか | targeting列 → Script Property `FORM_SENDER_BATCH_ALLOW_ON_DEMAND_DEFAULT` | 省略時は `FALSE`。必要な案件のみ `TRUE` にしてフォールバックを許可。 |
-| `batch_machine_type` | 利用したいマシンタイプ | targeting列 → Script Property `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | 既定値は `e2-standard-2`。標準形状を指定した場合はその形状の上限を使い切るまでは維持され、超過時のみ自動で `n2d-custom-*` にフォールバックします。必要な案件のみ上書き。 |
+| `batch_machine_type` | 利用したいマシンタイプ | targeting列 → Script Property `FORM_SENDER_BATCH_MACHINE_TYPE_OVERRIDE` → `FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT` | 既定値は `e2-standard-2`。標準形状を指定した場合はその形状の上限を使い切るまでは維持され、超過時のみ自動で `n2d-custom-*`（または入力が `n2-*` 系なら `n2-custom-*`）にフォールバックします。必要な案件のみ上書き。 |
 | `batch_instance_count` | 起動する Spot インスタンス数 | targeting列 → Script Property `FORM_SENDER_BATCH_INSTANCE_COUNT_OVERRIDE` → `FORM_SENDER_BATCH_INSTANCE_COUNT_DEFAULT` (既定 2) | `concurrent_workflow` より小さくてもこの台数は確保。1 台だけにしたい場合は `1` を指定。 |
 | `batch_workers_per_workflow` | 1 インスタンスあたりの Python ワーカー数 | targeting列 → Script Property `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_OVERRIDE` → `FORM_SENDER_BATCH_WORKERS_PER_WORKFLOW_DEFAULT` (既定 2) | 1〜16 の範囲で設定。ワーカーを増やす場合はメモリも確認。 |
 | `batch_vcpu_per_worker` | 1 ワーカーあたりの vCPU | targeting列 → Script Property `FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT` | 1 以上の整数。 |

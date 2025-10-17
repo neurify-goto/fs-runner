@@ -11,6 +11,10 @@ if str(SRC_DIR) not in sys.path:
 from dispatcher.config import DispatcherSettings
 
 
+DUMMY_BATCH_NETWORK = "projects/proj/global/networks/form-sender-batch"
+DUMMY_BATCH_SUBNETWORK = "projects/proj/regions/asia-northeast1/subnetworks/form-sender-batch"
+
+
 def _base_settings(**overrides):
     params = dict(
         project_id="proj",
@@ -20,6 +24,8 @@ def _base_settings(**overrides):
         supabase_service_role_key="supabase-key",
         dispatcher_base_url="https://dispatcher.example.com",
         dispatcher_audience="https://dispatcher.example.com",
+        batch_network=DUMMY_BATCH_NETWORK,
+        batch_subnetwork=DUMMY_BATCH_SUBNETWORK,
     )
     params.update(overrides)
     return DispatcherSettings(**params)
@@ -95,3 +101,24 @@ def test_require_batch_configuration_requires_dispatcher_base_url():
         settings.require_batch_configuration()
 
     assert "FORM_SENDER_DISPATCHER_BASE_URL" in str(excinfo.value)
+
+
+def test_require_batch_configuration_requires_network():
+    settings = _base_settings(
+        batch_project_id="batch-proj",
+        batch_location="asia-northeast1",
+        batch_job_template="template",
+        batch_task_group="group",
+        batch_service_account_email="svc@batch-proj.iam.gserviceaccount.com",
+        batch_container_image="asia-docker.pkg.dev/proj/repo/image:latest",
+        batch_supabase_url_secret="form_sender_supabase_url",
+        batch_network=None,
+        batch_subnetwork=None,
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        settings.require_batch_configuration()
+
+    message = str(excinfo.value)
+    assert "FORM_SENDER_BATCH_NETWORK" in message
+    assert "FORM_SENDER_BATCH_SUBNETWORK" in message

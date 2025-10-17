@@ -27,3 +27,13 @@ output "batch_task_group_name" {
   value       = google_batch_job.form_sender_template.task_groups[0].name
   description = "Primary task group name defined in the Batch job template"
 }
+
+output "batch_network" {
+  value       = google_compute_network.batch.id
+  description = "Self link of the VPC network used by Cloud Batch workers"
+}
+
+output "batch_subnetwork" {
+  value       = google_compute_subnetwork.batch.id
+  description = "Self link of the subnetwork used by Cloud Batch workers"
+}

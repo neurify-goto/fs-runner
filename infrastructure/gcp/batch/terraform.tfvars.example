@@ -8,6 +8,14 @@ artifact_repo                       = "form-sender-runner"
 batch_container_image               = "asia-northeast1-docker.pkg.dev/your-project-id/form-sender-runner/playwright:latest"
 dispatcher_base_url                 = "https://form-sender-dispatcher-xxxx.a.run.app"
 dispatcher_audience                 = "https://form-sender-dispatcher-xxxx.a.run.app"
+batch_network_name                  = "form-sender-batch-vpc"
+batch_subnetwork_name               = "form-sender-batch-subnet"
+batch_subnetwork_cidr_range         = "10.160.0.0/20"
+batch_router_name                   = "form-sender-batch-router"
+batch_nat_name                      = "form-sender-batch-nat"
+batch_nat_min_ports_per_vm          = 1024
+batch_nat_enable_endpoint_independent_mapping = true
+batch_nat_log_type                  = "ERRORS_ONLY"
 # Supabase のシークレットリソースパスが決まっている場合は配列に追加します（任意）
 # supabase_secret_names            = [
 #   "projects/your-project-id/secrets/form_sender_supabase_url/versions/latest",

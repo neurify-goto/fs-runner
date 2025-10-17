@@ -2,11 +2,11 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = ">= 5.17.0"
+      version = ">= 6.2.0"
     }
     google-beta = {
       source  = "hashicorp/google-beta"
-      version = ">= 5.17.0"
+      version = ">= 6.2.0"
     }
   }
 }
@@ -26,17 +26,17 @@ data "google_project" "current" {
 }
 
 locals {
-  dispatcher_sa_email   = "${var.service_account_id}@${var.project_id}.iam.gserviceaccount.com"
-  tasks_sa_email        = "${var.cloud_tasks_service_account_id}@${var.project_id}.iam.gserviceaccount.com"
-  cloud_tasks_service   = "service-${data.google_project.current.number}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
+  dispatcher_sa_email = "${var.service_account_id}@${var.project_id}.iam.gserviceaccount.com"
+  tasks_sa_email      = "${var.cloud_tasks_service_account_id}@${var.project_id}.iam.gserviceaccount.com"
+  cloud_tasks_service = "service-${data.google_project.current.number}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
 
   secret_env = {
-    DISPATCHER_SUPABASE_URL             = var.supabase_url_secret
+    DISPATCHER_SUPABASE_URL              = var.supabase_url_secret
     DISPATCHER_SUPABASE_SERVICE_ROLE_KEY = var.supabase_service_role_secret
   }
 
   optional_secret_env = {
-    DISPATCHER_SUPABASE_URL_TEST             = var.supabase_url_test_secret
+    DISPATCHER_SUPABASE_URL_TEST              = var.supabase_url_test_secret
     DISPATCHER_SUPABASE_SERVICE_ROLE_KEY_TEST = var.supabase_service_role_test_secret
   }
 
@@ -47,30 +47,33 @@ locals {
   all_secret_env = merge(local.secret_env, local.filtered_optional_secret_env)
 
   base_env = {
-    DISPATCHER_PROJECT_ID                       = var.project_id
-    DISPATCHER_LOCATION                         = var.region
-    FORM_SENDER_CLOUD_RUN_JOB                   = var.cloud_run_job_name
-    FORM_SENDER_CLIENT_CONFIG_BUCKET            = var.client_config_bucket
-    FORM_SENDER_SIGNED_URL_TTL_HOURS            = tostring(var.signed_url_ttl_hours)
-    FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD    = tostring(var.signed_url_refresh_threshold_seconds)
-    FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH      = tostring(var.signed_url_ttl_hours_batch)
-    FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH = tostring(var.signed_url_refresh_threshold_batch)
-    FORM_SENDER_DISPATCHER_BASE_URL             = var.dispatcher_base_url
-    FORM_SENDER_DISPATCHER_AUDIENCE             = var.dispatcher_audience
-    FORM_SENDER_BATCH_PROJECT_ID                = var.project_id
-    FORM_SENDER_BATCH_LOCATION                  = var.region
-    FORM_SENDER_BATCH_JOB_TEMPLATE              = var.batch_job_template_name
-    FORM_SENDER_BATCH_TASK_GROUP                = var.batch_task_group_name
-    FORM_SENDER_BATCH_SERVICE_ACCOUNT           = var.batch_service_account_email
-    FORM_SENDER_BATCH_CONTAINER_IMAGE           = var.batch_container_image
-    FORM_SENDER_BATCH_ENTRYPOINT                = var.batch_container_entrypoint
-    FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT      = var.batch_machine_type_default
-    FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT   = tostring(var.batch_vcpu_per_worker_default)
-    FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT = tostring(var.batch_memory_per_worker_mb_default)
-    FORM_SENDER_BATCH_SUPABASE_URL_SECRET       = var.supabase_url_secret
-    FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET = var.supabase_service_role_secret
-    FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET  = var.supabase_url_test_secret
+    DISPATCHER_PROJECT_ID                               = var.project_id
+    DISPATCHER_LOCATION                                 = var.region
+    FORM_SENDER_CLOUD_RUN_JOB                           = var.cloud_run_job_name
+    FORM_SENDER_CLIENT_CONFIG_BUCKET                    = var.client_config_bucket
+    FORM_SENDER_SIGNED_URL_TTL_HOURS                    = tostring(var.signed_url_ttl_hours)
+    FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD            = tostring(var.signed_url_refresh_threshold_seconds)
+    FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH              = tostring(var.signed_url_ttl_hours_batch)
+    FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH      = tostring(var.signed_url_refresh_threshold_batch)
+    FORM_SENDER_DISPATCHER_BASE_URL                     = var.dispatcher_base_url
+    FORM_SENDER_DISPATCHER_AUDIENCE                     = var.dispatcher_audience
+    FORM_SENDER_BATCH_PROJECT_ID                        = var.project_id
+    FORM_SENDER_BATCH_LOCATION                          = var.region
+    FORM_SENDER_BATCH_JOB_TEMPLATE                      = var.batch_job_template_name
+    FORM_SENDER_BATCH_TASK_GROUP                        = var.batch_task_group_name
+    FORM_SENDER_BATCH_SERVICE_ACCOUNT                   = var.batch_service_account_email
+    FORM_SENDER_BATCH_CONTAINER_IMAGE                   = var.batch_container_image
+    FORM_SENDER_BATCH_ENTRYPOINT                        = var.batch_container_entrypoint
+    FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT              = var.batch_machine_type_default
+    FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT           = tostring(var.batch_vcpu_per_worker_default)
+    FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT      = tostring(var.batch_memory_per_worker_mb_default)
+    FORM_SENDER_BATCH_SUPABASE_URL_SECRET               = var.supabase_url_secret
+    FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET      = var.supabase_service_role_secret
+    FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET          = var.supabase_url_test_secret
     FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_TEST_SECRET = var.supabase_service_role_test_secret
+    FORM_SENDER_BATCH_NETWORK                           = var.batch_network
+    FORM_SENDER_BATCH_SUBNETWORK                        = var.batch_subnetwork
+    FORM_SENDER_BATCH_NO_EXTERNAL_IP                    = var.batch_no_external_ip ? "true" : "false"
   }
 
   merged_env = merge(local.base_env, var.extra_env)
@@ -118,7 +121,7 @@ resource "google_service_account_iam_member" "tasks_token_creator" {
 }
 
 resource "google_cloud_tasks_queue" "dispatcher" {
-  name     = "projects/${var.project_id}/locations/${var.region}/queues/${var.cloud_tasks_queue_id}"
+  name = "projects/${var.project_id}/locations/${var.region}/queues/${var.cloud_tasks_queue_id}"
   rate_limits {
     max_dispatches_per_second = var.cloud_tasks_max_dispatches_per_second
     max_concurrent_dispatches = var.cloud_tasks_max_concurrent_dispatches

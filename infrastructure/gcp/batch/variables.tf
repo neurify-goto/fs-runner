@@ -57,7 +57,55 @@ variable "max_parallelism_default" {
 variable "machine_type" {
   type        = string
   description = "Default machine type for Cloud Batch jobs"
-  default     = "n2d-custom-4-10240"
+  default     = "e2-standard-2"
+}
+
+variable "batch_network_name" {
+  type        = string
+  description = "Name of the dedicated VPC network for Cloud Batch workers"
+  default     = "form-sender-batch-vpc"
+}
+
+variable "batch_subnetwork_name" {
+  type        = string
+  description = "Name of the subnetwork used by Cloud Batch workers"
+  default     = "form-sender-batch-subnet"
+}
+
+variable "batch_subnetwork_cidr_range" {
+  type        = string
+  description = "CIDR range for the Batch worker subnetwork"
+  default     = "10.160.0.0/20"
+}
+
+variable "batch_router_name" {
+  type        = string
+  description = "Name of the Cloud Router supporting Cloud NAT"
+  default     = "form-sender-batch-router"
+}
+
+variable "batch_nat_name" {
+  type        = string
+  description = "Name of the Cloud NAT gateway for Batch workers"
+  default     = "form-sender-batch-nat"
+}
+
+variable "batch_nat_min_ports_per_vm" {
+  type        = number
+  description = "Minimum number of NAT ports allocated per VM"
+  default     = 512
+}
+
+variable "batch_nat_enable_endpoint_independent_mapping" {
+  type        = bool
+  description = "Whether to enable endpoint independent mapping on Cloud NAT"
+  default     = true
+}
+
+variable "batch_nat_log_type" {
+  type        = string
+  description = "Logging configuration for Cloud NAT (errors-only or all)"
+  default     = "ERRORS_ONLY"
 }
 
 variable "batch_service_account_id" {
