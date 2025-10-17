@@ -1,0 +1,76 @@
+{
+  "taskGroups": [
+    {
+      "taskCount": 1,
+      "parallelism": 1,
+      "taskSpec": {
+        "runnables": [
+          {
+            "container": {
+              "imageUri": "asia-northeast1-docker.pkg.dev/formsales-460604/form-sender-runner/playwright:latest"
+            }
+          }
+        ],
+        "computeResource": {
+          "cpuMilli": 2000,
+          "memoryMib": 6144
+        },
+        "maxRetryCount": 4,
+        "maxRunDuration": "14400s",
+        "environment": {
+          "variables": {
+            "FORM_SENDER_ENV": "gcp_batch",
+            "FORM_SENDER_LOG_SANITIZE": "1",
+            "FORM_SENDER_DISPATCHER_BASE_URL": "https://form-sender-621668223275.asia-northeast1.run.app",
+            "FORM_SENDER_DISPATCHER_AUDIENCE": "https://form-sender-621668223275.asia-northeast1.run.app",
+            "FORM_SENDER_CLIENT_CONFIG_BUCKET": "formsales-form-sender-client-config",
+            "FORM_SENDER_CLIENT_CONFIG_PATH": "/tmp/client_config.json",
+            "FORM_SENDER_SIGNED_URL_TTL_HOURS_BATCH": "48",
+            "FORM_SENDER_SIGNED_URL_REFRESH_THRESHOLD_BATCH": "21600",
+            "FORM_SENDER_BATCH_PROJECT_ID": "formsales-460604",
+            "FORM_SENDER_BATCH_LOCATION": "asia-northeast1",
+            "FORM_SENDER_BATCH_SERVICE_ACCOUNT": "form-sender-batch@formsales-460604.iam.gserviceaccount.com",
+            "FORM_SENDER_BATCH_CONTAINER_IMAGE": "asia-northeast1-docker.pkg.dev/formsales-460604/form-sender-runner/playwright:latest",
+            "FORM_SENDER_BATCH_ENTRYPOINT": "",
+            "FORM_SENDER_BATCH_NETWORK": "projects/formsales-460604/global/networks/form-sender-batch-vpc",
+            "FORM_SENDER_BATCH_SUBNETWORK": "projects/formsales-460604/regions/asia-northeast1/subnetworks/form-sender-batch-subnet",
+            "FORM_SENDER_BATCH_NO_EXTERNAL_IP": "true",
+            "FORM_SENDER_BATCH_MACHINE_TYPE_DEFAULT": "e2-standard-2",
+            "FORM_SENDER_BATCH_VCPU_PER_WORKER_DEFAULT": "1",
+            "FORM_SENDER_BATCH_MEMORY_PER_WORKER_MB_DEFAULT": "2048",
+            "FORM_SENDER_BATCH_MEMORY_BUFFER_MB_DEFAULT": "2048",
+            "FORM_SENDER_BATCH_MAX_ATTEMPTS_DEFAULT": "1"
+          },
+          "secretVariables": {
+            "SUPABASE_URL": "projects/621668223275/secrets/form_sender_supabase_url/versions/latest",
+            "SUPABASE_SERVICE_ROLE_KEY": "projects/621668223275/secrets/form_sender_supabase_service_role/versions/latest"
+          }
+        }
+      }
+    }
+  ],
+  "allocationPolicy": {
+    "instances": [
+      {
+        "policy": {
+          "machineType": "e2-standard-2"
+        }
+      }
+    ],
+    "serviceAccount": {
+      "email": "form-sender-batch@formsales-460604.iam.gserviceaccount.com"
+    },
+    "network": {
+      "networkInterfaces": [
+        {
+          "network": "projects/formsales-460604/global/networks/form-sender-batch-vpc",
+          "subnetwork": "projects/formsales-460604/regions/asia-northeast1/subnetworks/form-sender-batch-subnet",
+          "noExternalIpAddress": true
+        }
+      ]
+    }
+  },
+  "logsPolicy": {
+    "destination": "CLOUD_LOGGING"
+  }
+}
