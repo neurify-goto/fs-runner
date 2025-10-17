@@ -130,6 +130,8 @@ jobs:
           echo "job_template_name=$(jq -r '.batch_job_template_name.value' /tmp/batch_outputs.json)" >> $GITHUB_OUTPUT
           echo "task_group_name=$(jq -r '.batch_task_group_name.value' /tmp/batch_outputs.json)" >> $GITHUB_OUTPUT
           echo "batch_service_account=$(jq -r '.batch_runner_service_account_email.value' /tmp/batch_outputs.json)" >> $GITHUB_OUTPUT
+          echo "batch_network=$(jq -r '.batch_network.value' /tmp/batch_outputs.json)" >> $GITHUB_OUTPUT
+          echo "batch_subnetwork=$(jq -r '.batch_subnetwork.value' /tmp/batch_outputs.json)" >> $GITHUB_OUTPUT
 
       - name: Terraform Init (dispatcher)
         working-directory: ${{ env.DISPATCHER_TERRAFORM_WORKDIR }}
@@ -162,6 +164,8 @@ jobs:
             -var="batch_job_template_name=${{ steps.batch_outputs.outputs.job_template_name }}" \
             -var="batch_task_group_name=${{ steps.batch_outputs.outputs.task_group_name }}" \
             -var="batch_service_account_email=${{ steps.batch_outputs.outputs.batch_service_account }}" \
+            -var="batch_network=${{ steps.batch_outputs.outputs.batch_network }}" \
+            -var="batch_subnetwork=${{ steps.batch_outputs.outputs.batch_subnetwork }}" \
             -var="batch_container_image=${IMAGE_NAME}:$GITHUB_SHA"
 
       - name: Terraform Apply (dispatcher)
@@ -191,6 +195,8 @@ jobs:
             -var="batch_job_template_name=${{ steps.batch_outputs.outputs.job_template_name }}" \
             -var="batch_task_group_name=${{ steps.batch_outputs.outputs.task_group_name }}" \
             -var="batch_service_account_email=${{ steps.batch_outputs.outputs.batch_service_account }}" \
+            -var="batch_network=${{ steps.batch_outputs.outputs.batch_network }}" \
+            -var="batch_subnetwork=${{ steps.batch_outputs.outputs.batch_subnetwork }}" \
             -var="batch_container_image=${IMAGE_NAME}:$GITHUB_SHA"
 
       - name: Deploy dispatcher image

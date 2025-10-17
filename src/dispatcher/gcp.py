@@ -630,7 +630,7 @@ class CloudBatchJobRunner:
         requested_machine_type = batch_opts.machine_type if batch_opts and batch_opts.machine_type else None
         machine_type = requested_machine_type or self._settings.batch_machine_type_default
         if not machine_type:
-            machine_type = f"n2d-custom-{vcpu}-{memory_mb}"
+            machine_type = f"e2-custom-{vcpu}-{memory_mb}"
 
         prefer_spot = batch_opts.prefer_spot if batch_opts else True
         allow_on_demand = batch_opts.allow_on_demand_fallback if batch_opts else True
@@ -639,15 +639,21 @@ class CloudBatchJobRunner:
 
         parsed = self._parse_custom_machine_type(machine_type)
         needs_fallback = False
+        normalized_type = machine_type.strip().lower()
+        fallback_family = "n2d"
         if parsed:
             machine_vcpu, machine_memory = parsed
             if machine_vcpu < vcpu or machine_memory < memory_mb:
                 needs_fallback = True
+            if normalized_type.startswith("n2-"):
+                fallback_family = "n2"
+            elif normalized_type.startswith("n2d-"):
+                fallback_family = "n2d"
         else:
             # Non-custom machine types (e.g., e2-standard-2/8). Apply fallback if requirements exceed capacity.
-            normalized_type = machine_type.strip().lower()
             standard_match = re.match(r"^(?P<family>n2d|n2|e2)-standard-(\d+)$", normalized_type)
             if standard_match:
+                standard_family = standard_match.group("family")
                 try:
                     machine_vcpu = int(standard_match.group(2))
                 except ValueError:
@@ -657,6 +663,10 @@ class CloudBatchJobRunner:
                     machine_memory = machine_vcpu * 4096  # standard tiers provide 4 GiB per vCPU
                     if machine_vcpu < vcpu or memory_mb > machine_memory:
                         needs_fallback = True
+                if standard_family in {"n2", "n2d"}:
+                    fallback_family = standard_family
+                else:
+                    fallback_family = "n2d"
             elif (
                 normalized_type.startswith("n2d-standard-2")
                 or normalized_type.startswith("e2-standard-2")
@@ -666,7 +676,7 @@ class CloudBatchJobRunner:
         if needs_fallback:
             fallback_memory = max(memory_mb, 10240)
             fallback_vcpu = max(vcpu, 4)
-            fallback_type = f"n2d-custom-{fallback_vcpu}-{fallback_memory}"
+            fallback_type = f"{fallback_family}-custom-{fallback_vcpu}-{fallback_memory}"
             logger.warning(
                 "Requested Batch machine_type '%s' insufficient for workers=%s (required_memory_mb=%s). "
                 "Falling back to %s.",
@@ -740,6 +750,17 @@ class CloudBatchJobRunner:
             )
         ]
 
+        network_policy = None
+        if self._settings.batch_network and self._settings.batch_subnetwork:
+            network_interface = batch_v1.AllocationPolicy.NetworkInterface(
+                network=self._settings.batch_network,
+                subnetwork=self._settings.batch_subnetwork,
+                no_external_ip_address=self._settings.batch_no_external_ip,
+            )
+            network_policy = batch_v1.AllocationPolicy.NetworkPolicy(
+                network_interfaces=[network_interface]
+            )
+
         service_account = None
         if self._settings.batch_service_account_email:
             service_account = batch_v1.ServiceAccount(
@@ -749,6 +770,7 @@ class CloudBatchJobRunner:
         return batch_v1.AllocationPolicy(
             instances=instances,
             service_account=service_account,
+            network=network_policy,
         )
 
     def _should_retry_with_on_demand(self, exc: gcloud_exceptions.GoogleAPICallError) -> bool:

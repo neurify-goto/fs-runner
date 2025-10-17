@@ -40,6 +40,9 @@ class DispatcherSettings:
     batch_supabase_service_role_secret: Optional[str] = None
     batch_supabase_url_test_secret: Optional[str] = None
     batch_supabase_service_role_test_secret: Optional[str] = None
+    batch_network: Optional[str] = None
+    batch_subnetwork: Optional[str] = None
+    batch_no_external_ip: bool = True
     batch_monitor_interval_seconds: int = 60
     batch_monitor_timeout_seconds: int = 18000
 
@@ -55,6 +58,8 @@ class DispatcherSettings:
             "batch_container_image": "FORM_SENDER_BATCH_CONTAINER_IMAGE",
             "batch_supabase_url_secret": "FORM_SENDER_BATCH_SUPABASE_URL_SECRET",
             "batch_supabase_service_role_secret": "FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET",
+            "batch_network": "FORM_SENDER_BATCH_NETWORK",
+            "batch_subnetwork": "FORM_SENDER_BATCH_SUBNETWORK",
         }
         missing = [env for attr, env in required_fields.items() if not getattr(self, attr)]
         if missing:
@@ -131,6 +136,17 @@ class DispatcherSettings:
             except ValueError as exc:
                 raise RuntimeError(f"環境変数 {name} は整数で指定してください") from exc
 
+        def get_bool(name: str, default: bool) -> bool:
+            value = os.getenv(name)
+            if value in (None, ""):
+                return default
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+            raise RuntimeError(f"環境変数 {name} は true/false で指定してください")
+
         dispatcher_base_url = os.getenv("FORM_SENDER_DISPATCHER_BASE_URL", "") or ""
         dispatcher_audience = os.getenv("FORM_SENDER_DISPATCHER_AUDIENCE", "") or ""
         dispatcher_url = os.getenv("FORM_SENDER_DISPATCHER_URL")
@@ -181,6 +197,9 @@ class DispatcherSettings:
             batch_supabase_service_role_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_SECRET"),
             batch_supabase_url_test_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_URL_TEST_SECRET"),
             batch_supabase_service_role_test_secret=os.getenv("FORM_SENDER_BATCH_SUPABASE_SERVICE_ROLE_TEST_SECRET"),
+            batch_network=os.getenv("FORM_SENDER_BATCH_NETWORK"),
+            batch_subnetwork=os.getenv("FORM_SENDER_BATCH_SUBNETWORK"),
+            batch_no_external_ip=get_bool("FORM_SENDER_BATCH_NO_EXTERNAL_IP", True),
             batch_monitor_interval_seconds=monitor_interval,
             batch_monitor_timeout_seconds=monitor_timeout,
         )

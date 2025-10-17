@@ -28,6 +28,22 @@ const CONFIG = {
 
 var __HOLIDAY_CACHE = {};
 
+/**
+ * Fisher-Yates方式で配列をシャッフルして新しい順序を返す
+ * @param {Array} items 元の配列
+ * @returns {Array} シャッフル済みの新しい配列
+ */
+function shuffleArray_(items) {
+  const cloned = Array.isArray(items) ? items.slice() : [];
+  for (let i = cloned.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const temp = cloned[i];
+    cloned[i] = cloned[j];
+    cloned[j] = temp;
+  }
+  return cloned;
+}
+
 function startFormSenderFromTrigger() {
   console.log('時間ベースのトリガーによりフォーム送信制御を開始します（新アーキテクチャ版）');
 
@@ -67,11 +83,19 @@ function startFormSenderFromTrigger() {
       };
     }
 
-    console.log(`${activeTargetings.length} 件のアクティブなターゲティングを処理開始`);
+    const randomizedTargetings = shuffleArray_(activeTargetings);
+    console.log(`${randomizedTargetings.length} 件のアクティブなターゲティングをランダム順で処理開始`);
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'form_sender_targeting_order_randomized',
+        targeting_order: randomizedTargetings.map(t => t.targeting_id)
+      }));
+    } catch (_) {}
     registerFormSenderSessionStart('startFormSenderFromTrigger', { reset: true });
     let triggeredCount = 0;
 
-    for (const targeting of activeTargetings) {
+    for (const targeting of randomizedTargetings) {
       try {
         const result = processTargeting(targeting.targeting_id, { useExtra: targeting.use_extra_table === true });
         if (result && result.success) {
@@ -266,7 +290,16 @@ function startFormSenderAll() {
     }
     registerFormSenderSessionStart('startFormSenderAll', { reset: true });
     let triggered = 0;
-    for (const t of activeTargetings) {
+    const randomizedTargetings = shuffleArray_(activeTargetings);
+    console.log(`${randomizedTargetings.length} 件のアクティブターゲティングをランダム順で処理`);
+    try {
+      console.log(JSON.stringify({
+        level: 'debug',
+        event: 'form_sender_manual_targeting_order_randomized',
+        targeting_order: randomizedTargetings.map(t => t.targeting_id)
+      }));
+    } catch (_) {}
+    for (const t of randomizedTargetings) {
       try {
         const r = processTargeting(t.targeting_id, { useExtra: t.use_extra_table === true });
         if (r && r.success) triggered++;
